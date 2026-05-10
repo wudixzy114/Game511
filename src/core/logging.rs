@@ -1,0 +1,148 @@
+use std::{
+    fs::{self, File},
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
+};
+
+use tracing_subscriber::{
+    EnvFilter, Layer, Registry,
+    fmt::{self, writer::BoxMakeWriter},
+    layer::SubscriberExt,
+};
+
+use super::{config::AppConfig, error::DaoError};
+
+#[derive(Clone)]
+struct SharedFileWriter {
+    file: Arc<File>,
+}
+
+impl std::io::Write for SharedFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        (&*self.file).write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&*self.file).flush()
+    }
+}
+
+static LOG_GUARDS: OnceLock<Vec<tracing_appender::non_blocking::WorkerGuard>> = OnceLock::new();
+
+pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
+    let log_dir = &config.log_directory;
+    fs::create_dir_all(log_dir).map_err(|source| DaoError::CreateDirectory {
+        path: log_dir.clone(),
+        source,
+    })?;
+
+    let app_log = rolling_path(log_dir, "application.log");
+    let error_log = rolling_path(log_dir, "error.log");
+    let perf_log = rolling_path(log_dir, &config.performance_log_name);
+
+    let appender = tracing_appender::rolling::daily(log_dir, "application.log");
+    let error_file = File::options()
+        .create(true)
+        .append(true)
+        .open(&error_log)
+        .map_err(|source| DaoError::CreateLogFile {
+            path: error_log.clone(),
+            source,
+        })?;
+    let perf_file = File::options()
+        .create(true)
+        .append(true)
+        .open(&perf_log)
+        .map_err(|source| DaoError::CreateLogFile {
+            path: perf_log.clone(),
+            source,
+        })?;
+
+    let (app_writer, app_guard) = tracing_appender::non_blocking(appender);
+    let (error_writer, error_guard) = tracing_appender::non_blocking(SharedFileWriter {
+        file: Arc::new(error_file),
+    });
+    let (perf_writer, perf_guard) = tracing_appender::non_blocking(SharedFileWriter {
+        file: Arc::new(perf_file),
+    });
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,dao_game=debug,wgpu=warn,naga=warn"));
+
+    let app_layer = fmt::layer()
+        .with_writer(app_writer)
+        .with_ansi(false)
+        .with_filter(env_filter);
+    let error_layer = fmt::layer()
+        .with_writer(error_writer)
+        .with_ansi(false)
+        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.level() <= &tracing::Level::ERROR
+        }));
+    let perf_layer = fmt::layer()
+        .json()
+        .with_writer(BoxMakeWriter::new(perf_writer))
+        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.target().starts_with("dao_game::performance")
+        }));
+
+    tracing::subscriber::set_global_default(
+        Registry::default()
+            .with(app_layer)
+            .with(error_layer)
+            .with(perf_layer),
+    )?;
+
+    LOG_GUARDS
+        .set(vec![app_guard, error_guard, perf_guard])
+        .ok();
+
+    tracing::info!(target: "dao_game::bootstrap", log_file = %app_log.display(), "logging initialized");
+    Ok(())
+}
+
+fn rolling_path(directory: &Path, file_name: &str) -> PathBuf {
+    directory.join(file_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::core::config::{AppConfig, QualityConfig, SignConfig, WorldConfig};
+
+    use super::rolling_path;
+
+    #[test]
+    fn rolling_path_joins_directory_and_filename() {
+        let path = rolling_path(&PathBuf::from("logs"), "application.log");
+        assert_eq!(path, PathBuf::from("logs").join("application.log"));
+    }
+
+    #[test]
+    fn config_clone_can_prepare_log_directory() {
+        let config = AppConfig {
+            window_title: "Dao".to_string(),
+            log_directory: PathBuf::from("logs"),
+            performance_log_name: "performance.log".to_string(),
+            frame_log_interval: 60,
+            world: WorldConfig {
+                seed: 1,
+                world_radius: 1,
+                terrain_scale: 1.0,
+                height_variation: 1.0,
+                water_level: 0.0,
+            },
+            signs: SignConfig {
+                resonance_threshold: 0.5,
+                calm_recovery: 0.01,
+            },
+            quality: QualityConfig {
+                target_fps: 60.0,
+                frame_time_budget_ms: 16.6,
+            },
+        };
+
+        assert_eq!(config.log_directory, PathBuf::from("logs"));
+    }
+}

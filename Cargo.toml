@@ -1,0 +1,37 @@
+[package]
+name = "dao_game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.18.1", default-features = false, features = [
+    "bevy_asset",
+    "bevy_color",
+    "bevy_core_pipeline",
+    "bevy_gilrs",
+    "bevy_gizmos",
+    "bevy_pbr",
+    "bevy_render",
+    "bevy_scene",
+    "bevy_sprite",
+    "bevy_state",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_window",
+    "bevy_winit",
+    "multi_threaded",
+    "png",
+    "tonemapping_luts",
+    "x11",
+    "wayland",
+    "zstd_rust",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.9.8"
+tracing = "0.1.41"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json", "time"] }
+thiserror = "2.0.18"
+
+[dev-dependencies]
+tempfile = "3.23.0"

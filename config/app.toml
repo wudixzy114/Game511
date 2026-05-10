@@ -1,0 +1,19 @@
+window_title = "Dao: Emergent Journey"
+log_directory = "logs"
+performance_log_name = "performance.log"
+frame_log_interval = 120
+
+[world]
+seed = 511
+world_radius = 5
+terrain_scale = 7.5
+height_variation = 3.4
+water_level = -0.2
+
+[signs]
+resonance_threshold = 0.72
+calm_recovery = 0.018
+
+[quality]
+target_fps = 60.0
+frame_time_budget_ms = 16.6
