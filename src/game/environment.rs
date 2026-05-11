@@ -8,6 +8,7 @@ use bevy::{
     prelude::*,
 };
 
+use crate::core::performance::{FramePerformance, PerformancePhase};
 use crate::game::{
     flow::{AppScreen, InGameState},
     world::{SunLight, WorldCamera, WorldCycle, WorldPresentationControl},
@@ -27,12 +28,15 @@ impl Plugin for EnvironmentPlugin {
         app.add_systems(
             Update,
             (
+                begin_environment_phase,
                 advance_weather_state,
                 sync_environment_anchors,
                 update_atmosphere_and_fog,
                 update_celestial_visuals,
                 animate_weather_particles,
+                end_environment_phase,
             )
+                .chain()
                 .run_if(in_state(InGameState::Running)),
         );
         app.add_systems(OnExit(AppScreen::InGame), cleanup_environment_session);
@@ -164,8 +168,8 @@ struct EnvironmentFrame {
 const SKY_RADIUS: f32 = 360.0;
 const SUN_DISC_SCALE: f32 = 11.0;
 const MOON_DISC_SCALE: f32 = 8.2;
-const STAR_COUNT: u32 = 96;
-const PARTICLE_COUNT: u32 = 96;
+const STAR_COUNT: u32 = 220;
+const PARTICLE_COUNT: u32 = 240;
 const WEATHER_RADIUS: f32 = 20.0;
 const WEATHER_TOP: f32 = 16.0;
 const WEATHER_BOTTOM: f32 = -3.0;
@@ -179,6 +183,14 @@ const WEATHER_SEQUENCE: [WeatherKind; 6] = [
     WeatherKind::Clear,
     WeatherKind::Snow,
 ];
+
+fn begin_environment_phase(mut performance: ResMut<FramePerformance>) {
+    performance.begin_phase(PerformancePhase::Environment);
+}
+
+fn end_environment_phase(mut performance: ResMut<FramePerformance>) {
+    let _ = performance.end_phase(PerformancePhase::Environment);
+}
 
 fn reset_environment_state(
     mut weather_state: ResMut<WeatherState>,

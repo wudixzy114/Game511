@@ -1,7 +1,10 @@
 use bevy::prelude::*;
 
 use crate::{
-    core::config::{AppConfig, SignConfig},
+    core::{
+        config::{AppConfig, SignConfig},
+        performance::{FramePerformance, PerformancePhase},
+    },
     game::{
         flow::{AppScreen, InGameState},
         world::{BiomeKind, TerrainTile, WandererPrototype, WorldCycle, WorldMap},
@@ -132,8 +135,10 @@ fn update_resonance(
     world_map: Res<WorldMap>,
     cycle: Res<WorldCycle>,
     presence: Res<WandererPresence>,
+    mut performance: ResMut<FramePerformance>,
     mut signs: ResMut<SignState>,
 ) {
+    let started_at = std::time::Instant::now();
     let Some(tile) = presence.tile else {
         return;
     };
@@ -165,6 +170,7 @@ fn update_resonance(
         );
     }
     *signs = update.state;
+    performance.record_phase_duration(PerformancePhase::Signs, started_at.elapsed());
 }
 
 fn project_omen_feedback(

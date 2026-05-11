@@ -4,6 +4,7 @@ use bevy::{
 };
 use std::{fs, path::PathBuf};
 
+use crate::core::performance::{FramePerformance, PerformancePhase};
 use crate::game::{
     flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
     signs::{OmenKind, SignState},
@@ -670,20 +671,25 @@ fn toggle_pause_with_escape(
 }
 
 fn update_hud_control_text(
+    mut performance: ResMut<FramePerformance>,
     session_mode: Res<SessionMode>,
     mut controls_query: Query<&mut Text, With<HudControlText>>,
 ) {
+    let started_at = std::time::Instant::now();
     let Some(mut controls_text) = controls_query.iter_mut().next() else {
         return;
     };
     controls_text.0 = control_hint(*session_mode).to_string();
+    performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
 fn update_hud_stats_text(
+    mut performance: ResMut<FramePerformance>,
     resources: HudResources<'_>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     mut stats_query: Query<&mut Text, With<HudStatsText>>,
 ) {
+    let started_at = std::time::Instant::now();
     let (_, cycle, signs, world_map) = resources;
 
     let status_line = if let (Some(cycle), Some(world_map), Some(transform)) = (
@@ -722,13 +728,16 @@ fn update_hud_stats_text(
         return;
     };
     stats_text.0 = format!("{status_line}\n{resonance_line}");
+    performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
 fn update_hud_omen_text(
+    mut performance: ResMut<FramePerformance>,
     signs: Option<Res<SignState>>,
     mut omen_text_query: Query<&mut Text, With<HudOmenText>>,
     mut omen_container_query: Query<&mut Visibility, With<HudOmenContainer>>,
 ) {
+    let started_at = std::time::Instant::now();
     let Some(mut visibility) = omen_container_query.iter_mut().next() else {
         return;
     };
@@ -742,6 +751,7 @@ fn update_hud_omen_text(
         omen_text.0.clear();
         *visibility = Visibility::Hidden;
     }
+    performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
 fn update_crosshair_visibility(

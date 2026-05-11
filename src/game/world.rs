@@ -11,7 +11,7 @@ use std::{
 use bevy::{
     asset::RenderAssetUsages,
     math::primitives::{Capsule3d, Cylinder},
-    mesh::{Indices, PrimitiveTopology},
+    mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::MeshMaterial3d,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
@@ -19,7 +19,7 @@ use bevy::{
 
 use crate::core::{
     config::{AppConfig, WorldConfig},
-    performance::FramePerformance,
+    performance::{FramePerformance, PerformancePhase},
 };
 use crate::game::{
     environment::WeatherKind,
@@ -140,7 +140,7 @@ pub struct WorldCamera;
 #[derive(Debug, Component)]
 pub(crate) struct SunLight;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BiomeKind {
     Water,
     Meadow,
@@ -260,11 +260,20 @@ struct DetailMaterials {
 }
 
 #[derive(Debug, Resource, Clone)]
-struct DetailMeshes {
-    grove: Handle<Mesh>,
-    meadow: Handle<Mesh>,
-    steppe: Handle<Mesh>,
-    ridge: Handle<Mesh>,
+struct DetailMeshBlueprints {
+    grove: DetailMeshBlueprint,
+    meadow: DetailMeshBlueprint,
+    steppe: DetailMeshBlueprint,
+    ridge: DetailMeshBlueprint,
+}
+
+#[derive(Debug, Clone)]
+struct DetailMeshBlueprint {
+    positions: Vec<[f32; 3]>,
+    normals: Option<Vec<[f32; 3]>>,
+    uvs: Option<Vec<[f32; 2]>>,
+    indices: Vec<u32>,
+    vertical_offset: f32,
 }
 
 #[derive(Debug, Resource, Clone, Copy)]
@@ -359,6 +368,7 @@ struct TerrainCollisionConfig {
     subdivisions: u32,
     build_budget_per_frame: usize,
     cache_capacity: usize,
+    integrate_budget_per_frame: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -552,7 +562,7 @@ impl TerrainCollisionProxy {
 #[derive(Debug, Clone)]
 struct CachedTerrainChunk {
     mesh: Handle<Mesh>,
-    scatter: Vec<ScatterPlacement>,
+    scatter_meshes: HashMap<BiomeKind, Handle<Mesh>>,
     last_used_tick: u64,
 }
 
@@ -563,24 +573,10 @@ struct TerrainChunkCache {
 }
 
 impl TerrainChunkCache {
-    fn get_or_build(
-        &mut self,
-        key: TerrainChunkKey,
-        context: &TerrainChunkBuildContext<'_>,
-        mesh: Handle<Mesh>,
-        scatter: Vec<ScatterPlacement>,
-    ) -> CachedTerrainChunk {
+    fn insert(&mut self, key: TerrainChunkKey, cached: CachedTerrainChunk) -> CachedTerrainChunk {
         self.tick = self.tick.wrapping_add(1);
-        let _ = context;
-        if let Some(cached) = self.chunks.get_mut(&key) {
-            cached.last_used_tick = self.tick;
-            return cached.clone();
-        }
-        let cached = CachedTerrainChunk {
-            mesh,
-            scatter,
-            last_used_tick: self.tick,
-        };
+        let mut cached = cached;
+        cached.last_used_tick = self.tick;
         self.chunks.insert(key, cached.clone());
         cached
     }
@@ -618,6 +614,9 @@ impl TerrainChunkCache {
             }
             if let Some(cached) = self.chunks.remove(&coord) {
                 meshes.remove(cached.mesh.id());
+                for handle in cached.scatter_meshes.into_values() {
+                    meshes.remove(handle.id());
+                }
                 evicted += 1;
             }
         }
@@ -629,14 +628,40 @@ impl TerrainChunkCache {
     }
 }
 
+#[derive(Debug)]
+struct TerrainCollisionRequest {
+    coord: WorldChunkCoord,
+    world_map: WorldMap,
+    subdivisions: u32,
+}
+
+#[derive(Debug)]
+struct GeneratedTerrainCollisionChunk {
+    coord: WorldChunkCoord,
+    chunk: TerrainCollisionChunk,
+}
+
+#[derive(Resource)]
+struct TerrainCollisionScheduler {
+    sender: Sender<TerrainCollisionRequest>,
+    receiver: Mutex<Receiver<GeneratedTerrainCollisionChunk>>,
+    in_flight: HashSet<WorldChunkCoord>,
+}
+
+impl Default for TerrainCollisionScheduler {
+    fn default() -> Self {
+        create_collision_scheduler()
+    }
+}
+
 type TerrainStreamResources<'w> = (
     Res<'w, AppConfig>,
-    Res<'w, FramePerformance>,
+    ResMut<'w, FramePerformance>,
     Res<'w, SessionMode>,
     Res<'w, WorldMap>,
     Res<'w, TerrainRuntimeMaterial>,
     Res<'w, DetailMaterials>,
-    Res<'w, DetailMeshes>,
+    Res<'w, DetailMeshBlueprints>,
     Res<'w, TerrainStreamingConfig>,
 );
 
@@ -665,6 +690,7 @@ type WorldStreamingBootstrapResources<'w> = (
     Res<'w, TerrainImpostorConfig>,
     ResMut<'w, TerrainImpostorState>,
     ResMut<'w, TerrainCollisionProxy>,
+    ResMut<'w, TerrainCollisionScheduler>,
     Res<'w, TerrainCollisionConfig>,
 );
 
@@ -1169,8 +1195,6 @@ struct ScatterPlacement {
 struct TerrainChunkSpawnContext<'a> {
     material: &'a Handle<StandardMaterial>,
     detail_materials: &'a DetailMaterials,
-    detail_meshes: &'a DetailMeshes,
-    spawn_scatter: bool,
     build_context: TerrainChunkBuildContext<'a>,
 }
 
@@ -1184,14 +1208,14 @@ struct TerrainChunkBuildContext<'a> {
 struct GeneratedTerrainChunk {
     key: TerrainChunkKey,
     mesh: Mesh,
-    scatter: Vec<ScatterPlacement>,
+    scatter_meshes: HashMap<BiomeKind, Mesh>,
 }
 
 #[derive(Debug)]
 struct TerrainGenerationRequest {
     key: TerrainChunkKey,
     world_map: WorldMap,
-    generate_scatter: bool,
+    detail_mesh_blueprints: DetailMeshBlueprints,
 }
 
 #[derive(Resource)]
@@ -1301,9 +1325,11 @@ fn create_terrain_material_texture(
             .min(config.world.terrain_subdivisions.max(1)),
         build_budget_per_frame: config.world.collision_chunk_budget.max(1) as usize,
         cache_capacity: config.world.collision_cache_capacity.max(1),
+        integrate_budget_per_frame: config.world.collision_chunk_budget.max(1) as usize,
     });
     commands.insert_resource(TerrainCollisionProxy::default());
     commands.insert_resource(create_generation_scheduler());
+    commands.insert_resource(create_collision_scheduler());
 }
 
 fn create_generation_scheduler() -> TerrainGenerationScheduler {
@@ -1319,20 +1345,45 @@ fn create_generation_scheduler() -> TerrainGenerationScheduler {
             let Some(mesh) = build_chunk_mesh_for_lod(&build_context, request.key) else {
                 continue;
             };
-            let scatter = if request.generate_scatter {
-                collect_scatter_placements_for_key(&build_context, request.key)
-            } else {
-                Vec::new()
-            };
+            let scatter_meshes = build_scatter_meshes_for_key(
+                &build_context,
+                request.key,
+                &request.detail_mesh_blueprints,
+            );
             let _ = result_sender.send(GeneratedTerrainChunk {
                 key: request.key,
                 mesh,
-                scatter,
+                scatter_meshes,
             });
         }
     });
 
     TerrainGenerationScheduler {
+        sender: request_sender,
+        receiver: Mutex::new(result_receiver),
+        in_flight: HashSet::new(),
+    }
+}
+
+fn create_collision_scheduler() -> TerrainCollisionScheduler {
+    let (request_sender, request_receiver) = mpsc::channel::<TerrainCollisionRequest>();
+    let (result_sender, result_receiver) = mpsc::channel::<GeneratedTerrainCollisionChunk>();
+
+    thread::spawn(move || {
+        while let Ok(request) = request_receiver.recv() {
+            let Some(chunk) =
+                build_collision_chunk(&request.world_map, request.coord, request.subdivisions)
+            else {
+                continue;
+            };
+            let _ = result_sender.send(GeneratedTerrainCollisionChunk {
+                coord: request.coord,
+                chunk,
+            });
+        }
+    });
+
+    TerrainCollisionScheduler {
         sender: request_sender,
         receiver: Mutex::new(result_receiver),
         in_flight: HashSet::new(),
@@ -1377,7 +1428,7 @@ fn spawn_light(mut commands: Commands) {
         Name::new("SunLight"),
         DespawnOnExit(AppScreen::InGame),
         DirectionalLight {
-            shadows_enabled: false,
+            shadows_enabled: true,
             illuminance: 18_000.0,
             ..Default::default()
         },
@@ -1399,6 +1450,7 @@ fn spawn_world(
         impostor_config,
         mut impostor_state,
         mut collision_proxy,
+        mut collision_scheduler,
         collision_config,
     ) = runtime_resources;
     let started_at = Instant::now();
@@ -1432,17 +1484,14 @@ fn spawn_world(
             ..Default::default()
         }),
     };
-    let detail_meshes = DetailMeshes {
-        meadow: meshes.add(Mesh::from(Capsule3d::new(0.09, 0.6))),
-        grove: meshes.add(Mesh::from(Cylinder::new(0.18, 1.8))),
-        steppe: meshes.add(Mesh::from(Cylinder::new(0.28, 0.42))),
-        ridge: meshes.add(Mesh::from(Cylinder::new(0.16, 2.4))),
+    let detail_mesh_blueprints = DetailMeshBlueprints {
+        meadow: detail_mesh_blueprint(Mesh::from(Capsule3d::new(0.09, 0.6)), 0.35),
+        grove: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.18, 1.8)), 0.92),
+        steppe: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.28, 0.42)), 0.18),
+        ridge: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.16, 2.4)), 1.15),
     };
-    let spawn_scatter = *session_mode == SessionMode::Exploration;
     let initial_center = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z);
-    let runtime_lod_config = lod_config_for_session(*lod_config, *session_mode);
-    let initial_targets =
-        chunk_targets_for_camera(&world_map, spots.meadow.position, runtime_lod_config);
+    let initial_targets = chunk_targets_for_camera(&world_map, spots.meadow.position, *lod_config);
     let critical_key = world_map
         .chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z)
         .map(|coord| TerrainChunkKey {
@@ -1452,8 +1501,6 @@ fn spawn_world(
     let spawn_context = TerrainChunkSpawnContext {
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
-        detail_meshes: &detail_meshes,
-        spawn_scatter,
         build_context: TerrainChunkBuildContext {
             world_map: &world_map,
             seed: seed.0,
@@ -1464,13 +1511,18 @@ fn spawn_world(
     if let Some(critical_key) = critical_key {
         let boot_mesh = build_chunk_mesh_for_lod(&spawn_context.build_context, critical_key)
             .expect("critical boot chunk should build");
-        let boot_scatter =
-            collect_scatter_placements_for_key(&spawn_context.build_context, critical_key);
-        let cached = chunk_cache.get_or_build(
-            critical_key,
+        let boot_scatter_meshes = build_scatter_meshes_for_key(
             &spawn_context.build_context,
-            meshes.add(boot_mesh),
-            boot_scatter,
+            critical_key,
+            &detail_mesh_blueprints,
+        );
+        let cached = chunk_cache.insert(
+            critical_key,
+            CachedTerrainChunk {
+                mesh: meshes.add(boot_mesh),
+                scatter_meshes: upload_scatter_meshes(&mut meshes, boot_scatter_meshes),
+                last_used_tick: 0,
+            },
         );
         spawn_cached_chunk(&mut commands, &spawn_context, critical_key, &cached, true);
         queued_targets.retain(|target| target.key != critical_key);
@@ -1483,7 +1535,7 @@ fn spawn_world(
     commands.insert_resource(TerrainStreamingQueue::from_targets(queued_targets));
     commands.insert_resource(chunk_cache);
     commands.insert_resource(detail_materials.clone());
-    commands.insert_resource(detail_meshes.clone());
+    commands.insert_resource(detail_mesh_blueprints.clone());
 
     let initial_collision_coords = if *session_mode == SessionMode::Exploration {
         let coords = collision_chunk_coords_for_position(
@@ -1491,17 +1543,25 @@ fn spawn_world(
             spots.meadow.position,
             collision_config.active_radius,
         );
-        for coord in &coords {
-            let Some(chunk) =
-                build_collision_chunk(&world_map, *coord, collision_config.subdivisions)
-            else {
-                continue;
-            };
-            collision_proxy.insert_chunk(*coord, chunk);
-        }
         collision_proxy.anchor = initial_center;
         collision_proxy.active = coords.clone();
+        let existing_set: HashSet<WorldChunkCoord> =
+            collision_proxy.chunks.keys().copied().collect();
         collision_proxy.pending.clear();
+        collision_proxy.enqueue_missing(coords.iter().copied(), &existing_set);
+        for coord in &coords {
+            if collision_scheduler
+                .sender
+                .send(TerrainCollisionRequest {
+                    coord: *coord,
+                    world_map: world_map.clone(),
+                    subdivisions: collision_config.subdivisions,
+                })
+                .is_ok()
+            {
+                collision_scheduler.in_flight.insert(*coord);
+            }
+        }
         coords
     } else {
         collision_proxy.anchor = None;
@@ -1511,12 +1571,8 @@ fn spawn_world(
     };
 
     if let Some(anchor) = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z)
-        && let Some(mesh) = build_terrain_impostor_mesh(
-            &world_map,
-            anchor,
-            runtime_lod_config.low_radius,
-            *impostor_config,
-        )
+        && let Some(mesh) =
+            build_terrain_impostor_mesh(&world_map, anchor, lod_config.low_radius, *impostor_config)
     {
         let mesh_handle = meshes.add(mesh);
         let entity = commands
@@ -1571,12 +1627,14 @@ fn spawn_world(
 
 fn update_visible_chunks(
     mut commands: Commands,
-    config: (Res<WorldMap>, Res<TerrainLodConfig>, Res<SessionMode>),
+    config: (Res<WorldMap>, Res<TerrainLodConfig>),
+    mut performance: ResMut<FramePerformance>,
     mut visibility_state: ResMut<ChunkVisibilityState>,
     mut queue: ResMut<TerrainStreamingQueue>,
     queries: ChunkVisibilityQueries<'_, '_>,
 ) {
-    let (world_map, lod_config, session_mode) = config;
+    let started_at = Instant::now();
+    let (world_map, lod_config) = config;
     let (chunk_query, detail_query, camera_query) = queries;
     let Some(camera_transform) = camera_query.iter().next() else {
         return;
@@ -1591,11 +1649,7 @@ fn update_visible_chunks(
         return;
     }
 
-    let targets = chunk_targets_for_center(
-        &world_map,
-        center,
-        lod_config_for_session(*lod_config, *session_mode),
-    );
+    let targets = chunk_targets_for_center(&world_map, center, *lod_config);
     let visible_set: HashSet<TerrainChunkKey> = targets.iter().map(|target| target.key).collect();
     let desired_visible_by_coord: HashMap<WorldChunkCoord, TerrainChunkKey> = targets
         .iter()
@@ -1633,6 +1687,7 @@ fn update_visible_chunks(
 
     visibility_state.active = targets;
     visibility_state.center = Some(center);
+    performance.record_phase_duration(PerformancePhase::WorldVisibility, started_at.elapsed());
 }
 
 fn stream_terrain_chunks(
@@ -1640,7 +1695,6 @@ fn stream_terrain_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     stream_state: TerrainStreamState<'_>,
     resources: TerrainStreamResources<'_>,
-    session_mode: Res<SessionMode>,
     visibility_state: Res<ChunkVisibilityState>,
     existing_chunks: Query<(Entity, &TerrainChunkEntity)>,
     existing_details: Query<(Entity, &TerrainDetailEntity)>,
@@ -1648,12 +1702,12 @@ fn stream_terrain_chunks(
     let (mut queue, mut cache, mut scheduler) = stream_state;
     let (
         config,
-        performance,
-        session_mode,
+        mut performance,
+        _session_mode,
         world_map,
         terrain_material,
         detail_materials,
-        detail_meshes,
+        detail_mesh_blueprints,
         streaming_config,
     ) = resources;
     let mut existing_set: HashSet<TerrainChunkKey> =
@@ -1661,8 +1715,6 @@ fn stream_terrain_chunks(
     let spawn_context = TerrainChunkSpawnContext {
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
-        detail_meshes: &detail_meshes,
-        spawn_scatter: *session_mode == SessionMode::Exploration,
         build_context: TerrainChunkBuildContext {
             world_map: &world_map,
             seed: world_map.seed,
@@ -1697,11 +1749,13 @@ fn stream_terrain_chunks(
         if existing_set.contains(&result.key) {
             continue;
         }
-        let cached = cache.get_or_build(
+        let cached = cache.insert(
             result.key,
-            &spawn_context.build_context,
-            meshes.add(result.mesh),
-            result.scatter,
+            CachedTerrainChunk {
+                mesh: meshes.add(result.mesh),
+                scatter_meshes: upload_scatter_meshes(&mut meshes, result.scatter_meshes),
+                last_used_tick: 0,
+            },
         );
         spawn_cached_chunk(
             &mut commands,
@@ -1755,7 +1809,7 @@ fn stream_terrain_chunks(
             .send(TerrainGenerationRequest {
                 key: target.key,
                 world_map: world_map.clone(),
-                generate_scatter: spawn_context.spawn_scatter,
+                detail_mesh_blueprints: detail_mesh_blueprints.clone(),
             })
             .is_ok()
         {
@@ -1784,17 +1838,18 @@ fn stream_terrain_chunks(
             "terrain lod stream advanced"
         );
     }
+    performance.record_phase_duration(PerformancePhase::WorldStreaming, started_at.elapsed());
 }
 
 fn update_terrain_impostor(
     config: Res<AppConfig>,
-    performance: Res<FramePerformance>,
-    session_mode: Res<SessionMode>,
+    mut performance: ResMut<FramePerformance>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     resources: TerrainImpostorResources<'_>,
     camera_query: Query<&Transform, With<WorldCamera>>,
 ) {
+    let phase_started_at = Instant::now();
     let (world_map, impostor_material, impostor_config, lod_config, mut impostor_state) = resources;
     let Some(camera_transform) = camera_query.iter().next() else {
         return;
@@ -1816,13 +1871,9 @@ fn update_terrain_impostor(
     }
 
     let started_at = Instant::now();
-    let runtime_lod_config = lod_config_for_session(*lod_config, *session_mode);
-    let Some(mesh) = build_terrain_impostor_mesh(
-        &world_map,
-        anchor,
-        runtime_lod_config.low_radius,
-        *impostor_config,
-    ) else {
+    let Some(mesh) =
+        build_terrain_impostor_mesh(&world_map, anchor, lod_config.low_radius, *impostor_config)
+    else {
         return;
     };
     let mesh_handle = meshes.add(mesh);
@@ -1851,16 +1902,19 @@ fn update_terrain_impostor(
         generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
         "terrain impostor refreshed"
     );
+    performance.record_phase_duration(PerformancePhase::WorldImpostor, phase_started_at.elapsed());
 }
 
 fn update_collision_proxy(
     config: Res<AppConfig>,
-    performance: Res<FramePerformance>,
+    mut performance: ResMut<FramePerformance>,
     world_map: Res<WorldMap>,
     collision_config: Res<TerrainCollisionConfig>,
     mut collision_proxy: ResMut<TerrainCollisionProxy>,
+    mut collision_scheduler: ResMut<TerrainCollisionScheduler>,
     anchors: Query<&Transform, With<WandererPrototype>>,
 ) {
+    let phase_started_at = Instant::now();
     let Some(anchor_transform) = anchors.iter().next() else {
         return;
     };
@@ -1888,41 +1942,77 @@ fn update_collision_proxy(
 
     let started_at = Instant::now();
     let frame_budget_ms = config.quality.frame_time_budget_ms.max(1.0);
+    let integrate_budget = adaptive_budget(
+        collision_config.integrate_budget_per_frame,
+        1,
+        frame_load_ratio(&performance, frame_budget_ms),
+    );
     let build_budget = adaptive_budget(
         collision_config.build_budget_per_frame,
         1,
         frame_load_ratio(&performance, frame_budget_ms),
     );
-    let mut built = 0_usize;
-    while built < build_budget {
+    let mut integrated = 0_usize;
+    while integrated < integrate_budget {
+        let result = {
+            let receiver = collision_scheduler
+                .receiver
+                .lock()
+                .expect("terrain collision receiver should lock");
+            match receiver.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        };
+        collision_scheduler.in_flight.remove(&result.coord);
+        if !collision_proxy.active.contains(&result.coord) {
+            continue;
+        }
+        collision_proxy.insert_chunk(result.coord, result.chunk);
+        integrated += 1;
+    }
+
+    let mut scheduled = 0_usize;
+    while scheduled < build_budget {
         let Some(coord) = collision_proxy.pop_next() else {
             break;
         };
-        if collision_proxy.chunks.contains_key(&coord) {
+        if collision_proxy.chunks.contains_key(&coord)
+            || collision_scheduler.in_flight.contains(&coord)
+        {
             continue;
         }
-        let Some(chunk) = build_collision_chunk(&world_map, coord, collision_config.subdivisions)
-        else {
-            continue;
-        };
-        collision_proxy.insert_chunk(coord, chunk);
-        built += 1;
+        if collision_scheduler
+            .sender
+            .send(TerrainCollisionRequest {
+                coord,
+                world_map: world_map.clone(),
+                subdivisions: collision_config.subdivisions,
+            })
+            .is_ok()
+        {
+            collision_scheduler.in_flight.insert(coord);
+            scheduled += 1;
+        }
     }
 
     let active_set: HashSet<WorldChunkCoord> = collision_proxy.active.iter().copied().collect();
     let evicted = collision_proxy.evict_inactive(collision_config.cache_capacity, &active_set);
 
-    if built > 0 || evicted > 0 {
+    if integrated > 0 || scheduled > 0 || evicted > 0 {
         tracing::debug!(
             target: "dao_game::world::collision",
-            built_chunks = built,
+            integrated_chunks = integrated,
+            scheduled_chunks = scheduled,
             pending_chunks = collision_proxy.pending.len(),
+            inflight_chunks = collision_scheduler.in_flight.len(),
             cached_chunks = collision_proxy.len(),
             evicted_chunks = evicted,
             generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
             "terrain collision proxy advanced"
         );
     }
+    performance.record_phase_duration(PerformancePhase::WorldCollision, phase_started_at.elapsed());
 }
 
 fn advance_world_cycle(
@@ -2397,16 +2487,144 @@ fn collect_scatter_placements_for_key(
     placements
 }
 
-fn spawn_scatter_placements(
-    commands: &mut Commands,
-    placements: &[ScatterPlacement],
-    key: TerrainChunkKey,
-    materials: &DetailMaterials,
-    detail_meshes: &DetailMeshes,
-) {
-    for placement in placements {
-        spawn_scatter(commands, *placement, key, materials, detail_meshes);
+fn detail_mesh_blueprint(mesh: Mesh, vertical_offset: f32) -> DetailMeshBlueprint {
+    let positions = match mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .expect("detail mesh positions should exist")
+    {
+        VertexAttributeValues::Float32x3(values) => values.clone(),
+        _ => panic!("detail mesh positions should be float32x3"),
+    };
+    let normals = mesh
+        .attribute(Mesh::ATTRIBUTE_NORMAL)
+        .map(|attribute| match attribute {
+            VertexAttributeValues::Float32x3(values) => values.clone(),
+            _ => panic!("detail mesh normals should be float32x3"),
+        });
+    let uvs = mesh
+        .attribute(Mesh::ATTRIBUTE_UV_0)
+        .map(|attribute| match attribute {
+            VertexAttributeValues::Float32x2(values) => values.clone(),
+            _ => panic!("detail mesh uvs should be float32x2"),
+        });
+    let indices = match mesh.indices() {
+        Some(Indices::U16(values)) => values.iter().map(|index| *index as u32).collect(),
+        Some(Indices::U32(values)) => values.clone(),
+        None => (0..positions.len() as u32).collect(),
+    };
+
+    DetailMeshBlueprint {
+        positions,
+        normals,
+        uvs,
+        indices,
+        vertical_offset,
     }
+}
+
+fn build_scatter_meshes_for_key(
+    context: &TerrainChunkBuildContext<'_>,
+    key: TerrainChunkKey,
+    blueprints: &DetailMeshBlueprints,
+) -> HashMap<BiomeKind, Mesh> {
+    let placements = collect_scatter_placements_for_key(context, key);
+    let mut grouped: HashMap<BiomeKind, Vec<ScatterPlacement>> = HashMap::new();
+    for placement in placements {
+        grouped.entry(placement.biome).or_default().push(placement);
+    }
+
+    let mut meshes = HashMap::new();
+    for (biome, placements) in grouped {
+        let blueprint = match biome {
+            BiomeKind::Meadow => &blueprints.meadow,
+            BiomeKind::Grove => &blueprints.grove,
+            BiomeKind::Steppe => &blueprints.steppe,
+            BiomeKind::Ridge => &blueprints.ridge,
+            BiomeKind::Water => continue,
+        };
+        if let Some(mesh) = build_scatter_mesh_batch(blueprint, &placements) {
+            meshes.insert(biome, mesh);
+        }
+    }
+    meshes
+}
+
+fn build_scatter_mesh_batch(
+    blueprint: &DetailMeshBlueprint,
+    placements: &[ScatterPlacement],
+) -> Option<Mesh> {
+    if placements.is_empty() || blueprint.positions.is_empty() {
+        return None;
+    }
+
+    let vertex_count = blueprint.positions.len() * placements.len();
+    let index_count = blueprint.indices.len() * placements.len();
+    let mut positions = Vec::with_capacity(vertex_count);
+    let mut normals = blueprint
+        .normals
+        .as_ref()
+        .map(|_| Vec::with_capacity(vertex_count));
+    let mut uvs = blueprint
+        .uvs
+        .as_ref()
+        .map(|_| Vec::with_capacity(vertex_count));
+    let mut indices = Vec::with_capacity(index_count);
+
+    for placement in placements {
+        let transform = scatter_transform(
+            placement.position,
+            blueprint.vertical_offset,
+            placement.scale,
+        );
+        let vertex_base = positions.len() as u32;
+        let matrix = transform.to_matrix();
+        let normal_matrix = Mat3::from_mat4(matrix).inverse().transpose();
+
+        for position in &blueprint.positions {
+            let transformed = matrix.transform_point3(Vec3::from_array(*position));
+            positions.push(transformed.to_array());
+        }
+        if let Some(source_normals) = &blueprint.normals
+            && let Some(target_normals) = normals.as_mut()
+        {
+            for normal in source_normals {
+                let transformed = normal_matrix
+                    .mul_vec3(Vec3::from_array(*normal))
+                    .normalize_or_zero();
+                target_normals.push(transformed.to_array());
+            }
+        }
+        if let Some(source_uvs) = &blueprint.uvs
+            && let Some(target_uvs) = uvs.as_mut()
+        {
+            target_uvs.extend(source_uvs.iter().copied());
+        }
+        indices.extend(blueprint.indices.iter().map(|index| index + vertex_base));
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    if let Some(normals) = normals {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    }
+    if let Some(uvs) = uvs {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    }
+    mesh.insert_indices(Indices::U32(indices));
+    Some(mesh)
+}
+
+fn upload_scatter_meshes(
+    meshes: &mut Assets<Mesh>,
+    scatter_meshes: HashMap<BiomeKind, Mesh>,
+) -> HashMap<BiomeKind, Handle<Mesh>> {
+    scatter_meshes
+        .into_iter()
+        .map(|(biome, mesh)| (biome, meshes.add(mesh)))
+        .collect()
 }
 
 fn spawn_cached_chunk(
@@ -2430,14 +2648,16 @@ fn spawn_cached_chunk(
         Transform::default(),
         TerrainChunkEntity { key },
     ));
-    if context.spawn_scatter {
-        spawn_scatter_placements(
-            commands,
-            &cached.scatter,
-            key,
-            context.detail_materials,
-            context.detail_meshes,
-        );
+    for (biome, mesh) in &cached.scatter_meshes {
+        let (name, material) = detail_visuals_for_biome(*biome, context.detail_materials);
+        commands.spawn((
+            Name::new(name),
+            DespawnOnExit(AppScreen::InGame),
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material),
+            Transform::default(),
+            TerrainDetailEntity { key },
+        ));
     }
 }
 
@@ -2561,24 +2781,6 @@ fn chunk_targets_for_center(
     targets
 }
 
-fn lod_config_for_session(
-    lod_config: TerrainLodConfig,
-    session_mode: SessionMode,
-) -> TerrainLodConfig {
-    if session_mode == SessionMode::Presentation {
-        TerrainLodConfig {
-            high_radius: 0,
-            low_radius: lod_config.low_radius.min(2).max(1),
-            preload_radius: lod_config
-                .preload_radius
-                .min(3)
-                .max(lod_config.low_radius.min(2).max(1)),
-        }
-    } else {
-        lod_config
-    }
-}
-
 fn frame_load_ratio(performance: &FramePerformance, frame_budget_ms: f32) -> f32 {
     if performance.frame_count() == 0 {
         return 1.0;
@@ -2695,55 +2897,16 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
     )
 }
 
-fn spawn_scatter(
-    commands: &mut Commands,
-    placement: ScatterPlacement,
-    key: TerrainChunkKey,
+fn detail_visuals_for_biome(
+    biome: BiomeKind,
     materials: &DetailMaterials,
-    detail_meshes: &DetailMeshes,
-) {
-    match placement.biome {
-        BiomeKind::Meadow => {
-            commands.spawn((
-                Name::new("MeadowTuft"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(detail_meshes.meadow.clone()),
-                MeshMaterial3d(materials.meadow.clone()),
-                scatter_transform(placement.position, 0.35, placement.scale),
-                TerrainDetailEntity { key },
-            ));
-        }
-        BiomeKind::Grove => {
-            commands.spawn((
-                Name::new("GroveTree"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(detail_meshes.grove.clone()),
-                MeshMaterial3d(materials.grove.clone()),
-                scatter_transform(placement.position, 0.92, placement.scale),
-                TerrainDetailEntity { key },
-            ));
-        }
-        BiomeKind::Steppe => {
-            commands.spawn((
-                Name::new("SteppeStone"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(detail_meshes.steppe.clone()),
-                MeshMaterial3d(materials.steppe.clone()),
-                scatter_transform(placement.position, 0.18, placement.scale),
-                TerrainDetailEntity { key },
-            ));
-        }
-        BiomeKind::Ridge => {
-            commands.spawn((
-                Name::new("RidgeSpire"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(detail_meshes.ridge.clone()),
-                MeshMaterial3d(materials.ridge.clone()),
-                scatter_transform(placement.position, 1.15, placement.scale),
-                TerrainDetailEntity { key },
-            ));
-        }
-        BiomeKind::Water => {}
+) -> (&'static str, Handle<StandardMaterial>) {
+    match biome {
+        BiomeKind::Meadow => ("MeadowTuftBatch", materials.meadow.clone()),
+        BiomeKind::Grove => ("GroveTreeBatch", materials.grove.clone()),
+        BiomeKind::Steppe => ("SteppeStoneBatch", materials.steppe.clone()),
+        BiomeKind::Ridge => ("RidgeSpireBatch", materials.ridge.clone()),
+        BiomeKind::Water => ("WaterDetailBatch", materials.meadow.clone()),
     }
 }
 
@@ -2849,10 +3012,11 @@ fn cleanup_world_session(mut commands: Commands, mut cycle: ResMut<WorldCycle>) 
     commands.remove_resource::<TerrainImpostorState>();
     commands.remove_resource::<TerrainCollisionConfig>();
     commands.remove_resource::<TerrainCollisionProxy>();
+    commands.remove_resource::<TerrainCollisionScheduler>();
     commands.remove_resource::<TerrainGenerationScheduler>();
     commands.remove_resource::<TerrainChunkCache>();
     commands.remove_resource::<DetailMaterials>();
-    commands.remove_resource::<DetailMeshes>();
+    commands.remove_resource::<DetailMeshBlueprints>();
 }
 
 fn scatter_offset(seed: u64, x: i32, z: i32, radius: f32) -> Vec2 {
@@ -2881,7 +3045,10 @@ mod tests {
         path::PathBuf,
     };
 
-    use bevy::prelude::{Assets, Mesh, Vec3};
+    use bevy::{
+        math::primitives::Capsule3d,
+        prelude::{Assets, Mesh, Vec3},
+    };
 
     use crate::core::config::{
         AppConfig, EnvironmentConfig, PlayerConfig, PresentationConfig, QualityConfig, SignConfig,
@@ -2889,13 +3056,13 @@ mod tests {
     };
 
     use super::{
-        BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainChunkKey,
-        TerrainCollisionProxy, TerrainImpostorConfig, TerrainLodConfig, TerrainLodLevel,
-        TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals,
-        adaptive_budget, build_chunk_mesh_for_lod, build_collision_chunk,
-        build_terrain_impostor_mesh, chunk_targets_for_camera, chunk_targets_for_center,
-        collision_chunk_coords_for_position, determine_biome, sample_terrain,
-        should_keep_chunk_key, streaming_inflight_cap,
+        BiomeKind, CachedTerrainChunk, TerrainChunkBuildContext, TerrainChunkCache,
+        TerrainChunkKey, TerrainCollisionProxy, TerrainImpostorConfig, TerrainLodConfig,
+        TerrainLodLevel, TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed,
+        accumulate_normals, adaptive_budget, build_chunk_mesh_for_lod, build_collision_chunk,
+        build_scatter_mesh_batch, build_terrain_impostor_mesh, chunk_targets_for_camera,
+        chunk_targets_for_center, collision_chunk_coords_for_position, detail_mesh_blueprint,
+        determine_biome, sample_terrain, should_keep_chunk_key, streaming_inflight_cap,
     };
 
     fn test_config() -> AppConfig {
@@ -3311,7 +3478,7 @@ mod tests {
     }
 
     #[test]
-    fn terrain_chunk_cache_reuses_mesh_and_scatter_layout() {
+    fn terrain_chunk_cache_reuses_uploaded_mesh_handles() {
         let config = test_config();
         let world_map = WorldMap::new(42, &config);
         let mut cache = TerrainChunkCache::default();
@@ -3325,12 +3492,18 @@ mod tests {
             lod: TerrainLodLevel::High,
         };
         let mesh = build_chunk_mesh_for_lod(&context, key).expect("chunk mesh should build");
-        let scatter = super::collect_scatter_placements_for_key(&context, key);
-        let first = cache.get_or_build(key, &context, meshes.add(mesh), scatter);
+        let first = cache.insert(
+            key,
+            CachedTerrainChunk {
+                mesh: meshes.add(mesh),
+                scatter_meshes: HashMap::new(),
+                last_used_tick: 0,
+            },
+        );
         let second = cache.get(key).expect("chunk should be cached");
 
         assert_eq!(first.mesh.id(), second.mesh.id());
-        assert_eq!(first.scatter.len(), second.scatter.len());
+        assert_eq!(first.scatter_meshes.len(), second.scatter_meshes.len());
         assert_eq!(cache.len(), 1);
     }
 
@@ -3360,8 +3533,14 @@ mod tests {
             },
         ] {
             let mesh = build_chunk_mesh_for_lod(&context, key).expect("chunk mesh should build");
-            let scatter = super::collect_scatter_placements_for_key(&context, key);
-            let _ = cache.get_or_build(key, &context, meshes.add(mesh), scatter);
+            let _ = cache.insert(
+                key,
+                CachedTerrainChunk {
+                    mesh: meshes.add(mesh),
+                    scatter_meshes: HashMap::new(),
+                    last_used_tick: 0,
+                },
+            );
         }
 
         let evicted = cache.evict_inactive(
@@ -3379,6 +3558,29 @@ mod tests {
             coord: active,
             lod: TerrainLodLevel::High,
         }));
+    }
+
+    #[test]
+    fn scatter_mesh_batch_combines_multiple_instances() {
+        let blueprint = detail_mesh_blueprint(Mesh::from(Capsule3d::new(0.09, 0.6)), 0.35);
+        let placements = vec![
+            super::ScatterPlacement {
+                position: Vec3::new(0.0, 1.0, 0.0),
+                biome: BiomeKind::Meadow,
+                scale: 1.0,
+            },
+            super::ScatterPlacement {
+                position: Vec3::new(2.0, 1.5, -1.0),
+                biome: BiomeKind::Meadow,
+                scale: 0.8,
+            },
+        ];
+
+        let mesh = build_scatter_mesh_batch(&blueprint, &placements).expect("batch mesh");
+        let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions");
+        let expected_vertices = blueprint.positions.len() * placements.len();
+
+        assert_eq!(positions.len(), expected_vertices);
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use bevy::prelude::*;
 
 use crate::{
-    core::config::AppConfig,
+    core::{
+        config::AppConfig,
+        performance::{FramePerformance, PerformancePhase},
+    },
     game::{
         environment::WeatherKind,
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
@@ -205,14 +208,19 @@ fn initialize_presentation(
 }
 
 fn advance_presentation_director(
-    time: Res<Time>,
-    config: Res<AppConfig>,
+    resources: (
+        Res<Time>,
+        Res<AppConfig>,
+        ResMut<FramePerformance>,
+        Res<WorldMap>,
+    ),
     director: Option<ResMut<PresentationDirector>>,
     control: Option<ResMut<WorldPresentationControl>>,
     mut signs: ResMut<SignState>,
-    world_map: Res<WorldMap>,
     mut wanderer_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
+    let (time, config, mut performance, world_map) = resources;
+    let started_at = std::time::Instant::now();
     let Some(mut director) = director else {
         return;
     };
@@ -251,6 +259,7 @@ fn advance_presentation_director(
     if let Some(expected_omen) = scene.expected_omen {
         nudge_sign_state_for_showcase(&mut signs, &config, scene_progress, expected_omen);
     }
+    performance.record_phase_duration(PerformancePhase::Presentation, started_at.elapsed());
 }
 
 fn drive_presentation_camera(

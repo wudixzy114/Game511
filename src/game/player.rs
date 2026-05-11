@@ -5,7 +5,10 @@ use bevy::{
 };
 
 use crate::{
-    core::config::AppConfig,
+    core::{
+        config::AppConfig,
+        performance::{FramePerformance, PerformancePhase},
+    },
     game::{
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
         world::{
@@ -274,10 +277,12 @@ fn apply_mouse_look(
 
 fn move_player_body(
     resources: PlayerMoveResources<'_>,
+    mut performance: ResMut<FramePerformance>,
     state: Option<ResMut<FirstPersonState>>,
     bootstrap: Option<Res<FirstPersonBootstrap>>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
+    let started_at = std::time::Instant::now();
     let (time, keys, config, world_map, mut collision_proxy) = resources;
     let Some(bootstrap) = bootstrap else {
         return;
@@ -354,6 +359,7 @@ fn move_player_body(
     state.grounded = vertical_contact.grounded;
 
     transform.rotation = Quat::from_rotation_y(state.yaw);
+    performance.record_phase_duration(PerformancePhase::Player, started_at.elapsed());
 }
 
 fn resolve_horizontal_contact(

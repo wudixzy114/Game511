@@ -19,7 +19,11 @@ impl Plugin for CorePlugin {
 
         app.insert_resource(config.clone());
         app.insert_resource(ClearColor(Color::srgb(0.08, 0.11, 0.12)));
+        app.insert_resource(performance::PerformanceSessionId::new());
         app.insert_resource(performance::FramePerformance::default());
+        app.insert_resource(performance::PerformanceSessionReport::new(
+            config.quality.frame_time_budget_ms,
+        ));
         if let Some(duration) = read_auto_exit_duration() {
             app.insert_resource(AutoExit(duration));
             app.add_systems(Update, auto_exit_after_duration);
@@ -33,7 +37,15 @@ impl Plugin for CorePlugin {
             ..Default::default()
         }));
         app.add_message::<performance::PerformanceAlert>();
-        app.add_systems(Update, performance::track_frame_timing);
+        app.add_systems(Startup, performance::announce_performance_session_start);
+        app.add_systems(
+            Last,
+            (
+                performance::track_frame_timing,
+                performance::report_performance_session_summary,
+            )
+                .chain(),
+        );
     }
 }
 
