@@ -10,10 +10,20 @@ camera_blend_speed = 2.0
 
 [world]
 seed = 511
-world_radius = 5
-terrain_scale = 7.5
-height_variation = 3.4
+world_radius = 7
+chunk_radius = 2
+cell_size = 3.2
+terrain_subdivisions = 8
+terrain_scale = 8.5
+height_variation = 4.2
 water_level = -0.2
+noise_octaves = 5
+ridge_sharpness = 2.1
+shoreline_blend = 0.2
+river_frequency = 0.19
+river_depth = 0.72
+erosion_strength = 0.52
+sediment_bias = 0.28
 
 [environment]
 day_length_seconds = 240.0

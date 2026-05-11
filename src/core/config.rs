@@ -25,9 +25,19 @@ pub struct AppConfig {
 pub struct WorldConfig {
     pub seed: u64,
     pub world_radius: i32,
+    pub chunk_radius: i32,
+    pub cell_size: f32,
+    pub terrain_subdivisions: u32,
     pub terrain_scale: f32,
     pub height_variation: f32,
     pub water_level: f32,
+    pub noise_octaves: u32,
+    pub ridge_sharpness: f32,
+    pub shoreline_blend: f32,
+    pub river_frequency: f32,
+    pub river_depth: f32,
+    pub erosion_strength: f32,
+    pub sediment_bias: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -98,9 +108,19 @@ frame_log_interval = 30
 [world]
 seed = 7
 world_radius = 3
+chunk_radius = 1
+cell_size = 3.0
+terrain_subdivisions = 6
 terrain_scale = 5.0
 height_variation = 2.5
 water_level = 0.1
+noise_octaves = 4
+ridge_sharpness = 1.8
+shoreline_blend = 0.18
+river_frequency = 0.22
+river_depth = 0.55
+erosion_strength = 0.4
+sediment_bias = 0.22
 
 [presentation]
 enabled = true
@@ -134,6 +154,10 @@ frame_time_budget_ms = 6.9
         assert!(config.presentation.enabled);
         assert_eq!(config.presentation.scene_duration_seconds, 8.0);
         assert_eq!(config.world.seed, 7);
+        assert_eq!(config.world.chunk_radius, 1);
+        assert_eq!(config.world.cell_size, 3.0);
+        assert_eq!(config.world.terrain_subdivisions, 6);
+        assert_eq!(config.world.river_frequency, 0.22);
         assert_eq!(config.environment.day_length_seconds, 180.0);
         assert_eq!(config.environment.wander_radius, 4.5);
         assert_eq!(config.quality.target_fps, 144.0);
