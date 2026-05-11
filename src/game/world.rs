@@ -17,10 +17,13 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-use crate::core::config::{AppConfig, WorldConfig};
+use crate::core::{
+    config::{AppConfig, WorldConfig},
+    performance::FramePerformance,
+};
 use crate::game::{
     environment::WeatherKind,
-    flow::{AppScreen, InGameState},
+    flow::{AppScreen, InGameState, SessionMode, in_session_mode},
     player::FirstPersonState,
 };
 
@@ -53,7 +56,7 @@ impl Plugin for WorldPlugin {
                     update_visible_chunks,
                     stream_terrain_chunks,
                     update_terrain_impostor,
-                    update_collision_proxy,
+                    update_collision_proxy.run_if(in_session_mode(SessionMode::Exploration)),
                 )
                     .chain(),
                 animate_wanderer,
@@ -209,7 +212,7 @@ impl TerrainLodLevel {
     }
 
     fn scatter_enabled(self) -> bool {
-        matches!(self, Self::High | Self::Low)
+        matches!(self, Self::High)
     }
 }
 
@@ -274,6 +277,7 @@ struct TerrainLodConfig {
 #[derive(Debug, Resource, Default)]
 struct ChunkVisibilityState {
     active: Vec<TerrainChunkTarget>,
+    center: Option<WorldChunkCoord>,
 }
 
 #[derive(Debug, Resource, Default)]
@@ -336,6 +340,17 @@ struct TerrainImpostorState {
     anchor: Option<WorldChunkCoord>,
     mesh: Option<Handle<Mesh>>,
     entity: Option<Entity>,
+}
+
+impl TerrainImpostorState {
+    fn should_refresh(&self, next_anchor: WorldChunkCoord, required_distance: i32) -> bool {
+        let required_distance = required_distance.max(0);
+        self.anchor.is_none_or(|anchor| {
+            let dx = (anchor.x - next_anchor.x).abs();
+            let dz = (anchor.z - next_anchor.z).abs();
+            dx.max(dz) > required_distance
+        })
+    }
 }
 
 #[derive(Debug, Resource, Clone, Copy)]
@@ -409,6 +424,7 @@ pub struct TerrainCollisionSample {
 #[derive(Debug, Resource, Default)]
 pub struct TerrainCollisionProxy {
     active: Vec<WorldChunkCoord>,
+    anchor: Option<WorldChunkCoord>,
     pending: VecDeque<WorldChunkCoord>,
     chunks: HashMap<WorldChunkCoord, CachedTerrainCollisionChunk>,
     tick: u64,
@@ -614,6 +630,9 @@ impl TerrainChunkCache {
 }
 
 type TerrainStreamResources<'w> = (
+    Res<'w, AppConfig>,
+    Res<'w, FramePerformance>,
+    Res<'w, SessionMode>,
     Res<'w, WorldMap>,
     Res<'w, TerrainRuntimeMaterial>,
     Res<'w, DetailMaterials>,
@@ -1151,6 +1170,7 @@ struct TerrainChunkSpawnContext<'a> {
     material: &'a Handle<StandardMaterial>,
     detail_materials: &'a DetailMaterials,
     detail_meshes: &'a DetailMeshes,
+    spawn_scatter: bool,
     build_context: TerrainChunkBuildContext<'a>,
 }
 
@@ -1171,6 +1191,7 @@ struct GeneratedTerrainChunk {
 struct TerrainGenerationRequest {
     key: TerrainChunkKey,
     world_map: WorldMap,
+    generate_scatter: bool,
 }
 
 #[derive(Resource)]
@@ -1276,7 +1297,8 @@ fn create_terrain_material_texture(
         subdivisions: config
             .world
             .collision_subdivisions
-            .max(config.world.terrain_subdivisions.max(1)),
+            .max(1)
+            .min(config.world.terrain_subdivisions.max(1)),
         build_budget_per_frame: config.world.collision_chunk_budget.max(1) as usize,
         cache_capacity: config.world.collision_cache_capacity.max(1),
     });
@@ -1297,7 +1319,11 @@ fn create_generation_scheduler() -> TerrainGenerationScheduler {
             let Some(mesh) = build_chunk_mesh_for_lod(&build_context, request.key) else {
                 continue;
             };
-            let scatter = collect_scatter_placements_for_key(&build_context, request.key);
+            let scatter = if request.generate_scatter {
+                collect_scatter_placements_for_key(&build_context, request.key)
+            } else {
+                Vec::new()
+            };
             let _ = result_sender.send(GeneratedTerrainChunk {
                 key: request.key,
                 mesh,
@@ -1351,7 +1377,7 @@ fn spawn_light(mut commands: Commands) {
         Name::new("SunLight"),
         DespawnOnExit(AppScreen::InGame),
         DirectionalLight {
-            shadows_enabled: true,
+            shadows_enabled: false,
             illuminance: 18_000.0,
             ..Default::default()
         },
@@ -1364,6 +1390,7 @@ fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    session_mode: Res<SessionMode>,
     runtime_resources: WorldStreamingBootstrapResources<'_>,
     resources: WorldSpawnResources<'_>,
 ) {
@@ -1411,8 +1438,11 @@ fn spawn_world(
         steppe: meshes.add(Mesh::from(Cylinder::new(0.28, 0.42))),
         ridge: meshes.add(Mesh::from(Cylinder::new(0.16, 2.4))),
     };
-
-    let initial_targets = chunk_targets_for_camera(&world_map, spots.meadow.position, *lod_config);
+    let spawn_scatter = *session_mode == SessionMode::Exploration;
+    let initial_center = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z);
+    let runtime_lod_config = lod_config_for_session(*lod_config, *session_mode);
+    let initial_targets =
+        chunk_targets_for_camera(&world_map, spots.meadow.position, runtime_lod_config);
     let critical_key = world_map
         .chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z)
         .map(|coord| TerrainChunkKey {
@@ -1423,6 +1453,7 @@ fn spawn_world(
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
         detail_meshes: &detail_meshes,
+        spawn_scatter,
         build_context: TerrainChunkBuildContext {
             world_map: &world_map,
             seed: seed.0,
@@ -1447,30 +1478,45 @@ fn spawn_world(
     let queued_chunk_count = queued_targets.len();
     commands.insert_resource(ChunkVisibilityState {
         active: initial_targets.clone(),
+        center: initial_center,
     });
     commands.insert_resource(TerrainStreamingQueue::from_targets(queued_targets));
     commands.insert_resource(chunk_cache);
     commands.insert_resource(detail_materials.clone());
     commands.insert_resource(detail_meshes.clone());
 
-    let initial_collision_coords = collision_chunk_coords_for_position(
-        &world_map,
-        spots.meadow.position,
-        collision_config.active_radius,
-    );
-    for coord in &initial_collision_coords {
-        let Some(chunk) = build_collision_chunk(&world_map, *coord, collision_config.subdivisions)
-        else {
-            continue;
-        };
-        collision_proxy.insert_chunk(*coord, chunk);
-    }
-    collision_proxy.active = initial_collision_coords.clone();
-    collision_proxy.pending.clear();
+    let initial_collision_coords = if *session_mode == SessionMode::Exploration {
+        let coords = collision_chunk_coords_for_position(
+            &world_map,
+            spots.meadow.position,
+            collision_config.active_radius,
+        );
+        for coord in &coords {
+            let Some(chunk) =
+                build_collision_chunk(&world_map, *coord, collision_config.subdivisions)
+            else {
+                continue;
+            };
+            collision_proxy.insert_chunk(*coord, chunk);
+        }
+        collision_proxy.anchor = initial_center;
+        collision_proxy.active = coords.clone();
+        collision_proxy.pending.clear();
+        coords
+    } else {
+        collision_proxy.anchor = None;
+        collision_proxy.active.clear();
+        collision_proxy.pending.clear();
+        Vec::new()
+    };
 
     if let Some(anchor) = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z)
-        && let Some(mesh) =
-            build_terrain_impostor_mesh(&world_map, anchor, lod_config.low_radius, *impostor_config)
+        && let Some(mesh) = build_terrain_impostor_mesh(
+            &world_map,
+            anchor,
+            runtime_lod_config.low_radius,
+            *impostor_config,
+        )
     {
         let mesh_handle = meshes.add(mesh);
         let entity = commands
@@ -1525,21 +1571,31 @@ fn spawn_world(
 
 fn update_visible_chunks(
     mut commands: Commands,
-    config: (Res<WorldMap>, Res<TerrainLodConfig>),
+    config: (Res<WorldMap>, Res<TerrainLodConfig>, Res<SessionMode>),
     mut visibility_state: ResMut<ChunkVisibilityState>,
     mut queue: ResMut<TerrainStreamingQueue>,
     queries: ChunkVisibilityQueries<'_, '_>,
 ) {
-    let (world_map, lod_config) = config;
+    let (world_map, lod_config, session_mode) = config;
     let (chunk_query, detail_query, camera_query) = queries;
     let Some(camera_transform) = camera_query.iter().next() else {
         return;
     };
-
-    let targets = chunk_targets_for_camera(&world_map, camera_transform.translation, *lod_config);
-    if targets == visibility_state.active {
+    let Some(center) = world_map.chunk_coord_at(
+        camera_transform.translation.x,
+        camera_transform.translation.z,
+    ) else {
+        return;
+    };
+    if visibility_state.center == Some(center) {
         return;
     }
+
+    let targets = chunk_targets_for_center(
+        &world_map,
+        center,
+        lod_config_for_session(*lod_config, *session_mode),
+    );
     let visible_set: HashSet<TerrainChunkKey> = targets.iter().map(|target| target.key).collect();
     let desired_visible_by_coord: HashMap<WorldChunkCoord, TerrainChunkKey> = targets
         .iter()
@@ -1576,6 +1632,7 @@ fn update_visible_chunks(
     queue.enqueue_missing(targets.iter().copied(), &existing_set);
 
     visibility_state.active = targets;
+    visibility_state.center = Some(center);
 }
 
 fn stream_terrain_chunks(
@@ -1583,27 +1640,40 @@ fn stream_terrain_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     stream_state: TerrainStreamState<'_>,
     resources: TerrainStreamResources<'_>,
+    session_mode: Res<SessionMode>,
     visibility_state: Res<ChunkVisibilityState>,
     existing_chunks: Query<(Entity, &TerrainChunkEntity)>,
     existing_details: Query<(Entity, &TerrainDetailEntity)>,
 ) {
     let (mut queue, mut cache, mut scheduler) = stream_state;
-    let (world_map, terrain_material, detail_materials, detail_meshes, streaming_config) =
-        resources;
+    let (
+        config,
+        performance,
+        session_mode,
+        world_map,
+        terrain_material,
+        detail_materials,
+        detail_meshes,
+        streaming_config,
+    ) = resources;
     let mut existing_set: HashSet<TerrainChunkKey> =
         existing_chunks.iter().map(|(_, chunk)| chunk.key).collect();
     let spawn_context = TerrainChunkSpawnContext {
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
         detail_meshes: &detail_meshes,
+        spawn_scatter: *session_mode == SessionMode::Exploration,
         build_context: TerrainChunkBuildContext {
             world_map: &world_map,
             seed: world_map.seed,
         },
     };
     let started_at = Instant::now();
+    let frame_budget_ms = config.quality.frame_time_budget_ms.max(1.0);
+    let load_ratio = frame_load_ratio(&performance, frame_budget_ms);
     let mut integrated = 0_usize;
-    let integrate_budget = streaming_config.integrate_budget_per_frame.max(1);
+    let integrate_budget =
+        adaptive_budget(streaming_config.integrate_budget_per_frame, 1, load_ratio);
 
     while integrated < integrate_budget {
         let result = {
@@ -1652,8 +1722,10 @@ fn stream_terrain_chunks(
     }
 
     let mut scheduled = 0_usize;
-    let background_budget = streaming_config.background_budget_per_frame.max(1);
-    while scheduled < background_budget {
+    let background_budget =
+        adaptive_budget(streaming_config.background_budget_per_frame, 1, load_ratio);
+    let max_inflight = streaming_inflight_cap(background_budget);
+    while scheduled < background_budget && scheduler.in_flight.len() < max_inflight {
         let Some(target) = queue.pop_next() else {
             break;
         };
@@ -1683,6 +1755,7 @@ fn stream_terrain_chunks(
             .send(TerrainGenerationRequest {
                 key: target.key,
                 world_map: world_map.clone(),
+                generate_scatter: spawn_context.spawn_scatter,
             })
             .is_ok()
         {
@@ -1714,6 +1787,9 @@ fn stream_terrain_chunks(
 }
 
 fn update_terrain_impostor(
+    config: Res<AppConfig>,
+    performance: Res<FramePerformance>,
+    session_mode: Res<SessionMode>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     resources: TerrainImpostorResources<'_>,
@@ -1729,14 +1805,24 @@ fn update_terrain_impostor(
     ) else {
         return;
     };
-    if impostor_state.anchor == Some(anchor) {
+    let frame_budget_ms = config.quality.frame_time_budget_ms.max(1.0);
+    let refresh_distance = if frame_load_ratio(&performance, frame_budget_ms) > 2.0 {
+        2
+    } else {
+        1
+    };
+    if !impostor_state.should_refresh(anchor, refresh_distance) {
         return;
     }
 
     let started_at = Instant::now();
-    let Some(mesh) =
-        build_terrain_impostor_mesh(&world_map, anchor, lod_config.low_radius, *impostor_config)
-    else {
+    let runtime_lod_config = lod_config_for_session(*lod_config, *session_mode);
+    let Some(mesh) = build_terrain_impostor_mesh(
+        &world_map,
+        anchor,
+        runtime_lod_config.low_radius,
+        *impostor_config,
+    ) else {
         return;
     };
     let mesh_handle = meshes.add(mesh);
@@ -1768,6 +1854,8 @@ fn update_terrain_impostor(
 }
 
 fn update_collision_proxy(
+    config: Res<AppConfig>,
+    performance: Res<FramePerformance>,
     world_map: Res<WorldMap>,
     collision_config: Res<TerrainCollisionConfig>,
     mut collision_proxy: ResMut<TerrainCollisionProxy>,
@@ -1776,24 +1864,37 @@ fn update_collision_proxy(
     let Some(anchor_transform) = anchors.iter().next() else {
         return;
     };
+    let Some(anchor) = world_map.chunk_coord_at(
+        anchor_transform.translation.x,
+        anchor_transform.translation.z,
+    ) else {
+        return;
+    };
 
-    let targets = collision_chunk_coords_for_position(
-        &world_map,
-        anchor_transform.translation,
-        collision_config.active_radius,
-    );
-    if targets != collision_proxy.active {
+    if collision_proxy.anchor != Some(anchor) {
+        let targets = collision_chunk_coords_for_position(
+            &world_map,
+            anchor_transform.translation,
+            collision_config.active_radius,
+        );
         let active_set: HashSet<WorldChunkCoord> = targets.iter().copied().collect();
         let existing_set: HashSet<WorldChunkCoord> =
             collision_proxy.chunks.keys().copied().collect();
         collision_proxy.retain_active(&active_set);
         collision_proxy.enqueue_missing(targets.iter().copied(), &existing_set);
+        collision_proxy.anchor = Some(anchor);
         collision_proxy.active = targets;
     }
 
     let started_at = Instant::now();
+    let frame_budget_ms = config.quality.frame_time_budget_ms.max(1.0);
+    let build_budget = adaptive_budget(
+        collision_config.build_budget_per_frame,
+        1,
+        frame_load_ratio(&performance, frame_budget_ms),
+    );
     let mut built = 0_usize;
-    while built < collision_config.build_budget_per_frame.max(1) {
+    while built < build_budget {
         let Some(coord) = collision_proxy.pop_next() else {
             break;
         };
@@ -1846,14 +1947,10 @@ fn animate_wanderer(
     config: Res<AppConfig>,
     control: Option<Res<WorldPresentationControl>>,
     first_person: Option<Res<FirstPersonState>>,
-    resources: (
-        Res<WorldMap>,
-        ResMut<TerrainCollisionProxy>,
-        Res<WorldShowcaseSpots>,
-    ),
+    resources: (Res<WorldMap>, Res<WorldShowcaseSpots>),
     mut query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
-    let (world_map, mut collision_proxy, spots) = resources;
+    let (world_map, spots) = resources;
     let Some(mut transform) = query.iter_mut().next() else {
         return;
     };
@@ -1871,7 +1968,6 @@ fn animate_wanderer(
             config.environment.wander_speed,
             control,
             &world_map,
-            &mut collision_proxy,
             &mut transform,
         );
         return;
@@ -1890,12 +1986,10 @@ fn animate_wanderer(
         + ((t + 0.25) * 0.28).sin() * radius * 0.22;
     let next_z = orbit_center.z + ((t + 0.25) * 0.63).sin() * radius * 0.92;
 
-    let Some(height) = collision_proxy.sample_height(&world_map, x, z) else {
+    let Some(height) = world_map.sample_height(x, z) else {
         return;
     };
-    let next_height = collision_proxy
-        .sample_height(&world_map, next_x, next_z)
-        .unwrap_or(height);
+    let next_height = world_map.sample_height(next_x, next_z).unwrap_or(height);
 
     let target_position = Vec3::new(x, height + 1.2, z);
     let next_position = Vec3::new(next_x, next_height + 1.2, next_z);
@@ -1909,15 +2003,12 @@ fn animate_controlled_wanderer(
     base_speed: f32,
     control: &WorldPresentationControl,
     world_map: &WorldMap,
-    collision_proxy: &mut TerrainCollisionProxy,
     transform: &mut Transform,
 ) {
     let Some(mut target_position) = control.wander_target else {
         return;
     };
-    let Some(height) =
-        collision_proxy.sample_height(world_map, target_position.x, target_position.z)
-    else {
+    let Some(height) = world_map.sample_height(target_position.x, target_position.z) else {
         return;
     };
     target_position.y = height + 1.2;
@@ -2339,13 +2430,15 @@ fn spawn_cached_chunk(
         Transform::default(),
         TerrainChunkEntity { key },
     ));
-    spawn_scatter_placements(
-        commands,
-        &cached.scatter,
-        key,
-        context.detail_materials,
-        context.detail_meshes,
-    );
+    if context.spawn_scatter {
+        spawn_scatter_placements(
+            commands,
+            &cached.scatter,
+            key,
+            context.detail_materials,
+            context.detail_meshes,
+        );
+    }
 }
 
 fn should_keep_chunk_key(
@@ -2430,7 +2523,14 @@ fn chunk_targets_for_camera(
     let Some(center) = world_map.chunk_coord_at(camera_position.x, camera_position.z) else {
         return Vec::new();
     };
+    chunk_targets_for_center(world_map, center, lod_config)
+}
 
+fn chunk_targets_for_center(
+    world_map: &WorldMap,
+    center: WorldChunkCoord,
+    lod_config: TerrainLodConfig,
+) -> Vec<TerrainChunkTarget> {
     let mut targets = Vec::new();
     for z in (center.z - lod_config.preload_radius)..=(center.z + lod_config.preload_radius) {
         for x in (center.x - lod_config.preload_radius)..=(center.x + lod_config.preload_radius) {
@@ -2459,6 +2559,49 @@ fn chunk_targets_for_camera(
         dx * dx + dz * dz
     });
     targets
+}
+
+fn lod_config_for_session(
+    lod_config: TerrainLodConfig,
+    session_mode: SessionMode,
+) -> TerrainLodConfig {
+    if session_mode == SessionMode::Presentation {
+        TerrainLodConfig {
+            high_radius: 0,
+            low_radius: lod_config.low_radius.min(2).max(1),
+            preload_radius: lod_config
+                .preload_radius
+                .min(3)
+                .max(lod_config.low_radius.min(2).max(1)),
+        }
+    } else {
+        lod_config
+    }
+}
+
+fn frame_load_ratio(performance: &FramePerformance, frame_budget_ms: f32) -> f32 {
+    if performance.frame_count() == 0 {
+        return 1.0;
+    }
+    performance
+        .last_frame_ms()
+        .max(performance.moving_average_ms())
+        / frame_budget_ms.max(0.1)
+}
+
+fn adaptive_budget(base_budget: usize, minimum_budget: usize, load_ratio: f32) -> usize {
+    let base_budget = base_budget.max(minimum_budget);
+    if load_ratio > 3.0 {
+        minimum_budget
+    } else if load_ratio > 1.75 {
+        base_budget.div_ceil(2).max(minimum_budget)
+    } else {
+        base_budget
+    }
+}
+
+fn streaming_inflight_cap(background_budget: usize) -> usize {
+    (background_budget.max(1) * 3).max(6)
 }
 
 fn collision_chunk_coords_for_position(
@@ -2749,9 +2892,10 @@ mod tests {
         BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainChunkKey,
         TerrainCollisionProxy, TerrainImpostorConfig, TerrainLodConfig, TerrainLodLevel,
         TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals,
-        build_chunk_mesh_for_lod, build_collision_chunk, build_terrain_impostor_mesh,
-        chunk_targets_for_camera, collision_chunk_coords_for_position, determine_biome,
-        sample_terrain, should_keep_chunk_key,
+        adaptive_budget, build_chunk_mesh_for_lod, build_collision_chunk,
+        build_terrain_impostor_mesh, chunk_targets_for_camera, chunk_targets_for_center,
+        collision_chunk_coords_for_position, determine_biome, sample_terrain,
+        should_keep_chunk_key, streaming_inflight_cap,
     };
 
     fn test_config() -> AppConfig {
@@ -2971,6 +3115,37 @@ mod tests {
     }
 
     #[test]
+    fn chunk_targets_for_center_match_camera_sampling() {
+        let config = test_config();
+        let world_map = WorldMap::new(42, &config);
+        let camera_position = Vec3::new(0.4, 0.0, -0.6);
+        let center = world_map
+            .chunk_coord_at(camera_position.x, camera_position.z)
+            .expect("camera chunk should exist");
+
+        assert_eq!(
+            chunk_targets_for_camera(
+                &world_map,
+                camera_position,
+                TerrainLodConfig {
+                    high_radius: 1,
+                    low_radius: 1,
+                    preload_radius: 2,
+                },
+            ),
+            chunk_targets_for_center(
+                &world_map,
+                center,
+                TerrainLodConfig {
+                    high_radius: 1,
+                    low_radius: 1,
+                    preload_radius: 2,
+                },
+            )
+        );
+    }
+
+    #[test]
     fn collision_targets_follow_player_position() {
         let config = test_config();
         let world_map = WorldMap::new(42, &config);
@@ -3120,6 +3295,19 @@ mod tests {
             Some(WorldChunkCoord { x: 1, z: 0 })
         );
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn adaptive_budget_scales_down_under_heavy_load() {
+        assert_eq!(adaptive_budget(4, 1, 1.2), 4);
+        assert_eq!(adaptive_budget(4, 1, 2.1), 2);
+        assert_eq!(adaptive_budget(4, 1, 3.4), 1);
+    }
+
+    #[test]
+    fn inflight_cap_tracks_background_budget() {
+        assert_eq!(streaming_inflight_cap(1), 6);
+        assert_eq!(streaming_inflight_cap(3), 9);
     }
 
     #[test]

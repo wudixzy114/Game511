@@ -164,8 +164,8 @@ struct EnvironmentFrame {
 const SKY_RADIUS: f32 = 360.0;
 const SUN_DISC_SCALE: f32 = 11.0;
 const MOON_DISC_SCALE: f32 = 8.2;
-const STAR_COUNT: u32 = 220;
-const PARTICLE_COUNT: u32 = 240;
+const STAR_COUNT: u32 = 96;
+const PARTICLE_COUNT: u32 = 96;
 const WEATHER_RADIUS: f32 = 20.0;
 const WEATHER_TOP: f32 = 16.0;
 const WEATHER_BOTTOM: f32 = -3.0;

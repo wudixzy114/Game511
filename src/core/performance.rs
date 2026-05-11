@@ -7,6 +7,7 @@ use super::config::AppConfig;
 #[derive(Debug, Resource)]
 pub struct FramePerformance {
     frame_count: u64,
+    last_frame_ms: f32,
     moving_average_ms: f32,
 }
 
@@ -14,6 +15,7 @@ impl Default for FramePerformance {
     fn default() -> Self {
         Self {
             frame_count: 0,
+            last_frame_ms: 0.0,
             moving_average_ms: 0.0,
         }
     }
@@ -23,6 +25,7 @@ impl FramePerformance {
     fn update(&mut self, frame_duration: Duration) -> FrameSnapshot {
         self.frame_count += 1;
         let frame_ms = frame_duration.as_secs_f32() * 1000.0;
+        self.last_frame_ms = frame_ms;
         if self.frame_count == 1 {
             self.moving_average_ms = frame_ms;
         } else {
@@ -34,6 +37,18 @@ impl FramePerformance {
             frame_ms,
             moving_average_ms: self.moving_average_ms,
         }
+    }
+
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+
+    pub fn last_frame_ms(&self) -> f32 {
+        self.last_frame_ms
+    }
+
+    pub fn moving_average_ms(&self) -> f32 {
+        self.moving_average_ms
     }
 }
 
