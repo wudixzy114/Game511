@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub performance_log_name: String,
     pub frame_log_interval: u32,
     pub world: WorldConfig,
+    pub environment: EnvironmentConfig,
     pub signs: SignConfig,
     pub quality: QualityConfig,
 }
@@ -29,9 +30,19 @@ pub struct WorldConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct EnvironmentConfig {
+    pub day_length_seconds: f32,
+    pub wander_radius: f32,
+    pub wander_speed: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SignConfig {
     pub resonance_threshold: f32,
+    pub resonance_smoothing: f32,
     pub calm_recovery: f32,
+    pub calm_threshold: f32,
+    pub omen_beacon_height: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -83,9 +94,17 @@ terrain_scale = 5.0
 height_variation = 2.5
 water_level = 0.1
 
+[environment]
+day_length_seconds = 180.0
+wander_radius = 4.5
+wander_speed = 0.7
+
 [signs]
 resonance_threshold = 0.5
+resonance_smoothing = 0.12
 calm_recovery = 0.02
+calm_threshold = 0.4
+omen_beacon_height = 3.0
 
 [quality]
 target_fps = 144.0
@@ -100,6 +119,8 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.window_title, "Test Title");
         assert_eq!(config.frame_log_interval, 30);
         assert_eq!(config.world.seed, 7);
+        assert_eq!(config.environment.day_length_seconds, 180.0);
+        assert_eq!(config.environment.wander_radius, 4.5);
         assert_eq!(config.quality.target_fps, 144.0);
     }
 }

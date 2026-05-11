@@ -10,9 +10,17 @@ terrain_scale = 7.5
 height_variation = 3.4
 water_level = -0.2
 
+[environment]
+day_length_seconds = 240.0
+wander_radius = 6.0
+wander_speed = 0.75
+
 [signs]
 resonance_threshold = 0.72
+resonance_smoothing = 0.1
 calm_recovery = 0.018
+calm_threshold = 0.36
+omen_beacon_height = 3.4
 
 [quality]
 target_fps = 60.0

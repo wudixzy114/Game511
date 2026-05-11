@@ -109,7 +109,9 @@ fn rolling_path(directory: &Path, file_name: &str) -> PathBuf {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::core::config::{AppConfig, QualityConfig, SignConfig, WorldConfig};
+    use crate::core::config::{
+        AppConfig, EnvironmentConfig, QualityConfig, SignConfig, WorldConfig,
+    };
 
     use super::rolling_path;
 
@@ -133,9 +135,17 @@ mod tests {
                 height_variation: 1.0,
                 water_level: 0.0,
             },
+            environment: EnvironmentConfig {
+                day_length_seconds: 180.0,
+                wander_radius: 4.0,
+                wander_speed: 0.7,
+            },
             signs: SignConfig {
                 resonance_threshold: 0.5,
+                resonance_smoothing: 0.1,
                 calm_recovery: 0.01,
+                calm_threshold: 0.35,
+                omen_beacon_height: 3.0,
             },
             quality: QualityConfig {
                 target_fps: 60.0,
