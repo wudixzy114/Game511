@@ -2,6 +2,7 @@ use bevy::{
     app::AppExit, camera::ClearColorConfig, ecs::hierarchy::ChildSpawnerCommands,
     input::keyboard::KeyCode, prelude::*, ui::IsDefaultUiCamera,
 };
+use std::{fs, path::PathBuf};
 
 use crate::game::{
     flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
@@ -13,6 +14,7 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<UiFontHandle>();
         app.add_systems(Startup, spawn_ui_camera);
         app.add_systems(OnEnter(AppScreen::MainMenu), spawn_main_menu);
         app.add_systems(OnEnter(AppScreen::InGame), spawn_hud);
@@ -68,6 +70,16 @@ struct HudOmenContainer;
 #[derive(Component)]
 struct Crosshair;
 
+#[derive(Resource)]
+struct UiFontHandle(Handle<Font>);
+
+impl FromWorld for UiFontHandle {
+    fn from_world(world: &mut World) -> Self {
+        let mut font_assets = world.resource_mut::<Assets<Font>>();
+        Self(load_ui_font_handle(&mut font_assets))
+    }
+}
+
 type ButtonInteractionQuery<'w, 's> = Query<
     'w,
     's,
@@ -101,6 +113,74 @@ const PANEL_BACKGROUND: Color = Color::srgba(0.17, 0.17, 0.15, 0.96);
 const PANEL_BORDER: Color = Color::srgb(0.38, 0.33, 0.25);
 const OVERLAY_BACKGROUND: Color = Color::srgba(0.03, 0.04, 0.04, 0.7);
 
+fn load_ui_font_handle(font_assets: &mut Assets<Font>) -> Handle<Font> {
+    let Some(path) = find_cjk_font_path() else {
+        tracing::warn!("未找到可用中文 UI 字体，回退到 Bevy 默认字体");
+        return Handle::default();
+    };
+
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "读取中文 UI 字体失败，回退到 Bevy 默认字体"
+            );
+            return Handle::default();
+        }
+    };
+
+    match Font::try_from_bytes(bytes) {
+        Ok(font) => {
+            tracing::info!("使用中文 UI 字体：{}", path.display());
+            font_assets.add(font)
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = ?error,
+                "解析中文 UI 字体失败，回退到 Bevy 默认字体"
+            );
+            Handle::default()
+        }
+    }
+}
+
+fn ui_text_font(font: &Handle<Font>, font_size: f32) -> TextFont {
+    TextFont {
+        font: font.clone(),
+        font_size,
+        ..Default::default()
+    }
+}
+
+fn find_cjk_font_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("DAO_UI_FONT_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Some(path);
+    }
+
+    [
+        r"C:\Windows\Fonts\NotoSansSC-VF.ttf",
+        r"C:\Windows\Fonts\Deng.ttf",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\simsunb.ttf",
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"/System/Library/Fonts/PingFang.ttc",
+        r"/System/Library/Fonts/STHeiti Light.ttc",
+        r"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        r"/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        r"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
 fn spawn_ui_camera(mut commands: Commands) {
     commands.spawn((
         Name::new("UiCamera"),
@@ -127,10 +207,15 @@ fn process_pending_session_launch(
     next_screen.set(AppScreen::InGame);
 }
 
-fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLaunch>) {
+fn spawn_main_menu(
+    mut commands: Commands,
+    pending_launch: Res<PendingSessionLaunch>,
+    ui_font: Res<UiFontHandle>,
+) {
     if pending_launch.0.is_some() {
         return;
     }
+    let font = ui_font.0.clone();
 
     commands
         .spawn((
@@ -159,10 +244,7 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
                 .with_children(|parent| {
                     parent.spawn((
                         Text::new("道"),
-                        TextFont {
-                            font_size: 72.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 72.0),
                         TextColor(TEXT_PRIMARY),
                         Node {
                             margin: UiRect::bottom(px(18)),
@@ -173,10 +255,7 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
                         Text::new(
                             "没有任务面板，只有世界、征兆与自己的方向。先把生命周期打通，再把叙事与系统继续往里生长。",
                         ),
-                        TextFont {
-                            font_size: 22.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 22.0),
                         TextColor(TEXT_MUTED),
                         Node {
                             max_width: px(640),
@@ -198,6 +277,7 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
                         .with_children(|parent| {
                             spawn_action_button(
                                 parent,
+                                &font,
                                 "进入世界",
                                 "第一人称探索当前原型",
                                 UiButtonAction::StartExploration,
@@ -205,6 +285,7 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
                             );
                             spawn_action_button(
                                 parent,
+                                &font,
                                 "展示场景",
                                 "自动巡游现有环境与征兆系统",
                                 UiButtonAction::StartPresentation,
@@ -212,6 +293,7 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
                             );
                             spawn_action_button(
                                 parent,
+                                &font,
                                 "退出",
                                 "关闭程序",
                                 UiButtonAction::Quit,
@@ -238,10 +320,7 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
                 .with_children(|parent| {
                     parent.spawn((
                         Text::new("当前流程"),
-                        TextFont {
-                            font_size: 26.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 26.0),
                         TextColor(TEXT_ACCENT),
                     ));
                     for line in [
@@ -252,10 +331,7 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
                     ] {
                         parent.spawn((
                             Text::new(line),
-                            TextFont {
-                                font_size: 18.0,
-                                ..Default::default()
-                            },
+                            ui_text_font(&font, 18.0),
                             TextColor(TEXT_MUTED),
                         ));
                     }
@@ -263,7 +339,8 @@ fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLau
         });
 }
 
-fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>) {
+fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Res<UiFontHandle>) {
+    let font = ui_font.0.clone();
     commands
         .spawn((
             Name::new("HudRoot"),
@@ -296,18 +373,12 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>) {
                 children![
                     (
                         Text::new(format!("{}模式", session_mode.label())),
-                        TextFont {
-                            font_size: 21.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 21.0),
                         TextColor(TEXT_ACCENT),
                     ),
                     (
                         Text::new("世界状态载入中"),
-                        TextFont {
-                            font_size: 16.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 16.0),
                         TextColor(TEXT_PRIMARY),
                         HudStatsText,
                     )
@@ -329,10 +400,7 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>) {
                 BorderColor::all(Color::srgba(0.28, 0.34, 0.37, 0.8)),
                 children![(
                     Text::new(control_hint(*session_mode)),
-                    TextFont {
-                        font_size: 16.0,
-                        ..Default::default()
-                    },
+                    ui_text_font(&font, 16.0),
                     TextColor(TEXT_MUTED),
                     HudControlText,
                 )],
@@ -349,10 +417,7 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>) {
                 Crosshair,
                 children![(
                     Text::new("+"),
-                    TextFont {
-                        font_size: 20.0,
-                        ..Default::default()
-                    },
+                    ui_text_font(&font, 20.0),
                     TextColor(Color::srgb(0.93, 0.92, 0.88)),
                 )],
             ));
@@ -379,10 +444,7 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>) {
                     HudOmenContainer,
                     children![(
                         Text::new(""),
-                        TextFont {
-                            font_size: 18.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 18.0),
                         TextColor(TEXT_ACCENT),
                         HudOmenText,
                     )]
@@ -391,7 +453,12 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>) {
         });
 }
 
-fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
+fn spawn_pause_menu(
+    mut commands: Commands,
+    session_mode: Res<SessionMode>,
+    ui_font: Res<UiFontHandle>,
+) {
+    let font = ui_font.0.clone();
     commands
         .spawn((
             Name::new("PauseMenuRoot"),
@@ -424,18 +491,12 @@ fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
                 .with_children(|parent| {
                     parent.spawn((
                         Text::new("已暂停"),
-                        TextFont {
-                            font_size: 34.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 34.0),
                         TextColor(TEXT_PRIMARY),
                     ));
                     parent.spawn((
                         Text::new(format!("当前会话：{}模式", session_mode.label())),
-                        TextFont {
-                            font_size: 18.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(&font, 18.0),
                         TextColor(TEXT_MUTED),
                         Node {
                             margin: UiRect::bottom(px(4)),
@@ -444,6 +505,7 @@ fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
                     ));
                     spawn_action_button(
                         parent,
+                        &font,
                         "继续",
                         "回到当前会话",
                         UiButtonAction::Resume,
@@ -451,6 +513,7 @@ fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
                     );
                     spawn_action_button(
                         parent,
+                        &font,
                         "重新开始",
                         "按当前模式重建世界会话",
                         UiButtonAction::Restart,
@@ -458,6 +521,7 @@ fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
                     );
                     spawn_action_button(
                         parent,
+                        &font,
                         "返回主菜单",
                         "结束当前会话并回到标题界面",
                         UiButtonAction::ReturnToMenu,
@@ -465,6 +529,7 @@ fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
                     );
                     spawn_action_button(
                         parent,
+                        &font,
                         "退出",
                         "关闭程序",
                         UiButtonAction::Quit,
@@ -476,6 +541,7 @@ fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
 
 fn spawn_action_button(
     parent: &mut ChildSpawnerCommands<'_>,
+    font: &Handle<Font>,
     title: &'static str,
     subtitle: &'static str,
     action: UiButtonAction,
@@ -507,28 +573,19 @@ fn spawn_action_button(
                 children![
                     (
                         Text::new(title),
-                        TextFont {
-                            font_size: 22.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(font, 22.0),
                         TextColor(TEXT_PRIMARY),
                     ),
                     (
                         Text::new(subtitle),
-                        TextFont {
-                            font_size: 14.0,
-                            ..Default::default()
-                        },
+                        ui_text_font(font, 14.0),
                         TextColor(TEXT_MUTED),
                     )
                 ]
             ),
             (
                 Text::new(">"),
-                TextFont {
-                    font_size: 20.0,
-                    ..Default::default()
-                },
+                ui_text_font(font, 20.0),
                 TextColor(TEXT_ACCENT),
             )
         ],
