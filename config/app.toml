@@ -4,7 +4,7 @@ performance_log_name = "performance.log"
 frame_log_interval = 120
 
 [presentation]
-enabled = true
+enabled = false
 scene_duration_seconds = 7.0
 camera_blend_speed = 2.0
 
@@ -24,11 +24,22 @@ river_frequency = 0.19
 river_depth = 0.72
 erosion_strength = 0.52
 sediment_bias = 0.28
+visible_chunk_radius = 2
+material_texture_resolution = 256
 
 [environment]
 day_length_seconds = 240.0
 wander_radius = 6.0
 wander_speed = 0.75
+
+[player]
+walk_speed = 7.8
+sprint_multiplier = 1.7
+mouse_sensitivity = 0.0021
+eye_height = 1.68
+body_height = 1.2
+jump_velocity = 6.5
+gravity = 18.5
 
 [signs]
 resonance_threshold = 0.72

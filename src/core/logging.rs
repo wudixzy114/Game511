@@ -110,7 +110,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::core::config::{
-        AppConfig, EnvironmentConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
+        AppConfig, EnvironmentConfig, PlayerConfig, PresentationConfig, QualityConfig,
+        SignConfig, WorldConfig,
     };
 
     use super::rolling_path;
@@ -149,11 +150,22 @@ mod tests {
                 river_depth: 0.4,
                 erosion_strength: 0.25,
                 sediment_bias: 0.15,
+                visible_chunk_radius: 1,
+                material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {
                 day_length_seconds: 180.0,
                 wander_radius: 4.0,
                 wander_speed: 0.7,
+            },
+            player: PlayerConfig {
+                walk_speed: 7.0,
+                sprint_multiplier: 1.6,
+                mouse_sensitivity: 0.002,
+                eye_height: 1.65,
+                body_height: 1.2,
+                jump_velocity: 6.0,
+                gravity: 18.0,
             },
             signs: SignConfig {
                 resonance_threshold: 0.5,

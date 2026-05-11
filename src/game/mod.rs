@@ -1,3 +1,4 @@
+pub mod player;
 pub mod presentation;
 pub mod signs;
 pub mod world;
@@ -12,8 +13,12 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(world::WorldPlugin);
         app.add_plugins(signs::SignPlugin);
-        if presentation_mode_enabled_internal(None, app.world().get_resource::<AppConfig>()) {
+        let presentation_enabled =
+            presentation_mode_enabled_internal(None, app.world().get_resource::<AppConfig>());
+        if presentation_enabled {
             app.add_plugins(presentation::PresentationPlugin);
+        } else {
+            app.add_plugins(player::PlayerPlugin);
         }
     }
 }
@@ -29,7 +34,8 @@ fn presentation_mode_enabled_internal(env_value: Option<&str>, config: Option<&A
 mod tests {
     use super::presentation_mode_enabled_internal;
     use crate::core::config::{
-        AppConfig, EnvironmentConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
+        AppConfig, EnvironmentConfig, PlayerConfig, PresentationConfig, QualityConfig,
+        SignConfig, WorldConfig,
     };
     use std::path::PathBuf;
 
@@ -60,11 +66,22 @@ mod tests {
                 river_depth: 0.4,
                 erosion_strength: 0.25,
                 sediment_bias: 0.15,
+                visible_chunk_radius: 1,
+                material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {
                 day_length_seconds: 180.0,
                 wander_radius: 4.0,
                 wander_speed: 0.7,
+            },
+            player: PlayerConfig {
+                walk_speed: 7.0,
+                sprint_multiplier: 1.6,
+                mouse_sensitivity: 0.002,
+                eye_height: 1.65,
+                body_height: 1.2,
+                jump_velocity: 6.0,
+                gravity: 18.0,
             },
             signs: SignConfig {
                 resonance_threshold: 0.5,
