@@ -72,7 +72,8 @@ fn initialize_first_person_state(
     state.cursor_locked = true;
 
     player_transform.rotation = Quat::IDENTITY;
-    camera_transform.translation = player_transform.translation + Vec3::Y * config.player.eye_height;
+    camera_transform.translation =
+        player_transform.translation + Vec3::Y * config.player.eye_height;
     camera_transform.rotation = Quat::IDENTITY;
 }
 
@@ -152,7 +153,8 @@ fn move_player_body(
         movement = movement.normalize();
     }
 
-    let sprint_multiplier = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+    let sprint_multiplier = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
+    {
         config.player.sprint_multiplier
     } else {
         1.0
@@ -161,7 +163,9 @@ fn move_player_body(
     let horizontal_delta = movement * horizontal_speed * time.delta_secs();
     transform.translation += Vec3::new(horizontal_delta.x, 0.0, horizontal_delta.z);
 
-    if let Some(ground_height) = world_map.sample_height(transform.translation.x, transform.translation.z) {
+    if let Some(ground_height) =
+        world_map.sample_height(transform.translation.x, transform.translation.z)
+    {
         let target_y = ground_height + config.player.body_height;
         if state.grounded && keys.just_pressed(KeyCode::Space) {
             state.vertical_velocity = config.player.jump_velocity;
@@ -198,7 +202,8 @@ fn sync_camera_to_player(
         return;
     };
 
-    camera_transform.translation = player_transform.translation + Vec3::Y * config.player.eye_height;
+    camera_transform.translation =
+        player_transform.translation + Vec3::Y * config.player.eye_height;
     camera_transform.rotation = Quat::from_euler(EulerRot::YXZ, state.yaw, state.pitch, 0.0);
 }
 

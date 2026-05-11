@@ -244,9 +244,10 @@ fn build_scene(
 
 fn find_anchor(world_map: &WorldMap, biome: BiomeKind) -> Option<SceneAnchor> {
     let mut best: Option<SceneAnchor> = None;
+    let search_radius = world_map.showcase_search_radius();
 
-    for z in -world_map.radius()..=world_map.radius() {
-        for x in -world_map.radius()..=world_map.radius() {
+    for z in -search_radius..=search_radius {
+        for x in -search_radius..=search_radius {
             let Some(tile) = world_map.tile_at_grid(x, z) else {
                 continue;
             };

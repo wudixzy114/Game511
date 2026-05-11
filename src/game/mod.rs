@@ -34,8 +34,8 @@ fn presentation_mode_enabled_internal(env_value: Option<&str>, config: Option<&A
 mod tests {
     use super::presentation_mode_enabled_internal;
     use crate::core::config::{
-        AppConfig, EnvironmentConfig, PlayerConfig, PresentationConfig, QualityConfig,
-        SignConfig, WorldConfig,
+        AppConfig, EnvironmentConfig, PlayerConfig, PresentationConfig, QualityConfig, SignConfig,
+        WorldConfig,
     };
     use std::path::PathBuf;
 
@@ -67,6 +67,7 @@ mod tests {
                 erosion_strength: 0.25,
                 sediment_bias: 0.15,
                 visible_chunk_radius: 1,
+                showcase_search_radius: 4,
                 material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {

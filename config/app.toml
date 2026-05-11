@@ -10,12 +10,12 @@ camera_blend_speed = 2.0
 
 [world]
 seed = 511
-world_radius = 7
-chunk_radius = 2
+world_radius = 512
+chunk_radius = 6
 cell_size = 3.2
 terrain_subdivisions = 8
-terrain_scale = 8.5
-height_variation = 4.2
+terrain_scale = 18.0
+height_variation = 6.0
 water_level = -0.2
 noise_octaves = 5
 ridge_sharpness = 2.1
@@ -24,7 +24,8 @@ river_frequency = 0.19
 river_depth = 0.72
 erosion_strength = 0.52
 sediment_bias = 0.28
-visible_chunk_radius = 2
+visible_chunk_radius = 4
+showcase_search_radius = 48
 material_texture_resolution = 256
 
 [environment]
