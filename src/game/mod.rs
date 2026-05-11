@@ -1,5 +1,6 @@
 pub mod environment;
 pub mod flow;
+pub mod journey;
 pub mod player;
 pub mod presentation;
 pub mod signs;
@@ -25,24 +26,17 @@ impl Plugin for GamePlugin {
             app.world().get_resource::<AppConfig>(),
         );
 
-        match auto_start_mode {
-            Some(mode) => {
-                app.insert_state(AppScreen::InGame);
-                app.insert_resource(mode);
-            }
-            None => {
-                app.init_state::<AppScreen>();
-                app.insert_resource(SessionMode::Exploration);
-            }
-        }
+        app.init_state::<AppScreen>();
+        app.insert_resource(auto_start_mode.unwrap_or(SessionMode::Exploration));
         app.add_sub_state::<flow::InGameState>();
-        app.insert_resource(PendingSessionLaunch::default());
+        app.insert_resource(PendingSessionLaunch(auto_start_mode));
 
         app.add_plugins(ui::UiPlugin);
         app.add_plugins(world::WorldPlugin);
         app.add_plugins(environment::EnvironmentPlugin);
         app.add_plugins(signs::SignPlugin);
         app.add_plugins(player::PlayerPlugin);
+        app.add_plugins(journey::JourneyPlugin);
         app.add_plugins(presentation::PresentationPlugin);
     }
 }

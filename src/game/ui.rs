@@ -821,9 +821,20 @@ fn omen_label(omen: Option<OmenKind>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::game::{flow::SessionMode, signs::OmenKind, world::BiomeKind};
+    use bevy::{
+        prelude::{App, AppExtStates, State, Update},
+        state::app::StatesPlugin,
+    };
 
-    use super::{biome_label, control_hint, omen_label, time_of_day_label};
+    use crate::game::{
+        flow::{AppScreen, PendingSessionLaunch, SessionMode},
+        signs::OmenKind,
+        world::BiomeKind,
+    };
+
+    use super::{
+        biome_label, control_hint, omen_label, process_pending_session_launch, time_of_day_label,
+    };
 
     #[test]
     fn time_of_day_breakpoints_cover_full_cycle() {
@@ -843,5 +854,28 @@ mod tests {
         assert_eq!(biome_label(BiomeKind::Grove), "林地");
         assert_eq!(omen_label(Some(OmenKind::StillWater)), "止水");
         assert_eq!(omen_label(None), "未感知");
+    }
+
+    #[test]
+    fn pending_launch_transitions_from_menu_into_game() {
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin);
+        app.init_state::<AppScreen>();
+        app.insert_resource(SessionMode::Exploration);
+        app.insert_resource(PendingSessionLaunch(Some(SessionMode::Presentation)));
+        app.add_systems(Update, process_pending_session_launch);
+
+        app.update();
+        app.update();
+
+        assert_eq!(
+            *app.world().resource::<State<AppScreen>>().get(),
+            AppScreen::InGame
+        );
+        assert_eq!(
+            *app.world().resource::<SessionMode>(),
+            SessionMode::Presentation
+        );
+        assert_eq!(app.world().resource::<PendingSessionLaunch>().0, None);
     }
 }
