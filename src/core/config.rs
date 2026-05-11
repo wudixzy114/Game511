@@ -47,6 +47,10 @@ pub struct WorldConfig {
     pub streaming_chunk_budget: u32,
     pub background_generation_budget: u32,
     pub streaming_cache_capacity: usize,
+    pub collision_proxy_radius: i32,
+    pub collision_subdivisions: u32,
+    pub collision_chunk_budget: u32,
+    pub collision_cache_capacity: usize,
     pub material_texture_resolution: u32,
 }
 
@@ -150,6 +154,10 @@ showcase_search_radius = 12
 streaming_chunk_budget = 2
 background_generation_budget = 3
 streaming_cache_capacity = 64
+collision_proxy_radius = 2
+collision_subdivisions = 10
+collision_chunk_budget = 2
+collision_cache_capacity = 48
 material_texture_resolution = 192
 
 [presentation]
@@ -205,6 +213,10 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.world.streaming_chunk_budget, 2);
         assert_eq!(config.world.background_generation_budget, 3);
         assert_eq!(config.world.streaming_cache_capacity, 64);
+        assert_eq!(config.world.collision_proxy_radius, 2);
+        assert_eq!(config.world.collision_subdivisions, 10);
+        assert_eq!(config.world.collision_chunk_budget, 2);
+        assert_eq!(config.world.collision_cache_capacity, 48);
         assert_eq!(config.world.material_texture_resolution, 192);
         assert_eq!(config.player.walk_speed, 7.0);
         assert_eq!(config.player.eye_height, 1.65);

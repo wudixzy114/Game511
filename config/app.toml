@@ -32,6 +32,10 @@ showcase_search_radius = 48
 streaming_chunk_budget = 2
 background_generation_budget = 4
 streaming_cache_capacity = 192
+collision_proxy_radius = 2
+collision_subdivisions = 12
+collision_chunk_budget = 2
+collision_cache_capacity = 48
 material_texture_resolution = 256
 
 [environment]

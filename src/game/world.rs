@@ -44,7 +44,12 @@ impl Plugin for WorldPlugin {
             Update,
             (
                 advance_world_cycle,
-                (update_visible_chunks, stream_terrain_chunks).chain(),
+                (
+                    update_visible_chunks,
+                    stream_terrain_chunks,
+                    update_collision_proxy,
+                )
+                    .chain(),
                 animate_wanderer,
                 animate_sunlight,
             ),
@@ -305,6 +310,201 @@ struct TerrainStreamingConfig {
     integrate_budget_per_frame: usize,
     background_budget_per_frame: usize,
     cache_capacity: usize,
+}
+
+#[derive(Debug, Resource, Clone, Copy)]
+struct TerrainCollisionConfig {
+    active_radius: i32,
+    subdivisions: u32,
+    build_budget_per_frame: usize,
+    cache_capacity: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TerrainCollisionChunk {
+    origin: Vec2,
+    sample_step: f32,
+    stride: usize,
+    depth: usize,
+    heights: Vec<f32>,
+}
+
+impl TerrainCollisionChunk {
+    fn sample_height(&self, world_x: f32, world_z: f32) -> Option<f32> {
+        if self.sample_step <= 0.0 || self.stride == 0 || self.depth == 0 {
+            return None;
+        }
+
+        let max_x = (self.stride.saturating_sub(1)) as f32 * self.sample_step;
+        let max_z = (self.depth.saturating_sub(1)) as f32 * self.sample_step;
+        let local_x_world = world_x - self.origin.x;
+        let local_z_world = world_z - self.origin.y;
+        let epsilon = self.sample_step * 0.001;
+        if local_x_world < -epsilon
+            || local_z_world < -epsilon
+            || local_x_world > max_x + epsilon
+            || local_z_world > max_z + epsilon
+        {
+            return None;
+        }
+
+        let local_x = (local_x_world / self.sample_step).clamp(0.0, self.stride as f32 - 1.0);
+        let local_z = (local_z_world / self.sample_step).clamp(0.0, self.depth as f32 - 1.0);
+        let x0 = local_x.floor() as usize;
+        let z0 = local_z.floor() as usize;
+        let x1 = (x0 + 1).min(self.stride - 1);
+        let z1 = (z0 + 1).min(self.depth - 1);
+        let tx = local_x - x0 as f32;
+        let tz = local_z - z0 as f32;
+
+        let h00 = self.heights[z0 * self.stride + x0];
+        let h10 = self.heights[z0 * self.stride + x1];
+        let h01 = self.heights[z1 * self.stride + x0];
+        let h11 = self.heights[z1 * self.stride + x1];
+        let hx0 = h00 + (h10 - h00) * tx;
+        let hx1 = h01 + (h11 - h01) * tx;
+        Some(hx0 + (hx1 - hx0) * tz)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedTerrainCollisionChunk {
+    chunk: TerrainCollisionChunk,
+    last_used_tick: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerrainCollisionSample {
+    pub height: f32,
+    pub normal: Vec3,
+    pub slope: f32,
+}
+
+#[derive(Debug, Resource, Default)]
+pub struct TerrainCollisionProxy {
+    active: Vec<WorldChunkCoord>,
+    pending: VecDeque<WorldChunkCoord>,
+    chunks: HashMap<WorldChunkCoord, CachedTerrainCollisionChunk>,
+    tick: u64,
+}
+
+impl TerrainCollisionProxy {
+    fn enqueue_missing(
+        &mut self,
+        targets: impl IntoIterator<Item = WorldChunkCoord>,
+        existing: &HashSet<WorldChunkCoord>,
+    ) {
+        let mut queued: HashSet<WorldChunkCoord> = self.pending.iter().copied().collect();
+        for target in targets {
+            if existing.contains(&target) || !queued.insert(target) {
+                continue;
+            }
+            self.pending.push_back(target);
+        }
+    }
+
+    fn retain_active(&mut self, active: &HashSet<WorldChunkCoord>) {
+        self.pending.retain(|coord| active.contains(coord));
+    }
+
+    fn pop_next(&mut self) -> Option<WorldChunkCoord> {
+        self.pending.pop_front()
+    }
+
+    fn insert_chunk(&mut self, coord: WorldChunkCoord, chunk: TerrainCollisionChunk) {
+        self.tick = self.tick.wrapping_add(1);
+        self.chunks.insert(
+            coord,
+            CachedTerrainCollisionChunk {
+                chunk,
+                last_used_tick: self.tick,
+            },
+        );
+    }
+
+    fn get_chunk(&mut self, coord: WorldChunkCoord) -> Option<&TerrainCollisionChunk> {
+        self.tick = self.tick.wrapping_add(1);
+        let cached = self.chunks.get_mut(&coord)?;
+        cached.last_used_tick = self.tick;
+        Some(&cached.chunk)
+    }
+
+    pub fn sample_height(
+        &mut self,
+        world_map: &WorldMap,
+        world_x: f32,
+        world_z: f32,
+    ) -> Option<f32> {
+        let coord = world_map.chunk_coord_at(world_x, world_z)?;
+        if let Some(chunk) = self.get_chunk(coord)
+            && let Some(height) = chunk.sample_height(world_x, world_z)
+        {
+            return Some(height);
+        }
+        world_map.sample_height(world_x, world_z)
+    }
+
+    pub fn sample_ground(
+        &mut self,
+        world_map: &WorldMap,
+        world_x: f32,
+        world_z: f32,
+    ) -> Option<TerrainCollisionSample> {
+        let coord = world_map.chunk_coord_at(world_x, world_z)?;
+        let height = self.sample_height(world_map, world_x, world_z)?;
+        let sample_step = self
+            .get_chunk(coord)
+            .map(|chunk| chunk.sample_step)
+            .unwrap_or_else(|| world_map.sample_spacing().max(0.001));
+        let left = self
+            .sample_height(world_map, world_x - sample_step, world_z)
+            .unwrap_or(height);
+        let right = self
+            .sample_height(world_map, world_x + sample_step, world_z)
+            .unwrap_or(height);
+        let down = self
+            .sample_height(world_map, world_x, world_z - sample_step)
+            .unwrap_or(height);
+        let up = self
+            .sample_height(world_map, world_x, world_z + sample_step)
+            .unwrap_or(height);
+
+        Some(TerrainCollisionSample {
+            height,
+            normal: normal_from_neighbor_heights(left, right, down, up, sample_step),
+            slope: ((right - left).hypot(up - down) / (sample_step * 2.0)).min(3.0),
+        })
+    }
+
+    fn evict_inactive(&mut self, capacity: usize, active: &HashSet<WorldChunkCoord>) -> usize {
+        let capacity = capacity.max(active.len());
+        if self.chunks.len() <= capacity {
+            return 0;
+        }
+
+        let mut candidates: Vec<(WorldChunkCoord, u64)> = self
+            .chunks
+            .iter()
+            .filter(|(coord, _)| !active.contains(coord))
+            .map(|(coord, cached)| (*coord, cached.last_used_tick))
+            .collect();
+        candidates.sort_by_key(|(_, last_used_tick)| *last_used_tick);
+
+        let mut evicted = 0_usize;
+        for (coord, _) in candidates {
+            if self.chunks.len() <= capacity {
+                break;
+            }
+            if self.chunks.remove(&coord).is_some() {
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+
+    fn len(&self) -> usize {
+        self.chunks.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1001,6 +1201,16 @@ fn create_terrain_material_texture(
         background_budget_per_frame: config.world.background_generation_budget.max(1) as usize,
         cache_capacity: config.world.streaming_cache_capacity.max(1),
     });
+    commands.insert_resource(TerrainCollisionConfig {
+        active_radius: config.world.collision_proxy_radius.max(0),
+        subdivisions: config
+            .world
+            .collision_subdivisions
+            .max(config.world.terrain_subdivisions.max(1)),
+        build_budget_per_frame: config.world.collision_chunk_budget.max(1) as usize,
+        cache_capacity: config.world.collision_cache_capacity.max(1),
+    });
+    commands.insert_resource(TerrainCollisionProxy::default());
     commands.insert_resource(create_generation_scheduler());
 }
 
@@ -1081,6 +1291,8 @@ fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut collision_proxy: ResMut<TerrainCollisionProxy>,
+    collision_config: Res<TerrainCollisionConfig>,
     resources: WorldSpawnResources<'_>,
 ) {
     let started_at = Instant::now();
@@ -1162,6 +1374,21 @@ fn spawn_world(
     commands.insert_resource(detail_materials.clone());
     commands.insert_resource(detail_meshes.clone());
 
+    let initial_collision_coords = collision_chunk_coords_for_position(
+        &world_map,
+        spots.meadow.position,
+        collision_config.active_radius,
+    );
+    for coord in &initial_collision_coords {
+        let Some(chunk) = build_collision_chunk(&world_map, *coord, collision_config.subdivisions)
+        else {
+            continue;
+        };
+        collision_proxy.insert_chunk(*coord, chunk);
+    }
+    collision_proxy.active = initial_collision_coords.clone();
+    collision_proxy.pending.clear();
+
     commands.spawn((
         Name::new("WaterPlane"),
         Mesh3d(meshes.add(Mesh::from(Cylinder::new(world_map.extent() * 1.42, 0.03)))),
@@ -1188,6 +1415,7 @@ fn spawn_world(
         extent = world_map.extent(),
         initial_chunk_count = initial_targets.len(),
         queued_chunk_count = queued_chunk_count,
+        initial_collision_chunk_count = initial_collision_coords.len(),
         generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
         "lod streaming terrain bootstrapped"
     );
@@ -1383,6 +1611,63 @@ fn stream_terrain_chunks(
     }
 }
 
+fn update_collision_proxy(
+    world_map: Res<WorldMap>,
+    collision_config: Res<TerrainCollisionConfig>,
+    mut collision_proxy: ResMut<TerrainCollisionProxy>,
+    anchors: Query<&Transform, With<WandererPrototype>>,
+) {
+    let Some(anchor_transform) = anchors.iter().next() else {
+        return;
+    };
+
+    let targets = collision_chunk_coords_for_position(
+        &world_map,
+        anchor_transform.translation,
+        collision_config.active_radius,
+    );
+    if targets != collision_proxy.active {
+        let active_set: HashSet<WorldChunkCoord> = targets.iter().copied().collect();
+        let existing_set: HashSet<WorldChunkCoord> =
+            collision_proxy.chunks.keys().copied().collect();
+        collision_proxy.retain_active(&active_set);
+        collision_proxy.enqueue_missing(targets.iter().copied(), &existing_set);
+        collision_proxy.active = targets;
+    }
+
+    let started_at = Instant::now();
+    let mut built = 0_usize;
+    while built < collision_config.build_budget_per_frame.max(1) {
+        let Some(coord) = collision_proxy.pop_next() else {
+            break;
+        };
+        if collision_proxy.chunks.contains_key(&coord) {
+            continue;
+        }
+        let Some(chunk) = build_collision_chunk(&world_map, coord, collision_config.subdivisions)
+        else {
+            continue;
+        };
+        collision_proxy.insert_chunk(coord, chunk);
+        built += 1;
+    }
+
+    let active_set: HashSet<WorldChunkCoord> = collision_proxy.active.iter().copied().collect();
+    let evicted = collision_proxy.evict_inactive(collision_config.cache_capacity, &active_set);
+
+    if built > 0 || evicted > 0 {
+        tracing::debug!(
+            target: "dao_game::world::collision",
+            built_chunks = built,
+            pending_chunks = collision_proxy.pending.len(),
+            cached_chunks = collision_proxy.len(),
+            evicted_chunks = evicted,
+            generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
+            "terrain collision proxy advanced"
+        );
+    }
+}
+
 fn advance_world_cycle(
     time: Res<Time>,
     config: Res<AppConfig>,
@@ -1405,10 +1690,14 @@ fn animate_wanderer(
     config: Res<AppConfig>,
     control: Option<Res<WorldPresentationControl>>,
     first_person: Option<Res<FirstPersonState>>,
-    world_map: Res<WorldMap>,
-    spots: Res<WorldShowcaseSpots>,
+    resources: (
+        Res<WorldMap>,
+        ResMut<TerrainCollisionProxy>,
+        Res<WorldShowcaseSpots>,
+    ),
     mut query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
+    let (world_map, mut collision_proxy, spots) = resources;
     let Some(mut transform) = query.iter_mut().next() else {
         return;
     };
@@ -1426,6 +1715,7 @@ fn animate_wanderer(
             config.environment.wander_speed,
             control,
             &world_map,
+            &mut collision_proxy,
             &mut transform,
         );
         return;
@@ -1444,10 +1734,12 @@ fn animate_wanderer(
         + ((t + 0.25) * 0.28).sin() * radius * 0.22;
     let next_z = orbit_center.z + ((t + 0.25) * 0.63).sin() * radius * 0.92;
 
-    let Some(height) = world_map.sample_height(x, z) else {
+    let Some(height) = collision_proxy.sample_height(&world_map, x, z) else {
         return;
     };
-    let next_height = world_map.sample_height(next_x, next_z).unwrap_or(height);
+    let next_height = collision_proxy
+        .sample_height(&world_map, next_x, next_z)
+        .unwrap_or(height);
 
     let target_position = Vec3::new(x, height + 1.2, z);
     let next_position = Vec3::new(next_x, next_height + 1.2, next_z);
@@ -1461,12 +1753,15 @@ fn animate_controlled_wanderer(
     base_speed: f32,
     control: &WorldPresentationControl,
     world_map: &WorldMap,
+    collision_proxy: &mut TerrainCollisionProxy,
     transform: &mut Transform,
 ) {
     let Some(mut target_position) = control.wander_target else {
         return;
     };
-    let Some(height) = world_map.sample_height(target_position.x, target_position.z) else {
+    let Some(height) =
+        collision_proxy.sample_height(world_map, target_position.x, target_position.z)
+    else {
         return;
     };
     target_position.y = height + 1.2;
@@ -1615,6 +1910,50 @@ fn build_chunk_mesh_for_lod(
             key.coord,
             key.lod.subdivisions(context.world_map.subdivisions()),
         )
+}
+
+fn build_collision_chunk(
+    world_map: &WorldMap,
+    coord: WorldChunkCoord,
+    subdivisions: u32,
+) -> Option<TerrainCollisionChunk> {
+    let (tile_x_min, tile_x_max, tile_z_min, tile_z_max) =
+        world_map.chunk_mesh_tile_bounds(coord)?;
+    let subdivisions = subdivisions.max(1);
+    let x_steps = ((tile_x_max - tile_x_min) as u32 * subdivisions) as usize;
+    let z_steps = ((tile_z_max - tile_z_min) as u32 * subdivisions) as usize;
+    let stride = x_steps + 1;
+    let depth = z_steps + 1;
+    if stride < 2 || depth < 2 {
+        return None;
+    }
+
+    let sample_step = (world_map.cell_size() / subdivisions as f32).max(0.001);
+    let mut heights = Vec::with_capacity(stride * depth);
+    for z_step in 0..=z_steps {
+        for x_step in 0..=x_steps {
+            let world_x =
+                (tile_x_min as f32 + x_step as f32 / subdivisions as f32) * world_map.cell_size();
+            let world_z =
+                (tile_z_min as f32 + z_step as f32 / subdivisions as f32) * world_map.cell_size();
+            if !world_map.within_world_bounds(world_x, world_z) {
+                return None;
+            }
+            heights
+                .push(sample_terrain(world_x, world_z, world_map.seed, &world_map.terrain).height);
+        }
+    }
+
+    Some(TerrainCollisionChunk {
+        origin: Vec2::new(
+            tile_x_min as f32 * world_map.cell_size(),
+            tile_z_min as f32 * world_map.cell_size(),
+        ),
+        sample_step,
+        stride,
+        depth,
+        heights,
+    })
 }
 
 fn vertex_color(sample: &TerrainVertexSample, water_level: f32) -> Color {
@@ -1887,6 +2226,32 @@ fn chunk_targets_for_camera(
     targets
 }
 
+fn collision_chunk_coords_for_position(
+    world_map: &WorldMap,
+    position: Vec3,
+    radius: i32,
+) -> Vec<WorldChunkCoord> {
+    let Some(center) = world_map.chunk_coord_at(position.x, position.z) else {
+        return Vec::new();
+    };
+
+    let mut coords = Vec::new();
+    for z in (center.z - radius)..=(center.z + radius) {
+        for x in (center.x - radius)..=(center.x + radius) {
+            let coord = WorldChunkCoord { x, z };
+            if world_map.chunk_mesh_tile_bounds(coord).is_some() {
+                coords.push(coord);
+            }
+        }
+    }
+    coords.sort_by_key(|coord| {
+        let dx = coord.x - center.x;
+        let dz = coord.z - center.z;
+        dx * dx + dz * dz
+    });
+    coords
+}
+
 fn build_terrain_palette_texture(world_map: &WorldMap, resolution: u32) -> Image {
     let mut data = Vec::with_capacity((resolution * resolution * 4) as usize);
     let size = resolution as f32;
@@ -2121,10 +2486,11 @@ mod tests {
     };
 
     use super::{
-        BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainChunkKey, TerrainLodConfig,
-        TerrainLodLevel, TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed,
-        accumulate_normals, build_chunk_mesh_for_lod, chunk_targets_for_camera, determine_biome,
-        sample_terrain, should_keep_chunk_key,
+        BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainChunkKey,
+        TerrainCollisionProxy, TerrainLodConfig, TerrainLodLevel, TerrainStreamingQueue,
+        WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals, build_chunk_mesh_for_lod,
+        build_collision_chunk, chunk_targets_for_camera, collision_chunk_coords_for_position,
+        determine_biome, sample_terrain, should_keep_chunk_key,
     };
 
     fn test_config() -> AppConfig {
@@ -2162,6 +2528,10 @@ mod tests {
                 streaming_chunk_budget: 1,
                 background_generation_budget: 2,
                 streaming_cache_capacity: 16,
+                collision_proxy_radius: 1,
+                collision_subdivisions: 6,
+                collision_chunk_budget: 1,
+                collision_cache_capacity: 12,
                 material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {
@@ -2329,6 +2699,75 @@ mod tests {
             targets.first().map(|target| target.key.coord),
             Some(WorldChunkCoord { x: 0, z: 0 })
         );
+    }
+
+    #[test]
+    fn collision_targets_follow_player_position() {
+        let config = test_config();
+        let world_map = WorldMap::new(42, &config);
+        let targets = collision_chunk_coords_for_position(&world_map, Vec3::new(-1.8, 0.0, 0.4), 1);
+
+        assert_eq!(
+            targets.first().copied(),
+            Some(WorldChunkCoord { x: -1, z: 0 })
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|coord| world_map.describe_chunk(*coord).is_some())
+        );
+    }
+
+    #[test]
+    fn collision_chunk_samples_height_close_to_world_height() {
+        let config = test_config();
+        let world_map = WorldMap::new(42, &config);
+        let chunk = build_collision_chunk(&world_map, WorldChunkCoord { x: 0, z: 0 }, 8)
+            .expect("collision chunk should build");
+        let world_x = 0.93;
+        let world_z = 1.11;
+        let proxy_height = chunk
+            .sample_height(world_x, world_z)
+            .expect("cached collision sample should exist");
+        let world_height = world_map
+            .sample_height(world_x, world_z)
+            .expect("world sample should exist");
+
+        assert!((proxy_height - world_height).abs() < 0.2);
+    }
+
+    #[test]
+    fn collision_proxy_falls_back_to_world_sampling() {
+        let config = test_config();
+        let world_map = WorldMap::new(42, &config);
+        let mut proxy = TerrainCollisionProxy::default();
+        let world_x = 0.75;
+        let world_z = 0.5;
+
+        assert_eq!(
+            proxy.sample_height(&world_map, world_x, world_z),
+            world_map.sample_height(world_x, world_z)
+        );
+    }
+
+    #[test]
+    fn collision_proxy_ground_sample_has_upward_normal() {
+        let config = test_config();
+        let world_map = WorldMap::new(42, &config);
+        let mut proxy = TerrainCollisionProxy::default();
+        let coord = world_map
+            .chunk_coord_at(0.75, 0.5)
+            .expect("sample chunk should exist");
+        let chunk =
+            build_collision_chunk(&world_map, coord, 8).expect("collision chunk should build");
+        proxy.insert_chunk(coord, chunk);
+
+        let sample = proxy
+            .sample_ground(&world_map, 0.75, 0.5)
+            .expect("ground sample should exist");
+
+        assert!(sample.normal.y > 0.2);
+        assert!(sample.slope >= 0.0);
     }
 
     #[test]

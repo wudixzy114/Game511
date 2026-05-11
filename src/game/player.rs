@@ -6,7 +6,7 @@ use bevy::{
 
 use crate::{
     core::config::AppConfig,
-    game::world::{WandererPrototype, WorldCamera, WorldMap},
+    game::world::{TerrainCollisionProxy, WandererPrototype, WorldCamera, WorldMap},
 };
 
 pub struct PlayerPlugin;
@@ -124,6 +124,7 @@ fn move_player_body(
     keys: Res<ButtonInput<KeyCode>>,
     config: Res<AppConfig>,
     world_map: Res<WorldMap>,
+    mut collision_proxy: ResMut<TerrainCollisionProxy>,
     mut state: ResMut<FirstPersonState>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
@@ -163,10 +164,10 @@ fn move_player_body(
     let horizontal_delta = movement * horizontal_speed * time.delta_secs();
     transform.translation += Vec3::new(horizontal_delta.x, 0.0, horizontal_delta.z);
 
-    if let Some(ground_height) =
-        world_map.sample_height(transform.translation.x, transform.translation.z)
+    if let Some(ground_sample) =
+        collision_proxy.sample_ground(&world_map, transform.translation.x, transform.translation.z)
     {
-        let target_y = ground_height + config.player.body_height;
+        let target_y = ground_sample.height + config.player.body_height;
         if state.grounded && keys.just_pressed(KeyCode::Space) {
             state.vertical_velocity = config.player.jump_velocity;
             state.grounded = false;

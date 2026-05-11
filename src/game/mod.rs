@@ -74,6 +74,10 @@ mod tests {
                 streaming_chunk_budget: 1,
                 background_generation_budget: 2,
                 streaming_cache_capacity: 16,
+                collision_proxy_radius: 1,
+                collision_subdivisions: 6,
+                collision_chunk_budget: 1,
+                collision_cache_capacity: 12,
                 material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {
