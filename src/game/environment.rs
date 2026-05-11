@@ -8,7 +8,10 @@ use bevy::{
     prelude::*,
 };
 
-use crate::game::world::{SunLight, WorldCamera, WorldCycle, WorldPresentationControl};
+use crate::game::{
+    flow::{AppScreen, InGameState},
+    world::{SunLight, WorldCamera, WorldCycle, WorldPresentationControl},
+};
 
 pub struct EnvironmentPlugin;
 
@@ -16,12 +19,23 @@ impl Plugin for EnvironmentPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(WeatherState::default());
         app.insert_resource(WeatherTransition::default());
-        app.add_systems(First, initialize_environment_scene);
-        app.add_systems(Update, advance_weather_state);
-        app.add_systems(Update, sync_environment_anchors);
-        app.add_systems(Update, update_atmosphere_and_fog);
-        app.add_systems(Update, update_celestial_visuals);
-        app.add_systems(Update, animate_weather_particles);
+        app.add_systems(OnEnter(AppScreen::InGame), reset_environment_state);
+        app.add_systems(
+            First,
+            initialize_environment_scene.run_if(in_state(AppScreen::InGame)),
+        );
+        app.add_systems(
+            Update,
+            (
+                advance_weather_state,
+                sync_environment_anchors,
+                update_atmosphere_and_fog,
+                update_celestial_visuals,
+                animate_weather_particles,
+            )
+                .run_if(in_state(InGameState::Running)),
+        );
+        app.add_systems(OnExit(AppScreen::InGame), cleanup_environment_session);
     }
 }
 
@@ -166,6 +180,14 @@ const WEATHER_SEQUENCE: [WeatherKind; 6] = [
     WeatherKind::Snow,
 ];
 
+fn reset_environment_state(
+    mut weather_state: ResMut<WeatherState>,
+    mut transition: ResMut<WeatherTransition>,
+) {
+    *weather_state = WeatherState::default();
+    *transition = WeatherTransition::default();
+}
+
 fn initialize_environment_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -218,6 +240,7 @@ fn initialize_environment_scene(
     let sky_anchor = commands
         .spawn((
             Name::new("SkyAnchor"),
+            DespawnOnExit(AppScreen::InGame),
             Transform::from_translation(camera_transform.translation),
             SkyAnchor,
         ))
@@ -225,6 +248,7 @@ fn initialize_environment_scene(
     let weather_anchor = commands
         .spawn((
             Name::new("WeatherAnchor"),
+            DespawnOnExit(AppScreen::InGame),
             Transform::from_translation(camera_transform.translation),
             WeatherAnchor,
         ))
@@ -284,6 +308,7 @@ fn initialize_environment_scene(
 
     commands.spawn((
         Name::new("MoonLight"),
+        DespawnOnExit(AppScreen::InGame),
         DirectionalLight {
             illuminance: 0.0,
             shadows_enabled: false,
@@ -295,6 +320,7 @@ fn initialize_environment_scene(
     ));
     commands.spawn((
         Name::new("LightningFlash"),
+        DespawnOnExit(AppScreen::InGame),
         PointLight {
             intensity: 0.0,
             range: 85.0,
@@ -996,6 +1022,10 @@ fn smoothstep_edges(edge0: f32, edge1: f32, value: f32) -> f32 {
 
 fn srgb_color(value: Vec3) -> Color {
     Color::srgb(value.x, value.y, value.z)
+}
+
+fn cleanup_environment_session(mut commands: Commands) {
+    commands.remove_resource::<EnvironmentAssets>();
 }
 
 #[cfg(test)]

@@ -1,0 +1,790 @@
+use bevy::{
+    app::AppExit, camera::ClearColorConfig, ecs::hierarchy::ChildSpawnerCommands,
+    input::keyboard::KeyCode, prelude::*, ui::IsDefaultUiCamera,
+};
+
+use crate::game::{
+    flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
+    signs::{OmenKind, SignState},
+    world::{BiomeKind, WandererPrototype, WorldCycle, WorldMap},
+};
+
+pub struct UiPlugin;
+
+impl Plugin for UiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_ui_camera);
+        app.add_systems(OnEnter(AppScreen::MainMenu), spawn_main_menu);
+        app.add_systems(OnEnter(AppScreen::InGame), spawn_hud);
+        app.add_systems(OnEnter(InGameState::Paused), spawn_pause_menu);
+        app.add_systems(
+            Update,
+            (
+                process_pending_session_launch.run_if(in_state(AppScreen::MainMenu)),
+                update_button_interactions,
+                handle_button_actions,
+                toggle_pause_with_escape.run_if(in_state(AppScreen::InGame)),
+                (
+                    update_hud_control_text,
+                    update_hud_stats_text,
+                    update_hud_omen_text,
+                )
+                    .run_if(in_state(AppScreen::InGame)),
+                update_crosshair_visibility.run_if(in_state(AppScreen::InGame)),
+            ),
+        );
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonTone {
+    Primary,
+    Secondary,
+    Danger,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum UiButtonAction {
+    StartExploration,
+    StartPresentation,
+    Resume,
+    Restart,
+    ReturnToMenu,
+    Quit,
+}
+
+#[derive(Component)]
+struct HudStatsText;
+
+#[derive(Component)]
+struct HudControlText;
+
+#[derive(Component)]
+struct HudOmenText;
+
+#[derive(Component)]
+struct HudOmenContainer;
+
+#[derive(Component)]
+struct Crosshair;
+
+type ButtonInteractionQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Interaction,
+        &'static ButtonTone,
+        &'static mut BackgroundColor,
+    ),
+    (Changed<Interaction>, With<Button>),
+>;
+
+type ButtonActionQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static UiButtonAction),
+    (Changed<Interaction>, With<Button>),
+>;
+
+type HudResources<'w> = (
+    Res<'w, SessionMode>,
+    Option<Res<'w, WorldCycle>>,
+    Option<Res<'w, SignState>>,
+    Option<Res<'w, WorldMap>>,
+);
+
+const TEXT_PRIMARY: Color = Color::srgb(0.92, 0.9, 0.85);
+const TEXT_MUTED: Color = Color::srgb(0.72, 0.71, 0.67);
+const TEXT_ACCENT: Color = Color::srgb(0.84, 0.74, 0.56);
+const MENU_BACKGROUND: Color = Color::srgb(0.11, 0.11, 0.1);
+const PANEL_BACKGROUND: Color = Color::srgba(0.17, 0.17, 0.15, 0.96);
+const PANEL_BORDER: Color = Color::srgb(0.38, 0.33, 0.25);
+const OVERLAY_BACKGROUND: Color = Color::srgba(0.03, 0.04, 0.04, 0.7);
+
+fn spawn_ui_camera(mut commands: Commands) {
+    commands.spawn((
+        Name::new("UiCamera"),
+        Camera2d,
+        Camera {
+            order: 1,
+            clear_color: ClearColorConfig::None,
+            ..Default::default()
+        },
+        IsDefaultUiCamera,
+    ));
+}
+
+fn process_pending_session_launch(
+    mut pending_launch: ResMut<PendingSessionLaunch>,
+    mut session_mode: ResMut<SessionMode>,
+    mut next_screen: ResMut<NextState<AppScreen>>,
+) {
+    let Some(mode) = pending_launch.0.take() else {
+        return;
+    };
+
+    *session_mode = mode;
+    next_screen.set(AppScreen::InGame);
+}
+
+fn spawn_main_menu(mut commands: Commands, pending_launch: Res<PendingSessionLaunch>) {
+    if pending_launch.0.is_some() {
+        return;
+    }
+
+    commands
+        .spawn((
+            Name::new("MainMenuRoot"),
+            DespawnOnExit(AppScreen::MainMenu),
+            Node {
+                width: percent(100),
+                height: percent(100),
+                padding: UiRect::axes(px(56), px(40)),
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Stretch,
+                ..Default::default()
+            },
+            BackgroundColor(MENU_BACKGROUND),
+        ))
+        .with_children(|parent| {
+            parent
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::SpaceBetween,
+                    width: percent(58),
+                    max_width: px(760),
+                    height: percent(100),
+                    ..Default::default()
+                })
+                .with_children(|parent| {
+                    parent.spawn((
+                        Text::new("道"),
+                        TextFont {
+                            font_size: 72.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_PRIMARY),
+                        Node {
+                            margin: UiRect::bottom(px(18)),
+                            ..Default::default()
+                        },
+                    ));
+                    parent.spawn((
+                        Text::new(
+                            "没有任务面板，只有世界、征兆与自己的方向。先把生命周期打通，再把叙事与系统继续往里生长。",
+                        ),
+                        TextFont {
+                            font_size: 22.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_MUTED),
+                        Node {
+                            max_width: px(640),
+                            margin: UiRect::bottom(px(28)),
+                            ..Default::default()
+                        },
+                    ));
+
+                    parent
+                        .spawn((
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(14),
+                                margin: UiRect::top(px(8)),
+                                ..Default::default()
+                            },
+                            BackgroundColor(Color::NONE),
+                        ))
+                        .with_children(|parent| {
+                            spawn_action_button(
+                                parent,
+                                "进入世界",
+                                "第一人称探索当前原型",
+                                UiButtonAction::StartExploration,
+                                ButtonTone::Primary,
+                            );
+                            spawn_action_button(
+                                parent,
+                                "展示场景",
+                                "自动巡游现有环境与征兆系统",
+                                UiButtonAction::StartPresentation,
+                                ButtonTone::Secondary,
+                            );
+                            spawn_action_button(
+                                parent,
+                                "退出",
+                                "关闭程序",
+                                UiButtonAction::Quit,
+                                ButtonTone::Danger,
+                            );
+                        });
+                });
+
+            parent
+                .spawn((
+                    Node {
+                        width: px(420),
+                        align_self: AlignSelf::Center,
+                        padding: UiRect::all(px(28)),
+                        border: UiRect::all(px(1)),
+                        border_radius: BorderRadius::all(px(8)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(16),
+                        ..Default::default()
+                    },
+                    BackgroundColor(PANEL_BACKGROUND),
+                    BorderColor::all(PANEL_BORDER),
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Text::new("当前流程"),
+                        TextFont {
+                            font_size: 26.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_ACCENT),
+                    ));
+                    for line in [
+                        "主菜单 -> 进入游戏",
+                        "Esc 打开暂停界面",
+                        "暂停界面可继续、重开、返回主菜单、退出",
+                        "HUD 会显示时间、地貌与征兆状态",
+                    ] {
+                        parent.spawn((
+                            Text::new(line),
+                            TextFont {
+                                font_size: 18.0,
+                                ..Default::default()
+                            },
+                            TextColor(TEXT_MUTED),
+                        ));
+                    }
+                });
+        });
+}
+
+fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>) {
+    commands
+        .spawn((
+            Name::new("HudRoot"),
+            DespawnOnExit(AppScreen::InGame),
+            Node {
+                width: percent(100),
+                height: percent(100),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..Default::default()
+            },
+            BackgroundColor(Color::NONE),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(24),
+                    top: px(24),
+                    padding: UiRect::all(px(18)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(8)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
+                    width: px(360),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.72)),
+                BorderColor::all(Color::srgba(0.32, 0.35, 0.28, 0.85)),
+                children![
+                    (
+                        Text::new(format!("{}模式", session_mode.label())),
+                        TextFont {
+                            font_size: 21.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_ACCENT),
+                    ),
+                    (
+                        Text::new("世界状态载入中"),
+                        TextFont {
+                            font_size: 16.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_PRIMARY),
+                        HudStatsText,
+                    )
+                ],
+            ));
+
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(24),
+                    top: px(24),
+                    padding: UiRect::all(px(16)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(8)),
+                    width: px(320),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.66)),
+                BorderColor::all(Color::srgba(0.28, 0.34, 0.37, 0.8)),
+                children![(
+                    Text::new(control_hint(*session_mode)),
+                    TextFont {
+                        font_size: 16.0,
+                        ..Default::default()
+                    },
+                    TextColor(TEXT_MUTED),
+                    HudControlText,
+                )],
+            ));
+
+            parent.spawn((
+                Node {
+                    width: px(24),
+                    height: px(24),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..Default::default()
+                },
+                Crosshair,
+                children![(
+                    Text::new("+"),
+                    TextFont {
+                        font_size: 20.0,
+                        ..Default::default()
+                    },
+                    TextColor(Color::srgb(0.93, 0.92, 0.88)),
+                )],
+            ));
+
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: px(28),
+                    width: percent(100),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..Default::default()
+                },
+                children![(
+                    Node {
+                        padding: UiRect::axes(px(18), px(12)),
+                        border: UiRect::all(px(1)),
+                        border_radius: BorderRadius::all(px(8)),
+                        ..Default::default()
+                    },
+                    BackgroundColor(Color::srgba(0.12, 0.13, 0.12, 0.76)),
+                    BorderColor::all(Color::srgba(0.45, 0.38, 0.26, 0.85)),
+                    Visibility::Hidden,
+                    HudOmenContainer,
+                    children![(
+                        Text::new(""),
+                        TextFont {
+                            font_size: 18.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_ACCENT),
+                        HudOmenText,
+                    )]
+                )],
+            ));
+        });
+}
+
+fn spawn_pause_menu(mut commands: Commands, session_mode: Res<SessionMode>) {
+    commands
+        .spawn((
+            Name::new("PauseMenuRoot"),
+            DespawnOnExit(AppScreen::InGame),
+            DespawnOnExit(InGameState::Paused),
+            Node {
+                width: percent(100),
+                height: percent(100),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..Default::default()
+            },
+            BackgroundColor(OVERLAY_BACKGROUND),
+        ))
+        .with_children(|parent| {
+            parent
+                .spawn((
+                    Node {
+                        width: px(440),
+                        padding: UiRect::all(px(28)),
+                        border: UiRect::all(px(1)),
+                        border_radius: BorderRadius::all(px(8)),
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(16),
+                        ..Default::default()
+                    },
+                    BackgroundColor(PANEL_BACKGROUND),
+                    BorderColor::all(PANEL_BORDER),
+                ))
+                .with_children(|parent| {
+                    parent.spawn((
+                        Text::new("已暂停"),
+                        TextFont {
+                            font_size: 34.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_PRIMARY),
+                    ));
+                    parent.spawn((
+                        Text::new(format!("当前会话：{}模式", session_mode.label())),
+                        TextFont {
+                            font_size: 18.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_MUTED),
+                        Node {
+                            margin: UiRect::bottom(px(4)),
+                            ..Default::default()
+                        },
+                    ));
+                    spawn_action_button(
+                        parent,
+                        "继续",
+                        "回到当前会话",
+                        UiButtonAction::Resume,
+                        ButtonTone::Primary,
+                    );
+                    spawn_action_button(
+                        parent,
+                        "重新开始",
+                        "按当前模式重建世界会话",
+                        UiButtonAction::Restart,
+                        ButtonTone::Secondary,
+                    );
+                    spawn_action_button(
+                        parent,
+                        "返回主菜单",
+                        "结束当前会话并回到标题界面",
+                        UiButtonAction::ReturnToMenu,
+                        ButtonTone::Secondary,
+                    );
+                    spawn_action_button(
+                        parent,
+                        "退出",
+                        "关闭程序",
+                        UiButtonAction::Quit,
+                        ButtonTone::Danger,
+                    );
+                });
+        });
+}
+
+fn spawn_action_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    title: &'static str,
+    subtitle: &'static str,
+    action: UiButtonAction,
+    tone: ButtonTone,
+) {
+    parent.spawn((
+        Button,
+        Node {
+            width: percent(100),
+            min_height: px(76),
+            padding: UiRect::axes(px(18), px(14)),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(8)),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            ..Default::default()
+        },
+        BackgroundColor(button_color(tone, ButtonVisualState::Normal)),
+        BorderColor::all(button_border_color(tone)),
+        action,
+        tone,
+        children![
+            (
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(4),
+                    ..Default::default()
+                },
+                children![
+                    (
+                        Text::new(title),
+                        TextFont {
+                            font_size: 22.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_PRIMARY),
+                    ),
+                    (
+                        Text::new(subtitle),
+                        TextFont {
+                            font_size: 14.0,
+                            ..Default::default()
+                        },
+                        TextColor(TEXT_MUTED),
+                    )
+                ]
+            ),
+            (
+                Text::new(">"),
+                TextFont {
+                    font_size: 20.0,
+                    ..Default::default()
+                },
+                TextColor(TEXT_ACCENT),
+            )
+        ],
+    ));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonVisualState {
+    Normal,
+    Hovered,
+    Pressed,
+}
+
+fn update_button_interactions(mut query: ButtonInteractionQuery<'_, '_>) {
+    for (interaction, tone, mut background) in &mut query {
+        let visual = match *interaction {
+            Interaction::Pressed => ButtonVisualState::Pressed,
+            Interaction::Hovered => ButtonVisualState::Hovered,
+            Interaction::None => ButtonVisualState::Normal,
+        };
+        background.0 = button_color(*tone, visual);
+    }
+}
+
+fn handle_button_actions(
+    interactions: ButtonActionQuery<'_, '_>,
+    mut next_screen: ResMut<NextState<AppScreen>>,
+    mut next_in_game: Option<ResMut<NextState<InGameState>>>,
+    mut pending_launch: ResMut<PendingSessionLaunch>,
+    mut active_session_mode: ResMut<SessionMode>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    for (interaction, action) in &interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+
+        match action {
+            UiButtonAction::StartExploration => {
+                pending_launch.0 = None;
+                *active_session_mode = SessionMode::Exploration;
+                next_screen.set(AppScreen::InGame);
+            }
+            UiButtonAction::StartPresentation => {
+                pending_launch.0 = None;
+                *active_session_mode = SessionMode::Presentation;
+                next_screen.set(AppScreen::InGame);
+            }
+            UiButtonAction::Resume => {
+                if let Some(next_in_game) = next_in_game.as_deref_mut() {
+                    next_in_game.set(InGameState::Running);
+                }
+            }
+            UiButtonAction::Restart => {
+                pending_launch.0 = Some(*active_session_mode);
+                next_screen.set(AppScreen::MainMenu);
+            }
+            UiButtonAction::ReturnToMenu => {
+                pending_launch.0 = None;
+                next_screen.set(AppScreen::MainMenu);
+            }
+            UiButtonAction::Quit => {
+                exit.write(AppExit::Success);
+            }
+        }
+    }
+}
+
+fn toggle_pause_with_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    current_state: Res<State<InGameState>>,
+    mut next_state: ResMut<NextState<InGameState>>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+
+    next_state.set(match current_state.get() {
+        InGameState::Running => InGameState::Paused,
+        InGameState::Paused => InGameState::Running,
+    });
+}
+
+fn update_hud_control_text(
+    session_mode: Res<SessionMode>,
+    mut controls_query: Query<&mut Text, With<HudControlText>>,
+) {
+    let Some(mut controls_text) = controls_query.iter_mut().next() else {
+        return;
+    };
+    controls_text.0 = control_hint(*session_mode).to_string();
+}
+
+fn update_hud_stats_text(
+    resources: HudResources<'_>,
+    wanderer_query: Query<&Transform, With<WandererPrototype>>,
+    mut stats_query: Query<&mut Text, With<HudStatsText>>,
+) {
+    let (_, cycle, signs, world_map) = resources;
+
+    let status_line = if let (Some(cycle), Some(world_map), Some(transform)) = (
+        cycle.as_deref(),
+        world_map.as_deref(),
+        wanderer_query.iter().next(),
+    ) {
+        let biome = world_map
+            .sample_biome(transform.translation.x, transform.translation.z)
+            .map(biome_label)
+            .unwrap_or("未知");
+        format!(
+            "时辰：{}  地貌：{}  坐标：{:.0}, {:.0}",
+            time_of_day_label(cycle.normalized_time),
+            biome,
+            transform.translation.x,
+            transform.translation.z,
+        )
+    } else {
+        "世界状态载入中".to_string()
+    };
+
+    let resonance_line = signs
+        .as_deref()
+        .map(|signs| {
+            format!(
+                "共鸣：{:.0}%  平静：{:.0}%  征兆：{}",
+                signs.resonance * 100.0,
+                signs.calm * 100.0,
+                omen_label(signs.current_omen),
+            )
+        })
+        .unwrap_or_else(|| "共鸣：--  平静：--  征兆：未感知".to_string());
+
+    let Some(mut stats_text) = stats_query.iter_mut().next() else {
+        return;
+    };
+    stats_text.0 = format!("{status_line}\n{resonance_line}");
+}
+
+fn update_hud_omen_text(
+    signs: Option<Res<SignState>>,
+    mut omen_text_query: Query<&mut Text, With<HudOmenText>>,
+    mut omen_container_query: Query<&mut Visibility, With<HudOmenContainer>>,
+) {
+    let Some(mut visibility) = omen_container_query.iter_mut().next() else {
+        return;
+    };
+    let Some(mut omen_text) = omen_text_query.iter_mut().next() else {
+        return;
+    };
+    if let Some(signs) = signs.as_deref().filter(|signs| signs.omen_triggered) {
+        omen_text.0 = format!("征兆显现：{}", omen_label(signs.current_omen));
+        *visibility = Visibility::Visible;
+    } else {
+        omen_text.0.clear();
+        *visibility = Visibility::Hidden;
+    }
+}
+
+fn update_crosshair_visibility(
+    session_mode: Res<SessionMode>,
+    in_game_state: Res<State<InGameState>>,
+    mut query: Query<&mut Visibility, With<Crosshair>>,
+) {
+    let visible =
+        *session_mode == SessionMode::Exploration && *in_game_state.get() == InGameState::Running;
+    for mut visibility in &mut query {
+        *visibility = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+fn button_color(tone: ButtonTone, visual: ButtonVisualState) -> Color {
+    match (tone, visual) {
+        (ButtonTone::Primary, ButtonVisualState::Normal) => Color::srgb(0.23, 0.34, 0.26),
+        (ButtonTone::Primary, ButtonVisualState::Hovered) => Color::srgb(0.29, 0.41, 0.31),
+        (ButtonTone::Primary, ButtonVisualState::Pressed) => Color::srgb(0.35, 0.47, 0.36),
+        (ButtonTone::Secondary, ButtonVisualState::Normal) => Color::srgb(0.2, 0.21, 0.2),
+        (ButtonTone::Secondary, ButtonVisualState::Hovered) => Color::srgb(0.26, 0.27, 0.25),
+        (ButtonTone::Secondary, ButtonVisualState::Pressed) => Color::srgb(0.31, 0.31, 0.29),
+        (ButtonTone::Danger, ButtonVisualState::Normal) => Color::srgb(0.29, 0.18, 0.17),
+        (ButtonTone::Danger, ButtonVisualState::Hovered) => Color::srgb(0.36, 0.22, 0.2),
+        (ButtonTone::Danger, ButtonVisualState::Pressed) => Color::srgb(0.43, 0.26, 0.23),
+    }
+}
+
+fn button_border_color(tone: ButtonTone) -> Color {
+    match tone {
+        ButtonTone::Primary => Color::srgb(0.43, 0.54, 0.39),
+        ButtonTone::Secondary => Color::srgb(0.36, 0.34, 0.29),
+        ButtonTone::Danger => Color::srgb(0.56, 0.34, 0.3),
+    }
+}
+
+fn control_hint(session_mode: SessionMode) -> &'static str {
+    match session_mode {
+        SessionMode::Exploration => "WASD 移动  Shift 疾走  Space 跳跃  Esc 暂停",
+        SessionMode::Presentation => "自动巡游展示场景  Esc 暂停",
+    }
+}
+
+fn time_of_day_label(normalized_time: f32) -> &'static str {
+    match normalized_time.rem_euclid(1.0) {
+        value if value < 0.18 => "黎明",
+        value if value < 0.36 => "白昼",
+        value if value < 0.58 => "午后",
+        value if value < 0.76 => "黄昏",
+        _ => "深夜",
+    }
+}
+
+fn biome_label(biome: BiomeKind) -> &'static str {
+    match biome {
+        BiomeKind::Water => "水域",
+        BiomeKind::Meadow => "草甸",
+        BiomeKind::Grove => "林地",
+        BiomeKind::Steppe => "旷野",
+        BiomeKind::Ridge => "山脊",
+    }
+}
+
+fn omen_label(omen: Option<OmenKind>) -> &'static str {
+    match omen {
+        Some(OmenKind::DawnLight) => "曙光",
+        Some(OmenKind::GroveWhisper) => "林语",
+        Some(OmenKind::SummitCall) => "山鸣",
+        Some(OmenKind::StillWater) => "止水",
+        None => "未感知",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::game::{flow::SessionMode, signs::OmenKind, world::BiomeKind};
+
+    use super::{biome_label, control_hint, omen_label, time_of_day_label};
+
+    #[test]
+    fn time_of_day_breakpoints_cover_full_cycle() {
+        assert_eq!(time_of_day_label(0.02), "黎明");
+        assert_eq!(time_of_day_label(0.22), "白昼");
+        assert_eq!(time_of_day_label(0.44), "午后");
+        assert_eq!(time_of_day_label(0.64), "黄昏");
+        assert_eq!(time_of_day_label(0.88), "深夜");
+    }
+
+    #[test]
+    fn labels_match_known_gameplay_terms() {
+        assert_eq!(
+            control_hint(SessionMode::Exploration),
+            "WASD 移动  Shift 疾走  Space 跳跃  Esc 暂停"
+        );
+        assert_eq!(biome_label(BiomeKind::Grove), "林地");
+        assert_eq!(omen_label(Some(OmenKind::StillWater)), "止水");
+        assert_eq!(omen_label(None), "未感知");
+    }
+}

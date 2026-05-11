@@ -2,7 +2,10 @@ use bevy::prelude::*;
 
 use crate::{
     core::config::{AppConfig, SignConfig},
-    game::world::{BiomeKind, TerrainTile, WandererPrototype, WorldCycle, WorldMap},
+    game::{
+        flow::{AppScreen, InGameState},
+        world::{BiomeKind, TerrainTile, WandererPrototype, WorldCycle, WorldMap},
+    },
 };
 
 pub struct SignPlugin;
@@ -11,7 +14,10 @@ impl Plugin for SignPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(SignState::default());
         app.insert_resource(WandererPresence::default());
-        app.add_systems(Startup, spawn_omen_beacon);
+        app.add_systems(
+            OnEnter(AppScreen::InGame),
+            (reset_sign_resources, spawn_omen_beacon),
+        );
         app.add_systems(
             Update,
             (
@@ -19,7 +25,8 @@ impl Plugin for SignPlugin {
                 update_resonance,
                 project_omen_feedback,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(InGameState::Running)),
         );
     }
 }
@@ -78,9 +85,15 @@ struct SignUpdate {
 #[derive(Debug, Component)]
 struct OmenBeacon;
 
+fn reset_sign_resources(mut signs: ResMut<SignState>, mut presence: ResMut<WandererPresence>) {
+    *signs = SignState::default();
+    *presence = WandererPresence::default();
+}
+
 fn spawn_omen_beacon(mut commands: Commands) {
     commands.spawn((
         Name::new("OmenBeacon"),
+        DespawnOnExit(AppScreen::InGame),
         PointLight {
             intensity: 0.0,
             range: 18.0,

@@ -18,7 +18,11 @@ use bevy::{
 };
 
 use crate::core::config::{AppConfig, WorldConfig};
-use crate::game::{environment::WeatherKind, player::FirstPersonState};
+use crate::game::{
+    environment::WeatherKind,
+    flow::{AppScreen, InGameState},
+    player::FirstPersonState,
+};
 
 pub struct WorldPlugin;
 
@@ -27,8 +31,9 @@ impl Plugin for WorldPlugin {
         app.insert_resource(WorldSeed(0));
         app.insert_resource(WorldCycle::default());
         app.add_systems(
-            Startup,
+            OnEnter(AppScreen::InGame),
             (
+                reset_world_cycle,
                 configure_world_seed,
                 generate_world_map,
                 cache_world_showcase_spots,
@@ -37,7 +42,7 @@ impl Plugin for WorldPlugin {
                 .chain(),
         );
         app.add_systems(
-            Startup,
+            OnEnter(AppScreen::InGame),
             (spawn_camera, spawn_light, spawn_world).after(create_terrain_material_texture),
         );
         app.add_systems(
@@ -52,8 +57,10 @@ impl Plugin for WorldPlugin {
                 )
                     .chain(),
                 animate_wanderer,
-            ),
+            )
+                .run_if(in_state(InGameState::Running)),
         );
+        app.add_systems(OnExit(AppScreen::InGame), cleanup_world_session);
     }
 }
 
@@ -1173,6 +1180,10 @@ struct TerrainGenerationScheduler {
     in_flight: HashSet<TerrainChunkKey>,
 }
 
+fn reset_world_cycle(mut cycle: ResMut<WorldCycle>) {
+    *cycle = WorldCycle::default();
+}
+
 fn configure_world_seed(config: Res<AppConfig>, mut seed: ResMut<WorldSeed>) {
     seed.0 = config.world.seed;
     tracing::info!(
@@ -1322,6 +1333,8 @@ fn cache_world_showcase_spots(mut commands: Commands, world_map: Res<WorldMap>) 
 
 fn spawn_camera(mut commands: Commands, spots: Res<WorldShowcaseSpots>) {
     commands.spawn((
+        Name::new("WorldCamera"),
+        DespawnOnExit(AppScreen::InGame),
         Camera3d::default(),
         Transform::from_xyz(
             spots.meadow.position.x - 18.0,
@@ -1336,6 +1349,7 @@ fn spawn_camera(mut commands: Commands, spots: Res<WorldShowcaseSpots>) {
 fn spawn_light(mut commands: Commands) {
     commands.spawn((
         Name::new("SunLight"),
+        DespawnOnExit(AppScreen::InGame),
         DirectionalLight {
             shadows_enabled: true,
             illuminance: 18_000.0,
@@ -1462,6 +1476,7 @@ fn spawn_world(
         let entity = commands
             .spawn((
                 Name::new("TerrainImpostor"),
+                DespawnOnExit(AppScreen::InGame),
                 Mesh3d(mesh_handle.clone()),
                 MeshMaterial3d(impostor_material.handle.clone()),
                 Transform::default(),
@@ -1475,6 +1490,7 @@ fn spawn_world(
 
     commands.spawn((
         Name::new("WaterPlane"),
+        DespawnOnExit(AppScreen::InGame),
         Mesh3d(meshes.add(Mesh::from(Cylinder::new(world_map.extent() * 1.42, 0.03)))),
         MeshMaterial3d(water_material),
         Transform::from_xyz(0.0, world_map.water_level(), 0.0),
@@ -1484,6 +1500,7 @@ fn spawn_world(
 
     commands.spawn((
         Name::new("WandererPrototype"),
+        DespawnOnExit(AppScreen::InGame),
         Mesh3d(meshes.add(Mesh::from(Capsule3d::new(0.4, 1.3)))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.82, 0.72, 0.6),
@@ -1726,6 +1743,7 @@ fn update_terrain_impostor(
     let entity = commands
         .spawn((
             Name::new("TerrainImpostor"),
+            DespawnOnExit(AppScreen::InGame),
             Mesh3d(mesh_handle.clone()),
             MeshMaterial3d(impostor_material.handle.clone()),
             Transform::default(),
@@ -2315,6 +2333,7 @@ fn spawn_cached_chunk(
             "TerrainChunk({:?}, {}, {})",
             key.lod, key.coord.x, key.coord.z
         )),
+        DespawnOnExit(AppScreen::InGame),
         Mesh3d(cached.mesh.clone()),
         MeshMaterial3d((*context.material).clone()),
         Transform::default(),
@@ -2544,6 +2563,7 @@ fn spawn_scatter(
         BiomeKind::Meadow => {
             commands.spawn((
                 Name::new("MeadowTuft"),
+                DespawnOnExit(AppScreen::InGame),
                 Mesh3d(detail_meshes.meadow.clone()),
                 MeshMaterial3d(materials.meadow.clone()),
                 scatter_transform(placement.position, 0.35, placement.scale),
@@ -2553,6 +2573,7 @@ fn spawn_scatter(
         BiomeKind::Grove => {
             commands.spawn((
                 Name::new("GroveTree"),
+                DespawnOnExit(AppScreen::InGame),
                 Mesh3d(detail_meshes.grove.clone()),
                 MeshMaterial3d(materials.grove.clone()),
                 scatter_transform(placement.position, 0.92, placement.scale),
@@ -2562,6 +2583,7 @@ fn spawn_scatter(
         BiomeKind::Steppe => {
             commands.spawn((
                 Name::new("SteppeStone"),
+                DespawnOnExit(AppScreen::InGame),
                 Mesh3d(detail_meshes.steppe.clone()),
                 MeshMaterial3d(materials.steppe.clone()),
                 scatter_transform(placement.position, 0.18, placement.scale),
@@ -2571,6 +2593,7 @@ fn spawn_scatter(
         BiomeKind::Ridge => {
             commands.spawn((
                 Name::new("RidgeSpire"),
+                DespawnOnExit(AppScreen::InGame),
                 Mesh3d(detail_meshes.ridge.clone()),
                 MeshMaterial3d(materials.ridge.clone()),
                 scatter_transform(placement.position, 1.15, placement.scale),
@@ -2602,6 +2625,7 @@ fn spawn_showcase_markers(
     ] {
         commands.spawn((
             Name::new(name),
+            DespawnOnExit(AppScreen::InGame),
             Mesh3d(meshes.add(Mesh::from(Capsule3d::new(0.12, 0.75)))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: color,
@@ -2666,6 +2690,26 @@ fn fallback_showcase_spot(world_map: &WorldMap, biome: BiomeKind) -> ShowcaseSpo
         position: world_map.tile_translation(0, 0, center_tile.height()),
         biome,
     }
+}
+
+fn cleanup_world_session(mut commands: Commands, mut cycle: ResMut<WorldCycle>) {
+    *cycle = WorldCycle::default();
+    commands.remove_resource::<WorldMap>();
+    commands.remove_resource::<WorldShowcaseSpots>();
+    commands.remove_resource::<TerrainRuntimeMaterial>();
+    commands.remove_resource::<TerrainImpostorMaterial>();
+    commands.remove_resource::<ChunkVisibilityState>();
+    commands.remove_resource::<TerrainStreamingQueue>();
+    commands.remove_resource::<TerrainLodConfig>();
+    commands.remove_resource::<TerrainStreamingConfig>();
+    commands.remove_resource::<TerrainImpostorConfig>();
+    commands.remove_resource::<TerrainImpostorState>();
+    commands.remove_resource::<TerrainCollisionConfig>();
+    commands.remove_resource::<TerrainCollisionProxy>();
+    commands.remove_resource::<TerrainGenerationScheduler>();
+    commands.remove_resource::<TerrainChunkCache>();
+    commands.remove_resource::<DetailMaterials>();
+    commands.remove_resource::<DetailMeshes>();
 }
 
 fn scatter_offset(seed: u64, x: i32, z: i32, radius: f32) -> Vec2 {

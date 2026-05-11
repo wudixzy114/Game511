@@ -6,8 +6,11 @@ use bevy::{
 
 use crate::{
     core::config::AppConfig,
-    game::world::{
-        TerrainCollisionProxy, TerrainCollisionSample, WandererPrototype, WorldCamera, WorldMap,
+    game::{
+        flow::{AppScreen, InGameState, SessionMode, in_session_mode},
+        world::{
+            TerrainCollisionProxy, TerrainCollisionSample, WandererPrototype, WorldCamera, WorldMap,
+        },
     },
 };
 
@@ -15,20 +18,28 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(FirstPersonState::default());
         app.add_systems(
-            PostStartup,
-            (initialize_first_person_state, initialize_cursor_lock).chain(),
+            OnEnter(AppScreen::InGame),
+            start_player_session.run_if(in_session_mode(SessionMode::Exploration)),
         );
+        app.add_systems(OnEnter(AppScreen::MainMenu), release_cursor_to_menu);
+        app.add_systems(
+            OnEnter(InGameState::Running),
+            lock_cursor_for_running_session,
+        );
+        app.add_systems(OnEnter(InGameState::Paused), release_cursor_for_pause);
+        app.add_systems(OnExit(AppScreen::InGame), end_player_session);
         app.add_systems(
             Update,
             (
-                toggle_cursor_lock,
+                initialize_first_person_state,
                 apply_mouse_look,
                 move_player_body,
                 sync_camera_to_player,
             )
-                .chain(),
+                .chain()
+                .run_if(in_state(InGameState::Running))
+                .run_if(in_session_mode(SessionMode::Exploration)),
         );
     }
 }
@@ -54,6 +65,11 @@ impl Default for FirstPersonState {
     }
 }
 
+#[derive(Debug, Resource, Clone, Copy, Default)]
+struct FirstPersonBootstrap {
+    pending: bool,
+}
+
 const CAPSULE_SUPPORT_DIRECTIONS: [Vec2; 8] = [
     Vec2::new(1.0, 0.0),
     Vec2::new(-1.0, 0.0),
@@ -64,6 +80,14 @@ const CAPSULE_SUPPORT_DIRECTIONS: [Vec2; 8] = [
     Vec2::new(-0.70710677, 0.70710677),
     Vec2::new(-0.70710677, -0.70710677),
 ];
+
+type PlayerMoveResources<'w> = (
+    Res<'w, Time>,
+    Res<'w, ButtonInput<KeyCode>>,
+    Res<'w, AppConfig>,
+    Res<'w, WorldMap>,
+    ResMut<'w, TerrainCollisionProxy>,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TerrainWalkerConfig {
@@ -131,10 +155,17 @@ struct VerticalContactInput {
 
 fn initialize_first_person_state(
     config: Res<AppConfig>,
-    mut state: ResMut<FirstPersonState>,
+    state: Option<ResMut<FirstPersonState>>,
+    bootstrap: Option<ResMut<FirstPersonBootstrap>>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
     mut camera_query: Query<&mut Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 ) {
+    let (Some(mut state), Some(mut bootstrap)) = (state, bootstrap) else {
+        return;
+    };
+    if !bootstrap.pending {
+        return;
+    }
     let Some(mut player_transform) = player_query.iter_mut().next() else {
         return;
     };
@@ -152,37 +183,82 @@ fn initialize_first_person_state(
     camera_transform.translation =
         player_transform.translation + Vec3::Y * config.player.eye_height;
     camera_transform.rotation = Quat::IDENTITY;
+    bootstrap.pending = false;
 }
 
-fn initialize_cursor_lock(mut cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>) {
+fn start_player_session(mut commands: Commands) {
+    commands.insert_resource(FirstPersonState::default());
+    commands.insert_resource(FirstPersonBootstrap { pending: true });
+}
+
+fn lock_cursor_for_running_session(
+    session_mode: Res<SessionMode>,
+    state: Option<ResMut<FirstPersonState>>,
+    mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    if *session_mode != SessionMode::Exploration {
+        return;
+    }
+
+    if let Some(mut state) = state {
+        state.cursor_locked = true;
+    }
+    let Some(mut cursor_options) = cursor_query.iter_mut().next() else {
+        return;
+    };
     cursor_options.visible = false;
     cursor_options.grab_mode = CursorGrabMode::Locked;
 }
 
-fn toggle_cursor_lock(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mut state: ResMut<FirstPersonState>,
-    mut cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>,
+fn release_cursor_for_pause(
+    state: Option<ResMut<FirstPersonState>>,
+    mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) {
+    if let Some(mut state) = state {
         state.cursor_locked = false;
+    }
+    let Some(mut cursor_options) = cursor_query.iter_mut().next() else {
+        return;
+    };
+    cursor_options.visible = true;
+    cursor_options.grab_mode = CursorGrabMode::None;
+}
+
+fn release_cursor_to_menu(mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    let Some(mut cursor_options) = cursor_query.iter_mut().next() else {
+        return;
+    };
+    cursor_options.visible = true;
+    cursor_options.grab_mode = CursorGrabMode::None;
+}
+
+fn end_player_session(
+    mut commands: Commands,
+    mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    if let Some(mut cursor_options) = cursor_query.iter_mut().next() {
         cursor_options.visible = true;
         cursor_options.grab_mode = CursorGrabMode::None;
     }
-
-    if mouse_buttons.just_pressed(MouseButton::Left) && !state.cursor_locked {
-        state.cursor_locked = true;
-        cursor_options.visible = false;
-        cursor_options.grab_mode = CursorGrabMode::Locked;
-    }
+    commands.remove_resource::<FirstPersonState>();
+    commands.remove_resource::<FirstPersonBootstrap>();
 }
 
 fn apply_mouse_look(
     config: Res<AppConfig>,
     mouse_motion: Res<AccumulatedMouseMotion>,
-    mut state: ResMut<FirstPersonState>,
+    state: Option<ResMut<FirstPersonState>>,
+    bootstrap: Option<Res<FirstPersonBootstrap>>,
 ) {
+    let Some(bootstrap) = bootstrap else {
+        return;
+    };
+    if bootstrap.pending {
+        return;
+    }
+    let Some(mut state) = state else {
+        return;
+    };
     if !state.cursor_locked {
         return;
     }
@@ -197,14 +273,21 @@ fn apply_mouse_look(
 }
 
 fn move_player_body(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    config: Res<AppConfig>,
-    world_map: Res<WorldMap>,
-    mut collision_proxy: ResMut<TerrainCollisionProxy>,
-    mut state: ResMut<FirstPersonState>,
+    resources: PlayerMoveResources<'_>,
+    state: Option<ResMut<FirstPersonState>>,
+    bootstrap: Option<Res<FirstPersonBootstrap>>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
+    let (time, keys, config, world_map, mut collision_proxy) = resources;
+    let Some(bootstrap) = bootstrap else {
+        return;
+    };
+    if bootstrap.pending {
+        return;
+    }
+    let Some(mut state) = state else {
+        return;
+    };
     let Some(mut transform) = player_query.iter_mut().next() else {
         return;
     };
@@ -429,10 +512,20 @@ fn resolve_vertical_contact(
 
 fn sync_camera_to_player(
     config: Res<AppConfig>,
-    state: Res<FirstPersonState>,
+    state: Option<Res<FirstPersonState>>,
+    bootstrap: Option<Res<FirstPersonBootstrap>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut camera_query: Query<&mut Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 ) {
+    let Some(bootstrap) = bootstrap else {
+        return;
+    };
+    if bootstrap.pending {
+        return;
+    }
+    let Some(state) = state else {
+        return;
+    };
     let Some(player_transform) = player_query.iter().next() else {
         return;
     };

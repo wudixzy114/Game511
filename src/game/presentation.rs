@@ -4,6 +4,7 @@ use crate::{
     core::config::AppConfig,
     game::{
         environment::WeatherKind,
+        flow::{AppScreen, InGameState, SessionMode, in_session_mode},
         signs::{OmenKind, SignState},
         world::{
             BiomeKind, TerrainTile, WandererPrototype, WorldCamera, WorldMap,
@@ -18,9 +19,18 @@ impl Plugin for PresentationPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             First,
-            (initialize_presentation, advance_presentation_director).chain(),
+            (initialize_presentation, advance_presentation_director)
+                .chain()
+                .run_if(in_state(InGameState::Running))
+                .run_if(in_session_mode(SessionMode::Presentation)),
         );
-        app.add_systems(Update, drive_presentation_camera);
+        app.add_systems(
+            Update,
+            drive_presentation_camera
+                .run_if(in_state(InGameState::Running))
+                .run_if(in_session_mode(SessionMode::Presentation)),
+        );
+        app.add_systems(OnExit(AppScreen::InGame), cleanup_presentation_session);
     }
 }
 
@@ -71,7 +81,7 @@ fn initialize_presentation(
     world_map: Option<Res<WorldMap>>,
     director: Option<Res<PresentationDirector>>,
 ) {
-    if director.is_some() || !config.presentation.enabled {
+    if director.is_some() {
         return;
     }
     let Some(world_map) = world_map else {
@@ -203,9 +213,6 @@ fn advance_presentation_director(
     world_map: Res<WorldMap>,
     mut wanderer_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
-    if !config.presentation.enabled {
-        return;
-    }
     let Some(mut director) = director else {
         return;
     };
@@ -252,9 +259,6 @@ fn drive_presentation_camera(
     director: Option<Res<PresentationDirector>>,
     mut query: Query<&mut Transform, With<WorldCamera>>,
 ) {
-    if !config.presentation.enabled {
-        return;
-    }
     let Some(director) = director else {
         return;
     };
@@ -383,6 +387,11 @@ fn nudge_sign_state_for_showcase(
     if scene_progress > 0.72 && !signs.omen_triggered {
         signs.current_omen = Some(expected_omen);
     }
+}
+
+fn cleanup_presentation_session(mut commands: Commands) {
+    commands.remove_resource::<PresentationDirector>();
+    commands.remove_resource::<WorldPresentationControl>();
 }
 
 #[cfg(test)]
