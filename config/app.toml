@@ -27,6 +27,7 @@ sediment_bias = 0.28
 visible_chunk_radius = 4
 showcase_search_radius = 48
 streaming_chunk_budget = 2
+streaming_cache_capacity = 192
 material_texture_resolution = 256
 
 [environment]

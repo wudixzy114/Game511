@@ -153,6 +153,7 @@ mod tests {
                 visible_chunk_radius: 1,
                 showcase_search_radius: 4,
                 streaming_chunk_budget: 1,
+                streaming_cache_capacity: 16,
                 material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {
