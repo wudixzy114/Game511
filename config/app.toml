@@ -25,8 +25,12 @@ river_depth = 0.72
 erosion_strength = 0.52
 sediment_bias = 0.28
 visible_chunk_radius = 4
+high_detail_chunk_radius = 2
+low_detail_chunk_radius = 4
+preload_chunk_radius = 6
 showcase_search_radius = 48
 streaming_chunk_budget = 2
+background_generation_budget = 4
 streaming_cache_capacity = 192
 material_texture_resolution = 256
 

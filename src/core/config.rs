@@ -40,8 +40,12 @@ pub struct WorldConfig {
     pub erosion_strength: f32,
     pub sediment_bias: f32,
     pub visible_chunk_radius: i32,
+    pub high_detail_chunk_radius: i32,
+    pub low_detail_chunk_radius: i32,
+    pub preload_chunk_radius: i32,
     pub showcase_search_radius: i32,
     pub streaming_chunk_budget: u32,
+    pub background_generation_budget: u32,
     pub streaming_cache_capacity: usize,
     pub material_texture_resolution: u32,
 }
@@ -139,8 +143,12 @@ river_depth = 0.55
 erosion_strength = 0.4
 sediment_bias = 0.22
 visible_chunk_radius = 2
+high_detail_chunk_radius = 1
+low_detail_chunk_radius = 2
+preload_chunk_radius = 3
 showcase_search_radius = 12
 streaming_chunk_budget = 2
+background_generation_budget = 3
 streaming_cache_capacity = 64
 material_texture_resolution = 192
 
@@ -190,8 +198,12 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.world.terrain_subdivisions, 6);
         assert_eq!(config.world.river_frequency, 0.22);
         assert_eq!(config.world.visible_chunk_radius, 2);
+        assert_eq!(config.world.high_detail_chunk_radius, 1);
+        assert_eq!(config.world.low_detail_chunk_radius, 2);
+        assert_eq!(config.world.preload_chunk_radius, 3);
         assert_eq!(config.world.showcase_search_radius, 12);
         assert_eq!(config.world.streaming_chunk_budget, 2);
+        assert_eq!(config.world.background_generation_budget, 3);
         assert_eq!(config.world.streaming_cache_capacity, 64);
         assert_eq!(config.world.material_texture_resolution, 192);
         assert_eq!(config.player.walk_speed, 7.0);

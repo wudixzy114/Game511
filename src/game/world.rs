@@ -1,5 +1,10 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
+    thread,
     time::Instant,
 };
 
@@ -175,6 +180,39 @@ pub struct WorldChunkCoord {
     pub z: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum TerrainLodLevel {
+    High,
+    Low,
+    Preload,
+}
+
+impl TerrainLodLevel {
+    fn subdivisions(self, base: u32) -> u32 {
+        match self {
+            Self::High => base.max(1),
+            Self::Low => (base / 2).max(1),
+            Self::Preload => (base / 4).max(1),
+        }
+    }
+
+    fn scatter_enabled(self) -> bool {
+        matches!(self, Self::High | Self::Low)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TerrainChunkKey {
+    coord: WorldChunkCoord,
+    lod: TerrainLodLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TerrainChunkTarget {
+    key: TerrainChunkKey,
+    visible: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorldChunk {
     pub coord: WorldChunkCoord,
@@ -209,63 +247,63 @@ struct DetailMeshes {
     ridge: Handle<Mesh>,
 }
 
+#[derive(Debug, Resource, Clone, Copy)]
+struct TerrainLodConfig {
+    high_radius: i32,
+    low_radius: i32,
+    preload_radius: i32,
+}
+
 #[derive(Debug, Resource, Default)]
 struct ChunkVisibilityState {
-    active: Vec<WorldChunkCoord>,
+    active: Vec<TerrainChunkTarget>,
 }
 
 #[derive(Debug, Resource, Default)]
 struct TerrainStreamingQueue {
-    pending: VecDeque<WorldChunkCoord>,
+    pending: VecDeque<TerrainChunkTarget>,
 }
 
 impl TerrainStreamingQueue {
-    fn from_coords(coords: impl IntoIterator<Item = WorldChunkCoord>) -> Self {
+    fn from_targets(targets: impl IntoIterator<Item = TerrainChunkTarget>) -> Self {
         let mut queue = Self::default();
         let existing = HashSet::new();
-        queue.enqueue_missing(coords, &existing);
+        queue.enqueue_missing(targets, &existing);
         queue
     }
 
     fn enqueue_missing(
         &mut self,
-        coords: impl IntoIterator<Item = WorldChunkCoord>,
-        existing: &HashSet<WorldChunkCoord>,
+        targets: impl IntoIterator<Item = TerrainChunkTarget>,
+        existing: &HashSet<TerrainChunkKey>,
     ) {
-        let mut queued: HashSet<WorldChunkCoord> = self.pending.iter().copied().collect();
-        for coord in coords {
-            if existing.contains(&coord) || !queued.insert(coord) {
+        let mut queued: HashSet<TerrainChunkKey> =
+            self.pending.iter().map(|target| target.key).collect();
+        for target in targets {
+            if existing.contains(&target.key) || !queued.insert(target.key) {
                 continue;
             }
-            self.pending.push_back(coord);
+            self.pending.push_back(target);
         }
     }
 
-    fn retain_visible(&mut self, visible: &HashSet<WorldChunkCoord>) {
-        self.pending.retain(|coord| visible.contains(coord));
+    fn retain_targets(&mut self, visible: &HashSet<TerrainChunkKey>) {
+        self.pending.retain(|target| visible.contains(&target.key));
     }
 
-    fn pop_next(&mut self) -> Option<WorldChunkCoord> {
+    fn pop_next(&mut self) -> Option<TerrainChunkTarget> {
         self.pending.pop_front()
     }
 
     fn len(&self) -> usize {
         self.pending.len()
     }
-
-    fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-}
-
-#[derive(Debug, Resource, Clone, Copy)]
-struct VisibleChunkConfig {
-    radius: i32,
 }
 
 #[derive(Debug, Resource, Clone, Copy)]
 struct TerrainStreamingConfig {
-    chunk_budget_per_frame: usize,
+    integrate_budget_per_frame: usize,
+    background_budget_per_frame: usize,
     cache_capacity: usize,
 }
 
@@ -278,38 +316,44 @@ struct CachedTerrainChunk {
 
 #[derive(Debug, Resource, Default)]
 struct TerrainChunkCache {
-    chunks: HashMap<WorldChunkCoord, CachedTerrainChunk>,
+    chunks: HashMap<TerrainChunkKey, CachedTerrainChunk>,
     tick: u64,
 }
 
 impl TerrainChunkCache {
     fn get_or_build(
         &mut self,
-        coord: WorldChunkCoord,
+        key: TerrainChunkKey,
         context: &TerrainChunkBuildContext<'_>,
-        meshes: &mut Assets<Mesh>,
-    ) -> Option<CachedTerrainChunk> {
+        mesh: Handle<Mesh>,
+        scatter: Vec<ScatterPlacement>,
+    ) -> CachedTerrainChunk {
         self.tick = self.tick.wrapping_add(1);
-        if let Some(cached) = self.chunks.get_mut(&coord) {
+        let _ = context;
+        if let Some(cached) = self.chunks.get_mut(&key) {
             cached.last_used_tick = self.tick;
-            return Some(cached.clone());
+            return cached.clone();
         }
-
-        let mesh = context.world_map.build_terrain_mesh_for_chunk(coord)?;
-        let scatter = collect_scatter_placements_for_chunk(context.seed, context.world_map, coord);
         let cached = CachedTerrainChunk {
-            mesh: meshes.add(mesh),
+            mesh,
             scatter,
             last_used_tick: self.tick,
         };
-        self.chunks.insert(coord, cached.clone());
-        Some(cached)
+        self.chunks.insert(key, cached.clone());
+        cached
+    }
+
+    fn get(&mut self, key: TerrainChunkKey) -> Option<CachedTerrainChunk> {
+        self.tick = self.tick.wrapping_add(1);
+        let cached = self.chunks.get_mut(&key)?;
+        cached.last_used_tick = self.tick;
+        Some(cached.clone())
     }
 
     fn evict_inactive(
         &mut self,
         capacity: usize,
-        active: &HashSet<WorldChunkCoord>,
+        active: &HashSet<TerrainChunkKey>,
         meshes: &mut Assets<Mesh>,
     ) -> usize {
         let capacity = capacity.max(active.len());
@@ -317,7 +361,7 @@ impl TerrainChunkCache {
             return 0;
         }
 
-        let mut candidates: Vec<(WorldChunkCoord, u64)> = self
+        let mut candidates: Vec<(TerrainChunkKey, u64)> = self
             .chunks
             .iter()
             .filter(|(coord, _)| !active.contains(coord))
@@ -343,21 +387,24 @@ impl TerrainChunkCache {
     }
 }
 
-type ChunkStreamingContext<'w, 's> = (
-    ResMut<'w, ChunkVisibilityState>,
-    ResMut<'w, TerrainStreamingQueue>,
-    Query<'w, 's, &'static Transform, With<WorldCamera>>,
-    Query<'w, 's, (Entity, &'static TerrainChunkEntity)>,
-    Query<'w, 's, (Entity, &'static TerrainDetailEntity)>,
-);
-
 type TerrainStreamResources<'w> = (
     Res<'w, WorldMap>,
-    Res<'w, WorldSeed>,
     Res<'w, TerrainRuntimeMaterial>,
     Res<'w, DetailMaterials>,
     Res<'w, DetailMeshes>,
     Res<'w, TerrainStreamingConfig>,
+);
+
+type ChunkVisibilityQueries<'w, 's> = (
+    Query<'w, 's, (Entity, &'static TerrainChunkEntity)>,
+    Query<'w, 's, (Entity, &'static TerrainDetailEntity)>,
+    Query<'w, 's, &'static Transform, With<WorldCamera>>,
+);
+
+type TerrainStreamState<'w> = (
+    ResMut<'w, TerrainStreamingQueue>,
+    ResMut<'w, TerrainChunkCache>,
+    ResMut<'w, TerrainGenerationScheduler>,
 );
 
 type WorldSpawnResources<'w> = (
@@ -365,17 +412,17 @@ type WorldSpawnResources<'w> = (
     Res<'w, WorldSeed>,
     Res<'w, WorldShowcaseSpots>,
     Res<'w, TerrainRuntimeMaterial>,
-    Res<'w, VisibleChunkConfig>,
+    Res<'w, TerrainLodConfig>,
 );
 
 #[derive(Debug, Component, Clone, Copy, PartialEq, Eq)]
 struct TerrainChunkEntity {
-    coord: WorldChunkCoord,
+    key: TerrainChunkKey,
 }
 
 #[derive(Debug, Component, Clone, Copy, PartialEq, Eq)]
 struct TerrainDetailEntity {
-    coord: WorldChunkCoord,
+    key: TerrainChunkKey,
 }
 
 impl WorldMap {
@@ -567,10 +614,19 @@ impl WorldMap {
     }
 
     pub fn build_terrain_mesh_for_chunk(&self, coord: WorldChunkCoord) -> Option<Mesh> {
+        self.build_terrain_mesh_for_chunk_with_subdivisions(coord, self.subdivisions)
+    }
+
+    pub fn build_terrain_mesh_for_chunk_with_subdivisions(
+        &self,
+        coord: WorldChunkCoord,
+        subdivisions: u32,
+    ) -> Option<Mesh> {
         let (tile_x_min, tile_x_max, tile_z_min, tile_z_max) =
             self.chunk_mesh_tile_bounds(coord)?;
-        let x_steps = ((tile_x_max - tile_x_min) as u32 * self.subdivisions) as usize;
-        let z_steps = ((tile_z_max - tile_z_min) as u32 * self.subdivisions) as usize;
+        let subdivisions = subdivisions.max(1);
+        let x_steps = ((tile_x_max - tile_x_min) as u32 * subdivisions) as usize;
+        let z_steps = ((tile_z_max - tile_z_min) as u32 * subdivisions) as usize;
         let mesh_stride = x_steps + 1;
         let mesh_depth = z_steps + 1;
 
@@ -584,16 +640,16 @@ impl WorldMap {
         let mut colors = Vec::with_capacity(mesh_stride * mesh_depth);
         let mut uvs = Vec::with_capacity(mesh_stride * mesh_depth);
         let uv_scale = self.chunk_world_span().max(0.001);
-        let sample_step = self.sample_spacing().max(0.001);
+        let sample_step = (self.cell_size / subdivisions as f32).max(0.001);
         let mut raw_samples = Vec::with_capacity(vertex_count);
         let mut heights = Vec::with_capacity(vertex_count);
 
         for z_step in 0..=z_steps {
             for x_step in 0..=x_steps {
                 let world_x =
-                    (tile_x_min as f32 + x_step as f32 / self.subdivisions as f32) * self.cell_size;
+                    (tile_x_min as f32 + x_step as f32 / subdivisions as f32) * self.cell_size;
                 let world_z =
-                    (tile_z_min as f32 + z_step as f32 / self.subdivisions as f32) * self.cell_size;
+                    (tile_z_min as f32 + z_step as f32 / subdivisions as f32) * self.cell_size;
                 if !self.within_world_bounds(world_x, world_z) {
                     return None;
                 }
@@ -607,9 +663,9 @@ impl WorldMap {
             for x_step in 0..=x_steps {
                 let index = z_step * mesh_stride + x_step;
                 let world_x =
-                    (tile_x_min as f32 + x_step as f32 / self.subdivisions as f32) * self.cell_size;
+                    (tile_x_min as f32 + x_step as f32 / subdivisions as f32) * self.cell_size;
                 let world_z =
-                    (tile_z_min as f32 + z_step as f32 / self.subdivisions as f32) * self.cell_size;
+                    (tile_z_min as f32 + z_step as f32 / subdivisions as f32) * self.cell_size;
                 let sample = raw_samples[index];
                 let left = if x_step > 0 {
                     heights[index - 1]
@@ -845,16 +901,36 @@ struct ScatterPlacement {
 }
 
 struct TerrainChunkSpawnContext<'a> {
-    world_map: &'a WorldMap,
     material: &'a Handle<StandardMaterial>,
     detail_materials: &'a DetailMaterials,
     detail_meshes: &'a DetailMeshes,
-    seed: u64,
+    build_context: TerrainChunkBuildContext<'a>,
 }
 
+#[derive(Clone, Copy)]
 struct TerrainChunkBuildContext<'a> {
     world_map: &'a WorldMap,
     seed: u64,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedTerrainChunk {
+    key: TerrainChunkKey,
+    mesh: Mesh,
+    scatter: Vec<ScatterPlacement>,
+}
+
+#[derive(Debug)]
+struct TerrainGenerationRequest {
+    key: TerrainChunkKey,
+    world_map: WorldMap,
+}
+
+#[derive(Resource)]
+struct TerrainGenerationScheduler {
+    sender: Sender<TerrainGenerationRequest>,
+    receiver: Mutex<Receiver<GeneratedTerrainChunk>>,
+    in_flight: HashSet<TerrainChunkKey>,
 }
 
 fn configure_world_seed(config: Res<AppConfig>, mut seed: ResMut<WorldSeed>) {
@@ -909,13 +985,52 @@ fn create_terrain_material_texture(
     });
     commands.insert_resource(ChunkVisibilityState::default());
     commands.insert_resource(TerrainStreamingQueue::default());
-    commands.insert_resource(VisibleChunkConfig {
-        radius: config.world.visible_chunk_radius.max(0),
+    commands.insert_resource(TerrainLodConfig {
+        high_radius: config.world.high_detail_chunk_radius.max(0),
+        low_radius: config
+            .world
+            .low_detail_chunk_radius
+            .max(config.world.high_detail_chunk_radius.max(0)),
+        preload_radius: config
+            .world
+            .preload_chunk_radius
+            .max(config.world.low_detail_chunk_radius.max(0)),
     });
     commands.insert_resource(TerrainStreamingConfig {
-        chunk_budget_per_frame: config.world.streaming_chunk_budget.max(1) as usize,
+        integrate_budget_per_frame: config.world.streaming_chunk_budget.max(1) as usize,
+        background_budget_per_frame: config.world.background_generation_budget.max(1) as usize,
         cache_capacity: config.world.streaming_cache_capacity.max(1),
     });
+    commands.insert_resource(create_generation_scheduler());
+}
+
+fn create_generation_scheduler() -> TerrainGenerationScheduler {
+    let (request_sender, request_receiver) = mpsc::channel::<TerrainGenerationRequest>();
+    let (result_sender, result_receiver) = mpsc::channel::<GeneratedTerrainChunk>();
+
+    thread::spawn(move || {
+        while let Ok(request) = request_receiver.recv() {
+            let build_context = TerrainChunkBuildContext {
+                world_map: &request.world_map,
+                seed: request.world_map.seed,
+            };
+            let Some(mesh) = build_chunk_mesh_for_lod(&build_context, request.key) else {
+                continue;
+            };
+            let scatter = collect_scatter_placements_for_key(&build_context, request.key);
+            let _ = result_sender.send(GeneratedTerrainChunk {
+                key: request.key,
+                mesh,
+                scatter,
+            });
+        }
+    });
+
+    TerrainGenerationScheduler {
+        sender: request_sender,
+        receiver: Mutex::new(result_receiver),
+        in_flight: HashSet::new(),
+    }
 }
 
 fn cache_world_showcase_spots(mut commands: Commands, world_map: Res<WorldMap>) {
@@ -969,7 +1084,7 @@ fn spawn_world(
     resources: WorldSpawnResources<'_>,
 ) {
     let started_at = Instant::now();
-    let (world_map, seed, spots, terrain_material, visible_config) = resources;
+    let (world_map, seed, spots, terrain_material, lod_config) = resources;
     let water_material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.12, 0.29, 0.42, 0.75),
         alpha_mode: AlphaMode::Blend,
@@ -1006,33 +1121,43 @@ fn spawn_world(
         ridge: meshes.add(Mesh::from(Cylinder::new(0.16, 2.4))),
     };
 
-    let initial_chunks =
-        visible_chunk_coords(&world_map, spots.meadow.position, visible_config.radius);
-    let critical_chunk = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z);
+    let initial_targets = chunk_targets_for_camera(&world_map, spots.meadow.position, *lod_config);
+    let critical_key = world_map
+        .chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z)
+        .map(|coord| TerrainChunkKey {
+            coord,
+            lod: TerrainLodLevel::High,
+        });
     let spawn_context = TerrainChunkSpawnContext {
-        world_map: &world_map,
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
         detail_meshes: &detail_meshes,
-        seed: seed.0,
+        build_context: TerrainChunkBuildContext {
+            world_map: &world_map,
+            seed: seed.0,
+        },
     };
     let mut chunk_cache = TerrainChunkCache::default();
-    let mut queued_chunks = initial_chunks.clone();
-    if let Some(critical_chunk) = critical_chunk {
-        spawn_terrain_chunk(
-            &mut commands,
-            &mut meshes,
-            &mut chunk_cache,
-            &spawn_context,
-            critical_chunk,
+    let mut queued_targets = initial_targets.clone();
+    if let Some(critical_key) = critical_key {
+        let boot_mesh = build_chunk_mesh_for_lod(&spawn_context.build_context, critical_key)
+            .expect("critical boot chunk should build");
+        let boot_scatter =
+            collect_scatter_placements_for_key(&spawn_context.build_context, critical_key);
+        let cached = chunk_cache.get_or_build(
+            critical_key,
+            &spawn_context.build_context,
+            meshes.add(boot_mesh),
+            boot_scatter,
         );
-        queued_chunks.retain(|coord| *coord != critical_chunk);
+        spawn_cached_chunk(&mut commands, &spawn_context, critical_key, &cached, true);
+        queued_targets.retain(|target| target.key != critical_key);
     }
-    let queued_chunk_count = queued_chunks.len();
+    let queued_chunk_count = queued_targets.len();
     commands.insert_resource(ChunkVisibilityState {
-        active: initial_chunks.clone(),
+        active: initial_targets.clone(),
     });
-    commands.insert_resource(TerrainStreamingQueue::from_coords(queued_chunks));
+    commands.insert_resource(TerrainStreamingQueue::from_targets(queued_targets));
     commands.insert_resource(chunk_cache);
     commands.insert_resource(detail_materials.clone());
     commands.insert_resource(detail_meshes.clone());
@@ -1061,118 +1186,168 @@ fn spawn_world(
         target: "dao_game::world::generation",
         seed = seed.0,
         extent = world_map.extent(),
-        initial_chunk_count = initial_chunks.len(),
+        initial_chunk_count = initial_targets.len(),
         queued_chunk_count = queued_chunk_count,
         generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
-        "streaming procedural terrain bootstrapped"
+        "lod streaming terrain bootstrapped"
     );
 }
 
 fn update_visible_chunks(
     mut commands: Commands,
-    world_map: Res<WorldMap>,
-    visible_config: Res<VisibleChunkConfig>,
-    streaming_context: ChunkStreamingContext<'_, '_>,
+    config: (Res<WorldMap>, Res<TerrainLodConfig>),
+    mut visibility_state: ResMut<ChunkVisibilityState>,
+    mut queue: ResMut<TerrainStreamingQueue>,
+    queries: ChunkVisibilityQueries<'_, '_>,
 ) {
-    let (mut visibility_state, mut queue, camera_query, existing_chunks, existing_details) =
-        streaming_context;
-
+    let (world_map, lod_config) = config;
+    let (chunk_query, detail_query, camera_query) = queries;
     let Some(camera_transform) = camera_query.iter().next() else {
         return;
     };
 
-    let chunk_coords = visible_chunk_coords(
-        &world_map,
-        camera_transform.translation,
-        visible_config.radius,
-    );
-    if chunk_coords == visibility_state.active {
+    let targets = chunk_targets_for_camera(&world_map, camera_transform.translation, *lod_config);
+    if targets == visibility_state.active {
         return;
     }
-    let visible_set: HashSet<WorldChunkCoord> = chunk_coords.iter().copied().collect();
+    let visible_set: HashSet<TerrainChunkKey> = targets.iter().map(|target| target.key).collect();
 
-    for (entity, chunk_component) in &existing_chunks {
-        if !visible_set.contains(&chunk_component.coord) {
+    for (entity, chunk_component) in &chunk_query {
+        if !visible_set.contains(&chunk_component.key) {
             commands.entity(entity).despawn();
         }
     }
 
-    for (entity, detail_component) in &existing_details {
-        if !visible_set.contains(&detail_component.coord) {
+    for (entity, detail_component) in &detail_query {
+        if !visible_set.contains(&detail_component.key) {
             commands.entity(entity).despawn();
         }
     }
 
-    let existing_set: HashSet<WorldChunkCoord> = existing_chunks
-        .iter()
-        .map(|(_, chunk)| chunk.coord)
-        .collect();
-    queue.retain_visible(&visible_set);
-    queue.enqueue_missing(chunk_coords.iter().copied(), &existing_set);
+    let existing_set: HashSet<TerrainChunkKey> =
+        chunk_query.iter().map(|(_, chunk)| chunk.key).collect();
+    queue.retain_targets(&visible_set);
+    queue.enqueue_missing(targets.iter().copied(), &existing_set);
 
-    visibility_state.active = chunk_coords;
+    visibility_state.active = targets;
 }
 
 fn stream_terrain_chunks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut queue: ResMut<TerrainStreamingQueue>,
-    mut cache: ResMut<TerrainChunkCache>,
+    stream_state: TerrainStreamState<'_>,
     resources: TerrainStreamResources<'_>,
     visibility_state: Res<ChunkVisibilityState>,
     existing_chunks: Query<&TerrainChunkEntity>,
 ) {
-    if queue.is_empty() {
-        return;
-    }
-
-    let (world_map, seed, terrain_material, detail_materials, detail_meshes, streaming_config) =
+    let (mut queue, mut cache, mut scheduler) = stream_state;
+    let (world_map, terrain_material, detail_materials, detail_meshes, streaming_config) =
         resources;
-    let mut existing_set: HashSet<WorldChunkCoord> =
-        existing_chunks.iter().map(|chunk| chunk.coord).collect();
+    let mut existing_set: HashSet<TerrainChunkKey> =
+        existing_chunks.iter().map(|chunk| chunk.key).collect();
     let spawn_context = TerrainChunkSpawnContext {
-        world_map: &world_map,
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
         detail_meshes: &detail_meshes,
-        seed: seed.0,
+        build_context: TerrainChunkBuildContext {
+            world_map: &world_map,
+            seed: world_map.seed,
+        },
     };
     let started_at = Instant::now();
-    let mut spawned = 0_usize;
-    let budget = streaming_config.chunk_budget_per_frame.max(1);
+    let mut integrated = 0_usize;
+    let integrate_budget = streaming_config.integrate_budget_per_frame.max(1);
 
-    while spawned < budget {
-        let Some(coord) = queue.pop_next() else {
-            break;
+    while integrated < integrate_budget {
+        let result = {
+            let receiver = scheduler
+                .receiver
+                .lock()
+                .expect("terrain generation receiver should lock");
+            match receiver.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
         };
-        if existing_set.contains(&coord) {
+        scheduler.in_flight.remove(&result.key);
+        if !visibility_state
+            .active
+            .iter()
+            .any(|target| target.key == result.key)
+        {
             continue;
         }
-        if !spawn_terrain_chunk(
+        if existing_set.contains(&result.key) {
+            continue;
+        }
+        let cached = cache.get_or_build(
+            result.key,
+            &spawn_context.build_context,
+            meshes.add(result.mesh),
+            result.scatter,
+        );
+        spawn_cached_chunk(
             &mut commands,
-            &mut meshes,
-            &mut cache,
             &spawn_context,
-            coord,
-        ) {
-            continue;
-        }
-        existing_set.insert(coord);
-        spawned += 1;
+            result.key,
+            &cached,
+            result.key.lod != TerrainLodLevel::Preload,
+        );
+        existing_set.insert(result.key);
+        integrated += 1;
     }
 
-    let active_set: HashSet<WorldChunkCoord> = visibility_state.active.iter().copied().collect();
+    let mut scheduled = 0_usize;
+    let background_budget = streaming_config.background_budget_per_frame.max(1);
+    while scheduled < background_budget {
+        let Some(target) = queue.pop_next() else {
+            break;
+        };
+        if existing_set.contains(&target.key) || scheduler.in_flight.contains(&target.key) {
+            continue;
+        }
+        if cache.get(target.key).is_some() {
+            if target.visible {
+                let cached = cache
+                    .get(target.key)
+                    .expect("cached target should remain available");
+                spawn_cached_chunk(&mut commands, &spawn_context, target.key, &cached, true);
+                existing_set.insert(target.key);
+                integrated += 1;
+            }
+            continue;
+        }
+        if scheduler
+            .sender
+            .send(TerrainGenerationRequest {
+                key: target.key,
+                world_map: world_map.clone(),
+            })
+            .is_ok()
+        {
+            scheduler.in_flight.insert(target.key);
+            scheduled += 1;
+        }
+    }
+
+    let active_set: HashSet<TerrainChunkKey> = visibility_state
+        .active
+        .iter()
+        .map(|target| target.key)
+        .collect();
     let evicted = cache.evict_inactive(streaming_config.cache_capacity, &active_set, &mut meshes);
 
-    if spawned > 0 {
+    if integrated > 0 || scheduled > 0 {
         tracing::debug!(
             target: "dao_game::world::streaming",
-            chunk_count = spawned,
-            pending_chunks = queue.len(),
+            integrated_chunks = integrated,
+            scheduled_chunks = scheduled,
+            pending_targets = queue.len(),
+            inflight_chunks = scheduler.in_flight.len(),
             cached_chunks = cache.len(),
             evicted_chunks = evicted,
             generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
-            "terrain chunks streamed within frame budget"
+            "terrain lod stream advanced"
         );
     }
 }
@@ -1399,6 +1574,18 @@ fn determine_biome(
     }
 }
 
+fn build_chunk_mesh_for_lod(
+    context: &TerrainChunkBuildContext<'_>,
+    key: TerrainChunkKey,
+) -> Option<Mesh> {
+    context
+        .world_map
+        .build_terrain_mesh_for_chunk_with_subdivisions(
+            key.coord,
+            key.lod.subdivisions(context.world_map.subdivisions()),
+        )
+}
+
 fn vertex_color(sample: &TerrainVertexSample, water_level: f32) -> Color {
     if sample.height <= water_level + 0.05 {
         return Color::srgb(0.29, 0.31, 0.26);
@@ -1453,13 +1640,15 @@ fn accumulate_normals(positions: &[[f32; 3]], indices: &[u32], normals: &mut [[f
     }
 }
 
-fn collect_scatter_placements_for_chunk(
-    seed: u64,
-    world_map: &WorldMap,
-    coord: WorldChunkCoord,
+fn collect_scatter_placements_for_key(
+    context: &TerrainChunkBuildContext<'_>,
+    key: TerrainChunkKey,
 ) -> Vec<ScatterPlacement> {
+    if !key.lod.scatter_enabled() {
+        return Vec::new();
+    }
     let Some((tile_x_min, tile_x_mesh_max, tile_z_min, tile_z_mesh_max)) =
-        world_map.chunk_mesh_tile_bounds(coord)
+        context.world_map.chunk_mesh_tile_bounds(key.coord)
     else {
         return Vec::new();
     };
@@ -1469,14 +1658,14 @@ fn collect_scatter_placements_for_chunk(
 
     for tile_z in tile_z_min..=tile_z_max {
         for tile_x in tile_x_min..=tile_x_max {
-            let Some(tile) = world_map.tile_at_grid(tile_x, tile_z) else {
+            let Some(tile) = context.world_map.tile_at_grid(tile_x, tile_z) else {
                 continue;
             };
             if tile.biome() == BiomeKind::Water {
                 continue;
             }
 
-            let detail_factor = scatter_noise(seed, tile_x, tile_z, 37);
+            let detail_factor = scatter_noise(context.seed, tile_x, tile_z, 37);
             let should_spawn = match tile.biome() {
                 BiomeKind::Meadow => detail_factor > (0.34 - tile.river() * 0.08),
                 BiomeKind::Grove => detail_factor > 0.18,
@@ -1488,16 +1677,23 @@ fn collect_scatter_placements_for_chunk(
                 continue;
             }
 
-            let offset = scatter_offset(seed, tile_x, tile_z, world_map.cell_size() * 0.36);
-            let world_x = tile_x as f32 * world_map.cell_size() + offset.x;
-            let world_z = tile_z as f32 * world_map.cell_size() + offset.y;
-            let Some(height) = world_map.sample_height(world_x, world_z) else {
+            let offset = scatter_offset(
+                context.seed,
+                tile_x,
+                tile_z,
+                context.world_map.cell_size() * 0.36,
+            );
+            let world_x = tile_x as f32 * context.world_map.cell_size() + offset.x;
+            let world_z = tile_z as f32 * context.world_map.cell_size() + offset.y;
+            let Some(height) = context.world_map.sample_height(world_x, world_z) else {
                 continue;
             };
             let placement = ScatterPlacement {
                 position: Vec3::new(world_x, height, world_z),
                 biome: tile.biome(),
-                scale: 0.72 + scatter_noise(seed, tile_x, tile_z, 89) * 0.8 + tile.river() * 0.18
+                scale: 0.72
+                    + scatter_noise(context.seed, tile_x, tile_z, 89) * 0.8
+                    + tile.river() * 0.18
                     - tile.erosion() * 0.1,
             };
             placements.push(placement);
@@ -1509,44 +1705,42 @@ fn collect_scatter_placements_for_chunk(
 fn spawn_scatter_placements(
     commands: &mut Commands,
     placements: &[ScatterPlacement],
-    coord: WorldChunkCoord,
+    key: TerrainChunkKey,
     materials: &DetailMaterials,
     detail_meshes: &DetailMeshes,
 ) {
     for placement in placements {
-        spawn_scatter(commands, *placement, coord, materials, detail_meshes);
+        spawn_scatter(commands, *placement, key, materials, detail_meshes);
     }
 }
 
-fn spawn_terrain_chunk(
+fn spawn_cached_chunk(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    cache: &mut TerrainChunkCache,
     context: &TerrainChunkSpawnContext<'_>,
-    coord: WorldChunkCoord,
-) -> bool {
-    let build_context = TerrainChunkBuildContext {
-        world_map: context.world_map,
-        seed: context.seed,
-    };
-    let Some(cached) = cache.get_or_build(coord, &build_context, meshes) else {
-        return false;
-    };
+    key: TerrainChunkKey,
+    cached: &CachedTerrainChunk,
+    visible: bool,
+) {
+    if !visible {
+        return;
+    }
     commands.spawn((
-        Name::new(format!("TerrainChunk({}, {})", coord.x, coord.z)),
+        Name::new(format!(
+            "TerrainChunk({:?}, {}, {})",
+            key.lod, key.coord.x, key.coord.z
+        )),
         Mesh3d(cached.mesh.clone()),
         MeshMaterial3d((*context.material).clone()),
         Transform::default(),
-        TerrainChunkEntity { coord },
+        TerrainChunkEntity { key },
     ));
     spawn_scatter_placements(
         commands,
         &cached.scatter,
-        coord,
+        key,
         context.detail_materials,
         context.detail_meshes,
     );
-    true
 }
 
 fn slope_hint(normalized_height: f32) -> f32 {
@@ -1573,30 +1767,43 @@ fn biome_from_index(index: usize) -> BiomeKind {
     }
 }
 
-fn visible_chunk_coords(
+fn chunk_targets_for_camera(
     world_map: &WorldMap,
     camera_position: Vec3,
-    visible_radius: i32,
-) -> Vec<WorldChunkCoord> {
+    lod_config: TerrainLodConfig,
+) -> Vec<TerrainChunkTarget> {
     let Some(center) = world_map.chunk_coord_at(camera_position.x, camera_position.z) else {
         return Vec::new();
     };
 
-    let mut coords = Vec::new();
-    for z in (center.z - visible_radius)..=(center.z + visible_radius) {
-        for x in (center.x - visible_radius)..=(center.x + visible_radius) {
+    let mut targets = Vec::new();
+    for z in (center.z - lod_config.preload_radius)..=(center.z + lod_config.preload_radius) {
+        for x in (center.x - lod_config.preload_radius)..=(center.x + lod_config.preload_radius) {
             let coord = WorldChunkCoord { x, z };
             if world_map.chunk_mesh_tile_bounds(coord).is_some() {
-                coords.push(coord);
+                let dx = (coord.x - center.x).abs();
+                let dz = (coord.z - center.z).abs();
+                let distance = dx.max(dz);
+                let lod = if distance <= lod_config.high_radius {
+                    TerrainLodLevel::High
+                } else if distance <= lod_config.low_radius {
+                    TerrainLodLevel::Low
+                } else {
+                    TerrainLodLevel::Preload
+                };
+                targets.push(TerrainChunkTarget {
+                    key: TerrainChunkKey { coord, lod },
+                    visible: lod != TerrainLodLevel::Preload,
+                });
             }
         }
     }
-    coords.sort_by_key(|coord| {
-        let dx = coord.x - center.x;
-        let dz = coord.z - center.z;
+    targets.sort_by_key(|target| {
+        let dx = target.key.coord.x - center.x;
+        let dz = target.key.coord.z - center.z;
         dx * dx + dz * dz
     });
-    coords
+    targets
 }
 
 fn build_terrain_palette_texture(world_map: &WorldMap, resolution: u32) -> Image {
@@ -1667,7 +1874,7 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
 fn spawn_scatter(
     commands: &mut Commands,
     placement: ScatterPlacement,
-    coord: WorldChunkCoord,
+    key: TerrainChunkKey,
     materials: &DetailMaterials,
     detail_meshes: &DetailMeshes,
 ) {
@@ -1678,7 +1885,7 @@ fn spawn_scatter(
                 Mesh3d(detail_meshes.meadow.clone()),
                 MeshMaterial3d(materials.meadow.clone()),
                 scatter_transform(placement.position, 0.35, placement.scale),
-                TerrainDetailEntity { coord },
+                TerrainDetailEntity { key },
             ));
         }
         BiomeKind::Grove => {
@@ -1687,7 +1894,7 @@ fn spawn_scatter(
                 Mesh3d(detail_meshes.grove.clone()),
                 MeshMaterial3d(materials.grove.clone()),
                 scatter_transform(placement.position, 0.92, placement.scale),
-                TerrainDetailEntity { coord },
+                TerrainDetailEntity { key },
             ));
         }
         BiomeKind::Steppe => {
@@ -1696,7 +1903,7 @@ fn spawn_scatter(
                 Mesh3d(detail_meshes.steppe.clone()),
                 MeshMaterial3d(materials.steppe.clone()),
                 scatter_transform(placement.position, 0.18, placement.scale),
-                TerrainDetailEntity { coord },
+                TerrainDetailEntity { key },
             ));
         }
         BiomeKind::Ridge => {
@@ -1705,7 +1912,7 @@ fn spawn_scatter(
                 Mesh3d(detail_meshes.ridge.clone()),
                 MeshMaterial3d(materials.ridge.clone()),
                 scatter_transform(placement.position, 1.15, placement.scale),
-                TerrainDetailEntity { coord },
+                TerrainDetailEntity { key },
             ));
         }
         BiomeKind::Water => {}
@@ -1830,9 +2037,10 @@ mod tests {
     };
 
     use super::{
-        BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainStreamingQueue,
-        WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals, determine_biome, sample_terrain,
-        visible_chunk_coords,
+        BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainChunkKey, TerrainLodConfig,
+        TerrainLodLevel, TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed,
+        accumulate_normals, build_chunk_mesh_for_lod, chunk_targets_for_camera, determine_biome,
+        sample_terrain,
     };
 
     fn test_config() -> AppConfig {
@@ -1863,8 +2071,12 @@ mod tests {
                 erosion_strength: 0.4,
                 sediment_bias: 0.22,
                 visible_chunk_radius: 1,
+                high_detail_chunk_radius: 1,
+                low_detail_chunk_radius: 1,
+                preload_chunk_radius: 2,
                 showcase_search_radius: 4,
                 streaming_chunk_budget: 1,
+                background_generation_budget: 2,
                 streaming_cache_capacity: 16,
                 material_texture_resolution: 64,
             },
@@ -1953,9 +2165,17 @@ mod tests {
     fn world_map_builds_streamed_chunk_mesh_resolution() {
         let config = test_config();
         let world_map = WorldMap::new(42, &config);
-        let mesh = world_map
-            .build_terrain_mesh_for_chunk(WorldChunkCoord { x: 0, z: 0 })
-            .expect("origin chunk mesh should exist");
+        let mesh = build_chunk_mesh_for_lod(
+            &TerrainChunkBuildContext {
+                world_map: &world_map,
+                seed: 42,
+            },
+            TerrainChunkKey {
+                coord: WorldChunkCoord { x: 0, z: 0 },
+                lod: TerrainLodLevel::High,
+            },
+        )
+        .expect("origin chunk mesh should exist");
         let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions");
         let edge =
             config.world.chunk_radius as usize * config.world.terrain_subdivisions as usize + 1;
@@ -1982,48 +2202,111 @@ mod tests {
     }
 
     #[test]
-    fn visible_chunk_coords_follow_signed_world_position() {
+    fn chunk_targets_follow_signed_world_position() {
         let config = test_config();
         let world_map = WorldMap::new(42, &config);
-        let coords = visible_chunk_coords(&world_map, Vec3::new(-3.0, 0.0, 3.2), 1);
+        let targets = chunk_targets_for_camera(
+            &world_map,
+            Vec3::new(-3.0, 0.0, 3.2),
+            TerrainLodConfig {
+                high_radius: 1,
+                low_radius: 1,
+                preload_radius: 2,
+            },
+        );
 
-        assert!(coords.contains(&WorldChunkCoord { x: -1, z: 0 }));
         assert!(
-            coords
+            targets
                 .iter()
-                .all(|coord| world_map.describe_chunk(*coord).is_some())
+                .any(|target| target.key.coord == WorldChunkCoord { x: -1, z: 0 })
+        );
+        assert!(
+            targets
+                .iter()
+                .all(|target| world_map.describe_chunk(target.key.coord).is_some())
         );
     }
 
     #[test]
-    fn visible_chunk_coords_prioritize_nearest_chunk() {
+    fn chunk_targets_prioritize_nearest_chunk() {
         let config = test_config();
         let world_map = WorldMap::new(42, &config);
-        let coords = visible_chunk_coords(&world_map, Vec3::new(0.2, 0.0, 0.2), 1);
+        let targets = chunk_targets_for_camera(
+            &world_map,
+            Vec3::new(0.2, 0.0, 0.2),
+            TerrainLodConfig {
+                high_radius: 1,
+                low_radius: 1,
+                preload_radius: 2,
+            },
+        );
 
-        assert_eq!(coords.first(), Some(&WorldChunkCoord { x: 0, z: 0 }));
+        assert_eq!(
+            targets.first().map(|target| target.key.coord),
+            Some(WorldChunkCoord { x: 0, z: 0 })
+        );
     }
 
     #[test]
     fn streaming_queue_deduplicates_and_drops_invisible_chunks() {
-        let mut queue = TerrainStreamingQueue::from_coords([
-            WorldChunkCoord { x: 0, z: 0 },
-            WorldChunkCoord { x: 0, z: 0 },
-            WorldChunkCoord { x: 1, z: 0 },
+        let high = TerrainLodLevel::High;
+        let mut queue = TerrainStreamingQueue::from_targets([
+            super::TerrainChunkTarget {
+                key: TerrainChunkKey {
+                    coord: WorldChunkCoord { x: 0, z: 0 },
+                    lod: high,
+                },
+                visible: true,
+            },
+            super::TerrainChunkTarget {
+                key: TerrainChunkKey {
+                    coord: WorldChunkCoord { x: 0, z: 0 },
+                    lod: high,
+                },
+                visible: true,
+            },
+            super::TerrainChunkTarget {
+                key: TerrainChunkKey {
+                    coord: WorldChunkCoord { x: 1, z: 0 },
+                    lod: high,
+                },
+                visible: true,
+            },
         ]);
-        let visible = HashSet::from([WorldChunkCoord { x: 1, z: 0 }]);
-        queue.retain_visible(&visible);
+        let visible = HashSet::from([TerrainChunkKey {
+            coord: WorldChunkCoord { x: 1, z: 0 },
+            lod: high,
+        }]);
+        queue.retain_targets(&visible);
         queue.enqueue_missing(
             [
-                WorldChunkCoord { x: 1, z: 0 },
-                WorldChunkCoord { x: 2, z: 0 },
+                super::TerrainChunkTarget {
+                    key: TerrainChunkKey {
+                        coord: WorldChunkCoord { x: 1, z: 0 },
+                        lod: high,
+                    },
+                    visible: true,
+                },
+                super::TerrainChunkTarget {
+                    key: TerrainChunkKey {
+                        coord: WorldChunkCoord { x: 2, z: 0 },
+                        lod: high,
+                    },
+                    visible: true,
+                },
             ],
-            &HashSet::from([WorldChunkCoord { x: 2, z: 0 }]),
+            &HashSet::from([TerrainChunkKey {
+                coord: WorldChunkCoord { x: 2, z: 0 },
+                lod: high,
+            }]),
         );
 
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue.pop_next(), Some(WorldChunkCoord { x: 1, z: 0 }));
-        assert!(queue.is_empty());
+        assert_eq!(
+            queue.pop_next().map(|target| target.key.coord),
+            Some(WorldChunkCoord { x: 1, z: 0 })
+        );
+        assert_eq!(queue.len(), 0);
     }
 
     #[test]
@@ -2036,14 +2319,14 @@ mod tests {
             world_map: &world_map,
             seed: 42,
         };
-        let coord = WorldChunkCoord { x: 0, z: 0 };
-
-        let first = cache
-            .get_or_build(coord, &context, &mut meshes)
-            .expect("chunk should build");
-        let second = cache
-            .get_or_build(coord, &context, &mut meshes)
-            .expect("chunk should be cached");
+        let key = TerrainChunkKey {
+            coord: WorldChunkCoord { x: 0, z: 0 },
+            lod: TerrainLodLevel::High,
+        };
+        let mesh = build_chunk_mesh_for_lod(&context, key).expect("chunk mesh should build");
+        let scatter = super::collect_scatter_placements_for_key(&context, key);
+        let first = cache.get_or_build(key, &context, meshes.add(mesh), scatter);
+        let second = cache.get(key).expect("chunk should be cached");
 
         assert_eq!(first.mesh.id(), second.mesh.id());
         assert_eq!(first.scatter.len(), second.scatter.len());
@@ -2061,21 +2344,40 @@ mod tests {
             seed: 42,
         };
         let active = WorldChunkCoord { x: 0, z: 0 };
-        for coord in [
-            active,
-            WorldChunkCoord { x: 1, z: 0 },
-            WorldChunkCoord { x: 0, z: 1 },
+        for key in [
+            TerrainChunkKey {
+                coord: active,
+                lod: TerrainLodLevel::High,
+            },
+            TerrainChunkKey {
+                coord: WorldChunkCoord { x: 1, z: 0 },
+                lod: TerrainLodLevel::High,
+            },
+            TerrainChunkKey {
+                coord: WorldChunkCoord { x: 0, z: 1 },
+                lod: TerrainLodLevel::Low,
+            },
         ] {
-            cache
-                .get_or_build(coord, &context, &mut meshes)
-                .expect("chunk should build");
+            let mesh = build_chunk_mesh_for_lod(&context, key).expect("chunk mesh should build");
+            let scatter = super::collect_scatter_placements_for_key(&context, key);
+            let _ = cache.get_or_build(key, &context, meshes.add(mesh), scatter);
         }
 
-        let evicted = cache.evict_inactive(1, &HashSet::from([active]), &mut meshes);
+        let evicted = cache.evict_inactive(
+            1,
+            &HashSet::from([TerrainChunkKey {
+                coord: active,
+                lod: TerrainLodLevel::High,
+            }]),
+            &mut meshes,
+        );
 
         assert_eq!(evicted, 2);
         assert_eq!(cache.len(), 1);
-        assert!(cache.chunks.contains_key(&active));
+        assert!(cache.chunks.contains_key(&TerrainChunkKey {
+            coord: active,
+            lod: TerrainLodLevel::High,
+        }));
     }
 
     #[test]
