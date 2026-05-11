@@ -110,7 +110,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::core::config::{
-        AppConfig, EnvironmentConfig, QualityConfig, SignConfig, WorldConfig,
+        AppConfig, EnvironmentConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
     };
 
     use super::rolling_path;
@@ -128,6 +128,11 @@ mod tests {
             log_directory: PathBuf::from("logs"),
             performance_log_name: "performance.log".to_string(),
             frame_log_interval: 60,
+            presentation: PresentationConfig {
+                enabled: true,
+                scene_duration_seconds: 7.0,
+                camera_blend_speed: 2.0,
+            },
             world: WorldConfig {
                 seed: 1,
                 world_radius: 1,

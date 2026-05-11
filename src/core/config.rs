@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub log_directory: PathBuf,
     pub performance_log_name: String,
     pub frame_log_interval: u32,
+    pub presentation: PresentationConfig,
     pub world: WorldConfig,
     pub environment: EnvironmentConfig,
     pub signs: SignConfig,
@@ -27,6 +28,13 @@ pub struct WorldConfig {
     pub terrain_scale: f32,
     pub height_variation: f32,
     pub water_level: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PresentationConfig {
+    pub enabled: bool,
+    pub scene_duration_seconds: f32,
+    pub camera_blend_speed: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -94,6 +102,11 @@ terrain_scale = 5.0
 height_variation = 2.5
 water_level = 0.1
 
+[presentation]
+enabled = true
+scene_duration_seconds = 8.0
+camera_blend_speed = 1.8
+
 [environment]
 day_length_seconds = 180.0
 wander_radius = 4.5
@@ -118,6 +131,8 @@ frame_time_budget_ms = 6.9
 
         assert_eq!(config.window_title, "Test Title");
         assert_eq!(config.frame_log_interval, 30);
+        assert!(config.presentation.enabled);
+        assert_eq!(config.presentation.scene_duration_seconds, 8.0);
         assert_eq!(config.world.seed, 7);
         assert_eq!(config.environment.day_length_seconds, 180.0);
         assert_eq!(config.environment.wander_radius, 4.5);

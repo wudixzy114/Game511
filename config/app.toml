@@ -3,6 +3,11 @@ log_directory = "logs"
 performance_log_name = "performance.log"
 frame_log_interval = 120
 
+[presentation]
+enabled = true
+scene_duration_seconds = 7.0
+camera_blend_speed = 2.0
+
 [world]
 seed = 511
 world_radius = 5

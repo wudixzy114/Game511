@@ -14,12 +14,20 @@
       "preLaunchTask": "cargo build"
     },
     {
-      "name": "Debug Rust Engine (CodeLLDB)",
-      "type": "lldb",
+      "name": "Debug Presentation Scene (Windows)",
+      "type": "cppvsdbg",
       "request": "launch",
       "program": "${workspaceFolder}/target/debug/dao_game.exe",
       "args": [],
+      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "DAO_PRESENTATION_MODE",
+          "value": "1"
+        }
+      ],
+      "externalConsole": false,
       "preLaunchTask": "cargo build"
     }
   ]

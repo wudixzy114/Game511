@@ -82,6 +82,9 @@ impl TerrainTile {
 pub struct WandererPrototype;
 
 #[derive(Debug, Component)]
+pub struct WorldCamera;
+
+#[derive(Debug, Component)]
 struct SunLight;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +182,23 @@ impl WorldMap {
     }
 }
 
+#[derive(Debug, Resource, Clone, Copy)]
+pub struct WorldPresentationControl {
+    pub time_override: Option<f32>,
+    pub wander_target: Option<Vec3>,
+    pub wander_speed_multiplier: f32,
+}
+
+impl Default for WorldPresentationControl {
+    fn default() -> Self {
+        Self {
+            time_override: None,
+            wander_target: None,
+            wander_speed_multiplier: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DetailMaterials {
     foliage: Handle<StandardMaterial>,
@@ -221,6 +241,7 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(-8.0, 10.0, 14.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+        WorldCamera,
     ));
 }
 
@@ -379,10 +400,19 @@ fn spawn_world(
     );
 }
 
-fn advance_world_cycle(time: Res<Time>, config: Res<AppConfig>, mut cycle: ResMut<WorldCycle>) {
-    let cycle_length = config.environment.day_length_seconds.max(1.0);
-    cycle.normalized_time =
-        (cycle.normalized_time + time.delta_secs() / cycle_length).rem_euclid(1.0);
+fn advance_world_cycle(
+    time: Res<Time>,
+    config: Res<AppConfig>,
+    control: Option<Res<WorldPresentationControl>>,
+    mut cycle: ResMut<WorldCycle>,
+) {
+    if let Some(control) = control.and_then(|control| control.time_override) {
+        cycle.normalized_time = control.rem_euclid(1.0);
+    } else {
+        let cycle_length = config.environment.day_length_seconds.max(1.0);
+        cycle.normalized_time =
+            (cycle.normalized_time + time.delta_secs() / cycle_length).rem_euclid(1.0);
+    }
     let sun_height = (cycle.normalized_time * std::f32::consts::TAU).sin();
     cycle.daylight = (sun_height * 0.5 + 0.5).clamp(0.0, 1.0);
 }
@@ -390,12 +420,27 @@ fn advance_world_cycle(time: Res<Time>, config: Res<AppConfig>, mut cycle: ResMu
 fn animate_wanderer(
     time: Res<Time>,
     config: Res<AppConfig>,
+    control: Option<Res<WorldPresentationControl>>,
     world_map: Res<WorldMap>,
     mut query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
     let Some(mut transform) = query.iter_mut().next() else {
         return;
     };
+
+    if let Some(control) = control
+        .as_deref()
+        .filter(|control| control.wander_target.is_some())
+    {
+        animate_controlled_wanderer(
+            time.delta_secs(),
+            config.environment.wander_speed,
+            control,
+            &world_map,
+            &mut transform,
+        );
+        return;
+    }
 
     let t = time.elapsed_secs() * config.environment.wander_speed.max(0.05);
     let radius = config
@@ -420,6 +465,34 @@ fn animate_wanderer(
     let smoothing = 1.0 - (-5.0 * time.delta_secs()).exp();
     transform.translation = transform.translation.lerp(target_position, smoothing);
     transform.look_at(next_position, Vec3::Y);
+}
+
+fn animate_controlled_wanderer(
+    delta_secs: f32,
+    base_speed: f32,
+    control: &WorldPresentationControl,
+    world_map: &WorldMap,
+    transform: &mut Transform,
+) {
+    let Some(mut target_position) = control.wander_target else {
+        return;
+    };
+    let Some(tile) = world_map.sample_world_position(target_position) else {
+        return;
+    };
+    target_position.y = tile.height() + 1.2;
+
+    let direction = target_position - transform.translation;
+    let distance = direction.length();
+    if distance > 0.01 {
+        let step = (base_speed * 4.5 * control.wander_speed_multiplier.max(0.1) * delta_secs)
+            .min(distance);
+        let movement = direction.normalize() * step;
+        transform.translation += movement;
+        transform.look_at(target_position + Vec3::new(0.0, 0.0, 0.2), Vec3::Y);
+    } else {
+        transform.translation = transform.translation.lerp(target_position, 0.18);
+    }
 }
 
 fn animate_sunlight(
@@ -581,7 +654,7 @@ mod tests {
     use bevy::prelude::Vec3;
 
     use crate::core::config::{
-        AppConfig, EnvironmentConfig, QualityConfig, SignConfig, WorldConfig,
+        AppConfig, EnvironmentConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
     };
 
     use super::{BiomeKind, WorldMap, WorldSeed, biome_color, determine_biome, sample_terrain};
@@ -592,6 +665,11 @@ mod tests {
             log_directory: PathBuf::from("logs"),
             performance_log_name: "performance.log".to_string(),
             frame_log_interval: 60,
+            presentation: PresentationConfig {
+                enabled: true,
+                scene_duration_seconds: 7.0,
+                camera_blend_speed: 2.0,
+            },
             world: WorldConfig {
                 seed: 42,
                 world_radius: 2,

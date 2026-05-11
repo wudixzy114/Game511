@@ -194,11 +194,14 @@ fn advance_sign_state(
     let stillness = (1.0 - context.speed / expected_speed.max(0.05)).clamp(0.0, 1.0);
     let elevation = ((context.height - context.water_level) / 3.5).clamp(0.0, 1.0);
     let moisture_balance = (1.0 - (context.moisture - 0.58).abs() * 1.75).clamp(0.0, 1.0);
+    let omen = choose_omen(context, horizon, elevation, stillness);
+    let omen_bias = omen_resonance_bonus(omen);
     let target_resonance = (biome_affinity(context.biome) * 0.48
         + stillness * 0.18
         + elevation * 0.16
         + moisture_balance * 0.08
-        + horizon * 0.1)
+        + horizon * 0.1
+        + omen_bias)
         .clamp(0.0, 1.0);
 
     let smoothing = config.resonance_smoothing.clamp(0.0, 1.0);
@@ -217,7 +220,6 @@ fn advance_sign_state(
             * context.delta_seconds)
         .clamp(0.0, 1.0);
 
-    let omen = choose_omen(context, horizon, elevation, stillness);
     let should_trigger = state.resonance >= config.resonance_threshold
         && state.calm >= config.calm_threshold
         && omen.is_some();
@@ -234,6 +236,16 @@ fn advance_sign_state(
     SignUpdate {
         state,
         activated: should_trigger && !was_triggered,
+    }
+}
+
+fn omen_resonance_bonus(omen: Option<OmenKind>) -> f32 {
+    match omen {
+        Some(OmenKind::DawnLight) => 0.08,
+        Some(OmenKind::GroveWhisper) => 0.12,
+        Some(OmenKind::SummitCall) => 0.1,
+        Some(OmenKind::StillWater) => 0.24,
+        None => 0.0,
     }
 }
 
@@ -363,5 +375,62 @@ mod tests {
 
         assert!(update.state.calm < 0.3);
         assert!(!update.state.omen_triggered);
+    }
+
+    #[test]
+    fn still_water_context_receives_bonus_toward_threshold() {
+        let still_update = advance_sign_state(
+            SignState {
+                resonance: 0.62,
+                calm: 0.8,
+                omen_triggered: false,
+                current_omen: None,
+            },
+            ResonanceContext {
+                biome: BiomeKind::Water,
+                height: -0.05,
+                moisture: 0.62,
+                water_level: -0.1,
+                speed: 0.0,
+                normalized_time: 0.72,
+                delta_seconds: 1.0,
+            },
+            &SignConfig {
+                resonance_threshold: 0.72,
+                resonance_smoothing: 0.35,
+                calm_recovery: 0.02,
+                calm_threshold: 0.35,
+                omen_beacon_height: 3.0,
+            },
+            0.75,
+        );
+        let restless_update = advance_sign_state(
+            SignState {
+                resonance: 0.62,
+                calm: 0.8,
+                omen_triggered: false,
+                current_omen: None,
+            },
+            ResonanceContext {
+                biome: BiomeKind::Water,
+                height: -0.05,
+                moisture: 0.62,
+                water_level: -0.1,
+                speed: 1.6,
+                normalized_time: 0.72,
+                delta_seconds: 1.0,
+            },
+            &SignConfig {
+                resonance_threshold: 0.72,
+                resonance_smoothing: 0.35,
+                calm_recovery: 0.02,
+                calm_threshold: 0.35,
+                omen_beacon_height: 3.0,
+            },
+            0.75,
+        );
+
+        assert!(still_update.state.resonance > restless_update.state.resonance);
+        assert!(still_update.state.calm > restless_update.state.calm);
     }
 }
