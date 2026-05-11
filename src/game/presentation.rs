@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::{
     core::config::AppConfig,
     game::{
+        environment::WeatherKind,
         signs::{OmenKind, SignState},
         world::{
             BiomeKind, TerrainTile, WandererPrototype, WorldCamera, WorldMap,
@@ -45,6 +46,7 @@ struct PresentationScene {
     camera_offset: Vec3,
     wander_target: Vec3,
     time_override: f32,
+    weather: WeatherKind,
     expected_omen: Option<OmenKind>,
 }
 
@@ -53,6 +55,14 @@ struct SceneAnchor {
     x: i32,
     z: i32,
     tile: TerrainTile,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SceneVisuals {
+    camera_offset: Vec3,
+    time_override: f32,
+    weather: WeatherKind,
+    expected_omen: Option<OmenKind>,
 }
 
 fn initialize_presentation(
@@ -79,43 +89,92 @@ fn initialize_presentation(
     let grove_anchor = find_anchor(&world_map, BiomeKind::Grove).unwrap_or(ridge_anchor);
     let water_anchor = find_anchor(&world_map, BiomeKind::Water).unwrap_or(grove_anchor);
     let meadow_anchor = find_anchor(&world_map, BiomeKind::Meadow).unwrap_or(grove_anchor);
+    let steppe_anchor = find_anchor(&world_map, BiomeKind::Steppe).unwrap_or(meadow_anchor);
 
     let scenes = vec![
         build_scene(
             "Panorama Sweep",
-            "overview of terrain layers, sky lighting and traversal silhouette",
+            "overview of terrain layers, clear daylight and long-range sky tone",
             meadow_anchor,
             &world_map,
-            Vec3::new(-15.0, 9.5, 15.0),
-            0.18,
-            None,
+            SceneVisuals {
+                camera_offset: Vec3::new(-15.0, 9.5, 15.0),
+                time_override: 0.18,
+                weather: WeatherKind::Clear,
+                expected_omen: None,
+            },
         ),
         build_scene(
             "Grove Whisper",
-            "stable grove omen showcase with close-range vegetation silhouettes",
+            "misty grove atmosphere with close-range vegetation silhouettes",
             grove_anchor,
             &world_map,
-            Vec3::new(-6.0, 4.8, 7.0),
-            0.34,
-            Some(OmenKind::GroveWhisper),
+            SceneVisuals {
+                camera_offset: Vec3::new(-6.0, 4.8, 7.0),
+                time_override: 0.34,
+                weather: WeatherKind::Mist,
+                expected_omen: Some(OmenKind::GroveWhisper),
+            },
         ),
         build_scene(
             "Ridge Dawn",
-            "sunrise lighting shift and high-ground omen response",
+            "sunrise lighting shift with a clear east-west solar arc",
             ridge_anchor,
             &world_map,
-            Vec3::new(-9.0, 6.2, 10.0),
-            0.02,
-            Some(OmenKind::DawnLight),
+            SceneVisuals {
+                camera_offset: Vec3::new(-9.0, 6.2, 10.0),
+                time_override: 0.02,
+                weather: WeatherKind::Clear,
+                expected_omen: Some(OmenKind::DawnLight),
+            },
         ),
         build_scene(
-            "Still Water",
-            "waterline calm test and cool omen beacon response",
+            "Storm Front",
+            "heavy rain, dark atmosphere and lightning-driven contrast",
+            meadow_anchor,
+            &world_map,
+            SceneVisuals {
+                camera_offset: Vec3::new(-8.5, 5.4, 9.5),
+                time_override: 0.46,
+                weather: WeatherKind::Storm,
+                expected_omen: None,
+            },
+        ),
+        build_scene(
+            "Snow Ridge",
+            "cold snowfall, reduced visibility and summit response",
+            ridge_anchor,
+            &world_map,
+            SceneVisuals {
+                camera_offset: Vec3::new(-10.0, 7.0, 11.5),
+                time_override: 0.61,
+                weather: WeatherKind::Snow,
+                expected_omen: Some(OmenKind::SummitCall),
+            },
+        ),
+        build_scene(
+            "Starfield Watch",
+            "clear midnight sky for star visibility and moon transition",
+            steppe_anchor,
+            &world_map,
+            SceneVisuals {
+                camera_offset: Vec3::new(-7.2, 4.5, 8.6),
+                time_override: 0.76,
+                weather: WeatherKind::Clear,
+                expected_omen: None,
+            },
+        ),
+        build_scene(
+            "Moonlit Water",
+            "waterline calm test with moonlight and cool omen response",
             water_anchor,
             &world_map,
-            Vec3::new(0.0, 4.2, 8.5),
-            0.74,
-            Some(OmenKind::StillWater),
+            SceneVisuals {
+                camera_offset: Vec3::new(0.0, 4.2, 8.5),
+                time_override: 0.84,
+                weather: WeatherKind::Clear,
+                expected_omen: Some(OmenKind::StillWater),
+            },
         ),
     ];
 
@@ -178,6 +237,7 @@ fn advance_presentation_director(
     }
 
     control.time_override = Some(scene.time_override);
+    control.weather_override = Some(scene.weather);
     control.wander_target = Some(scene.wander_target);
     control.wander_speed_multiplier = if scene_progress < 0.4 { 1.3 } else { 0.35 };
 
@@ -215,9 +275,7 @@ fn build_scene(
     description: &'static str,
     anchor: SceneAnchor,
     world_map: &WorldMap,
-    camera_offset: Vec3,
-    time_override: f32,
-    expected_omen: Option<OmenKind>,
+    visuals: SceneVisuals,
 ) -> PresentationScene {
     let base_focus = world_map.tile_translation(anchor.x, anchor.z, anchor.tile.height());
     let focus = Vec3::new(
@@ -235,10 +293,11 @@ fn build_scene(
         name,
         description,
         focus,
-        camera_offset,
+        camera_offset: visuals.camera_offset,
         wander_target,
-        time_override,
-        expected_omen,
+        time_override: visuals.time_override,
+        weather: visuals.weather,
+        expected_omen: visuals.expected_omen,
     }
 }
 

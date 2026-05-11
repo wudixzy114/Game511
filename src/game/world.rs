@@ -18,7 +18,7 @@ use bevy::{
 };
 
 use crate::core::config::{AppConfig, WorldConfig};
-use crate::game::player::FirstPersonState;
+use crate::game::{environment::WeatherKind, player::FirstPersonState};
 
 pub struct WorldPlugin;
 
@@ -52,7 +52,6 @@ impl Plugin for WorldPlugin {
                 )
                     .chain(),
                 animate_wanderer,
-                animate_sunlight,
             ),
         );
     }
@@ -129,7 +128,7 @@ pub struct WandererPrototype;
 pub struct WorldCamera;
 
 #[derive(Debug, Component)]
-struct SunLight;
+pub(crate) struct SunLight;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BiomeKind {
@@ -1110,6 +1109,7 @@ impl WorldMap {
 #[derive(Debug, Resource, Clone, Copy)]
 pub struct WorldPresentationControl {
     pub time_override: Option<f32>,
+    pub weather_override: Option<WeatherKind>,
     pub wander_target: Option<Vec3>,
     pub wander_speed_multiplier: f32,
 }
@@ -1118,6 +1118,7 @@ impl Default for WorldPresentationControl {
     fn default() -> Self {
         Self {
             time_override: None,
+            weather_override: None,
             wander_target: None,
             wander_speed_multiplier: 1.0,
         }
@@ -1914,31 +1915,6 @@ fn animate_controlled_wanderer(
     } else {
         transform.translation = transform.translation.lerp(target_position, 0.18);
     }
-}
-
-fn animate_sunlight(
-    cycle: Res<WorldCycle>,
-    mut clear_color: ResMut<ClearColor>,
-    mut lights: Query<(&mut DirectionalLight, &mut Transform), With<SunLight>>,
-) {
-    let Some((mut light, mut transform)) = lights.iter_mut().next() else {
-        return;
-    };
-
-    let phase = cycle.normalized_time * std::f32::consts::TAU;
-    let sun_height = phase.sin();
-    let daylight = cycle.daylight;
-    let pitch = -0.28 - sun_height * 1.08;
-    let yaw = 0.42 + phase * 0.2;
-
-    transform.rotation = Quat::from_euler(EulerRot::XYZ, pitch, yaw, 0.0);
-    light.illuminance = 1_400.0 + daylight.powf(1.55) * 48_000.0;
-    light.color = Color::srgb(1.0, 0.7 + daylight * 0.24, 0.58 + daylight * 0.34);
-    clear_color.0 = Color::srgb(
-        0.025 + daylight * 0.21,
-        0.04 + daylight * 0.24,
-        0.075 + daylight * 0.31,
-    );
 }
 
 fn sample_terrain(world_x: f32, world_z: f32, seed: u64, config: &WorldConfig) -> TerrainSample {

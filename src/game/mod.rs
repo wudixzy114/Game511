@@ -1,7 +1,10 @@
+pub mod environment;
 pub mod player;
 pub mod presentation;
 pub mod signs;
 pub mod world;
+
+use std::env;
 
 use bevy::prelude::*;
 
@@ -12,9 +15,13 @@ pub struct GamePlugin;
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(world::WorldPlugin);
+        app.add_plugins(environment::EnvironmentPlugin);
         app.add_plugins(signs::SignPlugin);
-        let presentation_enabled =
-            presentation_mode_enabled_internal(None, app.world().get_resource::<AppConfig>());
+        let env_value = env::var("DAO_PRESENTATION_MODE").ok();
+        let presentation_enabled = presentation_mode_enabled_internal(
+            env_value.as_deref(),
+            app.world().get_resource::<AppConfig>(),
+        );
         if presentation_enabled {
             app.add_plugins(presentation::PresentationPlugin);
         } else {
