@@ -1211,21 +1211,37 @@ fn update_visible_chunks(
         return;
     }
     let visible_set: HashSet<TerrainChunkKey> = targets.iter().map(|target| target.key).collect();
+    let desired_visible_by_coord: HashMap<WorldChunkCoord, TerrainChunkKey> = targets
+        .iter()
+        .filter(|target| target.visible)
+        .map(|target| (target.key.coord, target.key))
+        .collect();
+    let spawned_set: HashSet<TerrainChunkKey> =
+        chunk_query.iter().map(|(_, chunk)| chunk.key).collect();
 
     for (entity, chunk_component) in &chunk_query {
-        if !visible_set.contains(&chunk_component.key) {
+        if !should_keep_chunk_key(
+            chunk_component.key,
+            &visible_set,
+            &desired_visible_by_coord,
+            &spawned_set,
+        ) {
             commands.entity(entity).despawn();
         }
     }
 
     for (entity, detail_component) in &detail_query {
-        if !visible_set.contains(&detail_component.key) {
+        if !should_keep_chunk_key(
+            detail_component.key,
+            &visible_set,
+            &desired_visible_by_coord,
+            &spawned_set,
+        ) {
             commands.entity(entity).despawn();
         }
     }
 
-    let existing_set: HashSet<TerrainChunkKey> =
-        chunk_query.iter().map(|(_, chunk)| chunk.key).collect();
+    let existing_set = spawned_set;
     queue.retain_targets(&visible_set);
     queue.enqueue_missing(targets.iter().copied(), &existing_set);
 
@@ -1238,13 +1254,14 @@ fn stream_terrain_chunks(
     stream_state: TerrainStreamState<'_>,
     resources: TerrainStreamResources<'_>,
     visibility_state: Res<ChunkVisibilityState>,
-    existing_chunks: Query<&TerrainChunkEntity>,
+    existing_chunks: Query<(Entity, &TerrainChunkEntity)>,
+    existing_details: Query<(Entity, &TerrainDetailEntity)>,
 ) {
     let (mut queue, mut cache, mut scheduler) = stream_state;
     let (world_map, terrain_material, detail_materials, detail_meshes, streaming_config) =
         resources;
     let mut existing_set: HashSet<TerrainChunkKey> =
-        existing_chunks.iter().map(|chunk| chunk.key).collect();
+        existing_chunks.iter().map(|(_, chunk)| chunk.key).collect();
     let spawn_context = TerrainChunkSpawnContext {
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
@@ -1293,6 +1310,13 @@ fn stream_terrain_chunks(
             &cached,
             result.key.lod != TerrainLodLevel::Preload,
         );
+        despawn_obsolete_lod_entities(
+            &mut commands,
+            result.key,
+            &visibility_state.active,
+            &existing_chunks,
+            &existing_details,
+        );
         existing_set.insert(result.key);
         integrated += 1;
     }
@@ -1312,6 +1336,13 @@ fn stream_terrain_chunks(
                     .get(target.key)
                     .expect("cached target should remain available");
                 spawn_cached_chunk(&mut commands, &spawn_context, target.key, &cached, true);
+                despawn_obsolete_lod_entities(
+                    &mut commands,
+                    target.key,
+                    &visibility_state.active,
+                    &existing_chunks,
+                    &existing_details,
+                );
                 existing_set.insert(target.key);
                 integrated += 1;
             }
@@ -1743,6 +1774,56 @@ fn spawn_cached_chunk(
     );
 }
 
+fn should_keep_chunk_key(
+    existing_key: TerrainChunkKey,
+    desired_keys: &HashSet<TerrainChunkKey>,
+    desired_visible_by_coord: &HashMap<WorldChunkCoord, TerrainChunkKey>,
+    spawned_keys: &HashSet<TerrainChunkKey>,
+) -> bool {
+    if desired_keys.contains(&existing_key) {
+        return true;
+    }
+
+    let Some(replacement_key) = desired_visible_by_coord.get(&existing_key.coord).copied() else {
+        return false;
+    };
+
+    if replacement_key == existing_key {
+        return true;
+    }
+
+    !spawned_keys.contains(&replacement_key)
+}
+
+fn despawn_obsolete_lod_entities(
+    commands: &mut Commands,
+    spawned_key: TerrainChunkKey,
+    active_targets: &[TerrainChunkTarget],
+    existing_chunks: &Query<(Entity, &TerrainChunkEntity)>,
+    existing_details: &Query<(Entity, &TerrainDetailEntity)>,
+) {
+    let desired_visible_by_coord: HashMap<WorldChunkCoord, TerrainChunkKey> = active_targets
+        .iter()
+        .filter(|target| target.visible)
+        .map(|target| (target.key.coord, target.key))
+        .collect();
+    if desired_visible_by_coord.get(&spawned_key.coord).copied() != Some(spawned_key) {
+        return;
+    }
+
+    for (entity, chunk) in existing_chunks.iter() {
+        if chunk.key.coord == spawned_key.coord && chunk.key != spawned_key {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    for (entity, detail) in existing_details.iter() {
+        if detail.key.coord == spawned_key.coord && detail.key != spawned_key {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 fn slope_hint(normalized_height: f32) -> f32 {
     normalized_height.abs().clamp(0.0, 1.0)
 }
@@ -2027,7 +2108,10 @@ fn scatter_noise(seed: u64, x: i32, z: i32, salt: u64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::PathBuf};
+    use std::{
+        collections::{HashMap, HashSet},
+        path::PathBuf,
+    };
 
     use bevy::prelude::{Assets, Mesh, Vec3};
 
@@ -2040,7 +2124,7 @@ mod tests {
         BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainChunkKey, TerrainLodConfig,
         TerrainLodLevel, TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed,
         accumulate_normals, build_chunk_mesh_for_lod, chunk_targets_for_camera, determine_biome,
-        sample_terrain,
+        sample_terrain, should_keep_chunk_key,
     };
 
     fn test_config() -> AppConfig {
@@ -2378,6 +2462,46 @@ mod tests {
             coord: active,
             lod: TerrainLodLevel::High,
         }));
+    }
+
+    #[test]
+    fn keep_old_lod_visible_until_replacement_is_spawned() {
+        let coord = WorldChunkCoord { x: 2, z: -1 };
+        let low_key = TerrainChunkKey {
+            coord,
+            lod: TerrainLodLevel::Low,
+        };
+        let high_key = TerrainChunkKey {
+            coord,
+            lod: TerrainLodLevel::High,
+        };
+
+        assert!(should_keep_chunk_key(
+            low_key,
+            &HashSet::from([high_key]),
+            &HashMap::from([(coord, high_key)]),
+            &HashSet::from([low_key]),
+        ));
+    }
+
+    #[test]
+    fn old_lod_is_not_kept_after_replacement_has_spawned() {
+        let coord = WorldChunkCoord { x: 2, z: -1 };
+        let low_key = TerrainChunkKey {
+            coord,
+            lod: TerrainLodLevel::Low,
+        };
+        let high_key = TerrainChunkKey {
+            coord,
+            lod: TerrainLodLevel::High,
+        };
+
+        assert!(!should_keep_chunk_key(
+            low_key,
+            &HashSet::from([high_key]),
+            &HashMap::from([(coord, high_key)]),
+            &HashSet::from([low_key, high_key]),
+        ));
     }
 
     #[test]
