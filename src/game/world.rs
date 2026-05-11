@@ -1,4 +1,7 @@
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashSet, VecDeque},
+    time::Instant,
+};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -36,7 +39,7 @@ impl Plugin for WorldPlugin {
             Update,
             (
                 advance_world_cycle,
-                update_visible_chunks,
+                (update_visible_chunks, stream_terrain_chunks).chain(),
                 animate_wanderer,
                 animate_sunlight,
             ),
@@ -198,9 +201,61 @@ struct DetailMaterials {
     ridge: Handle<StandardMaterial>,
 }
 
+#[derive(Debug, Resource, Clone)]
+struct DetailMeshes {
+    grove: Handle<Mesh>,
+    meadow: Handle<Mesh>,
+    steppe: Handle<Mesh>,
+    ridge: Handle<Mesh>,
+}
+
 #[derive(Debug, Resource, Default)]
 struct ChunkVisibilityState {
     active: Vec<WorldChunkCoord>,
+}
+
+#[derive(Debug, Resource, Default)]
+struct TerrainStreamingQueue {
+    pending: VecDeque<WorldChunkCoord>,
+}
+
+impl TerrainStreamingQueue {
+    fn from_coords(coords: impl IntoIterator<Item = WorldChunkCoord>) -> Self {
+        let mut queue = Self::default();
+        let existing = HashSet::new();
+        queue.enqueue_missing(coords, &existing);
+        queue
+    }
+
+    fn enqueue_missing(
+        &mut self,
+        coords: impl IntoIterator<Item = WorldChunkCoord>,
+        existing: &HashSet<WorldChunkCoord>,
+    ) {
+        let mut queued: HashSet<WorldChunkCoord> = self.pending.iter().copied().collect();
+        for coord in coords {
+            if existing.contains(&coord) || !queued.insert(coord) {
+                continue;
+            }
+            self.pending.push_back(coord);
+        }
+    }
+
+    fn retain_visible(&mut self, visible: &HashSet<WorldChunkCoord>) {
+        self.pending.retain(|coord| visible.contains(coord));
+    }
+
+    fn pop_next(&mut self) -> Option<WorldChunkCoord> {
+        self.pending.pop_front()
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
 }
 
 #[derive(Debug, Resource, Clone, Copy)]
@@ -208,11 +263,26 @@ struct VisibleChunkConfig {
     radius: i32,
 }
 
+#[derive(Debug, Resource, Clone, Copy)]
+struct TerrainStreamingConfig {
+    chunk_budget_per_frame: usize,
+}
+
 type ChunkStreamingContext<'w, 's> = (
     ResMut<'w, ChunkVisibilityState>,
+    ResMut<'w, TerrainStreamingQueue>,
     Query<'w, 's, &'static Transform, With<WorldCamera>>,
     Query<'w, 's, (Entity, &'static TerrainChunkEntity)>,
     Query<'w, 's, (Entity, &'static TerrainDetailEntity)>,
+);
+
+type TerrainStreamResources<'w> = (
+    Res<'w, WorldMap>,
+    Res<'w, WorldSeed>,
+    Res<'w, TerrainRuntimeMaterial>,
+    Res<'w, DetailMaterials>,
+    Res<'w, DetailMeshes>,
+    Res<'w, TerrainStreamingConfig>,
 );
 
 type WorldSpawnResources<'w> = (
@@ -439,6 +509,9 @@ impl WorldMap {
         let mut colors = Vec::with_capacity(mesh_stride * mesh_depth);
         let mut uvs = Vec::with_capacity(mesh_stride * mesh_depth);
         let uv_scale = self.chunk_world_span().max(0.001);
+        let sample_step = self.sample_spacing().max(0.001);
+        let mut raw_samples = Vec::with_capacity(vertex_count);
+        let mut heights = Vec::with_capacity(vertex_count);
 
         for z_step in 0..=z_steps {
             for x_step in 0..=x_steps {
@@ -446,9 +519,66 @@ impl WorldMap {
                     (tile_x_min as f32 + x_step as f32 / self.subdivisions as f32) * self.cell_size;
                 let world_z =
                     (tile_z_min as f32 + z_step as f32 / self.subdivisions as f32) * self.cell_size;
-                let vertex = self.sample_vertex(world_x, world_z)?;
+                if !self.within_world_bounds(world_x, world_z) {
+                    return None;
+                }
+                let sample = sample_terrain(world_x, world_z, self.seed, &self.terrain);
+                heights.push(sample.height);
+                raw_samples.push(sample);
+            }
+        }
+
+        for z_step in 0..=z_steps {
+            for x_step in 0..=x_steps {
+                let index = z_step * mesh_stride + x_step;
+                let world_x =
+                    (tile_x_min as f32 + x_step as f32 / self.subdivisions as f32) * self.cell_size;
+                let world_z =
+                    (tile_z_min as f32 + z_step as f32 / self.subdivisions as f32) * self.cell_size;
+                let sample = raw_samples[index];
+                let left = if x_step > 0 {
+                    heights[index - 1]
+                } else {
+                    self.sample_height_clamped(world_x - sample_step, world_z)
+                };
+                let right = if x_step < x_steps {
+                    heights[index + 1]
+                } else {
+                    self.sample_height_clamped(world_x + sample_step, world_z)
+                };
+                let down = if z_step > 0 {
+                    heights[index - mesh_stride]
+                } else {
+                    self.sample_height_clamped(world_x, world_z - sample_step)
+                };
+                let up = if z_step < z_steps {
+                    heights[index + mesh_stride]
+                } else {
+                    self.sample_height_clamped(world_x, world_z + sample_step)
+                };
+                let slope = self.slope_from_neighbors(sample.height, left, right, down, up);
+                let biome = determine_biome(
+                    sample,
+                    slope,
+                    self.water_level,
+                    self.terrain.shoreline_blend,
+                );
+                let vertex = TerrainVertexSample {
+                    world_x,
+                    world_z,
+                    height: sample.height,
+                    moisture: sample.moisture,
+                    temperature: sample.temperature,
+                    slope,
+                    river: sample.river,
+                    erosion: sample.erosion,
+                    sediment: sample.sediment,
+                    biome,
+                };
                 positions.push([vertex.world_x, vertex.height, vertex.world_z]);
-                normals.push(self.normal_at(world_x, world_z).to_array());
+                normals.push(
+                    normal_from_neighbor_heights(left, right, down, up, sample_step).to_array(),
+                );
                 colors.push(
                     vertex_color(&vertex, self.water_level)
                         .to_linear()
@@ -587,20 +717,14 @@ impl WorldMap {
         let down = self.sample_height_clamped(world_x, world_z - step);
         let up = self.sample_height_clamped(world_x, world_z + step);
 
+        self.slope_from_neighbors(center, left, right, down, up)
+    }
+
+    fn slope_from_neighbors(&self, center: f32, left: f32, right: f32, down: f32, up: f32) -> f32 {
+        let step = self.sample_spacing().max(0.001);
         let dx = (right - left) / (step * 2.0);
         let dz = (up - down) / (step * 2.0);
         ((dx * dx + dz * dz).sqrt() + (center - self.water_level).abs() * 0.02).min(3.0)
-    }
-
-    fn normal_at(&self, world_x: f32, world_z: f32) -> Vec3 {
-        let step = self.sample_spacing().max(0.001);
-        let left = self.sample_height_clamped(world_x - step, world_z);
-        let right = self.sample_height_clamped(world_x + step, world_z);
-        let down = self.sample_height_clamped(world_x, world_z - step);
-        let up = self.sample_height_clamped(world_x, world_z + step);
-
-        let normal = Vec3::new(left - right, step * 2.0, down - up).normalize_or_zero();
-        if normal.y > 0.0 { normal } else { Vec3::Y }
     }
 
     fn sample_vertex_field(
@@ -643,6 +767,14 @@ struct ScatterPlacement {
     position: Vec3,
     biome: BiomeKind,
     scale: f32,
+}
+
+struct TerrainChunkSpawnContext<'a> {
+    world_map: &'a WorldMap,
+    material: &'a Handle<StandardMaterial>,
+    detail_materials: &'a DetailMaterials,
+    detail_meshes: &'a DetailMeshes,
+    seed: u64,
 }
 
 fn configure_world_seed(config: Res<AppConfig>, mut seed: ResMut<WorldSeed>) {
@@ -696,8 +828,12 @@ fn create_terrain_material_texture(
         handle: material_handle,
     });
     commands.insert_resource(ChunkVisibilityState::default());
+    commands.insert_resource(TerrainStreamingQueue::default());
     commands.insert_resource(VisibleChunkConfig {
         radius: config.world.visible_chunk_radius.max(0),
+    });
+    commands.insert_resource(TerrainStreamingConfig {
+        chunk_budget_per_frame: config.world.streaming_chunk_budget.max(1) as usize,
     });
 }
 
@@ -782,22 +918,35 @@ fn spawn_world(
             ..Default::default()
         }),
     };
+    let detail_meshes = DetailMeshes {
+        meadow: meshes.add(Mesh::from(Capsule3d::new(0.09, 0.6))),
+        grove: meshes.add(Mesh::from(Cylinder::new(0.18, 1.8))),
+        steppe: meshes.add(Mesh::from(Cylinder::new(0.28, 0.42))),
+        ridge: meshes.add(Mesh::from(Cylinder::new(0.16, 2.4))),
+    };
 
     let initial_chunks =
         visible_chunk_coords(&world_map, spots.meadow.position, visible_config.radius);
-    spawn_streamed_terrain_chunks(
-        &mut commands,
-        &mut meshes,
-        &world_map,
-        terrain_material.handle.clone(),
-        &detail_materials,
-        seed.0,
-        &initial_chunks,
-    );
+    let critical_chunk = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z);
+    let spawn_context = TerrainChunkSpawnContext {
+        world_map: &world_map,
+        material: &terrain_material.handle,
+        detail_materials: &detail_materials,
+        detail_meshes: &detail_meshes,
+        seed: seed.0,
+    };
+    let mut queued_chunks = initial_chunks.clone();
+    if let Some(critical_chunk) = critical_chunk {
+        spawn_terrain_chunk(&mut commands, &mut meshes, &spawn_context, critical_chunk);
+        queued_chunks.retain(|coord| *coord != critical_chunk);
+    }
+    let queued_chunk_count = queued_chunks.len();
     commands.insert_resource(ChunkVisibilityState {
         active: initial_chunks.clone(),
     });
+    commands.insert_resource(TerrainStreamingQueue::from_coords(queued_chunks));
     commands.insert_resource(detail_materials.clone());
+    commands.insert_resource(detail_meshes.clone());
 
     commands.spawn((
         Name::new("WaterPlane"),
@@ -824,25 +973,20 @@ fn spawn_world(
         seed = seed.0,
         extent = world_map.extent(),
         initial_chunk_count = initial_chunks.len(),
+        queued_chunk_count = queued_chunk_count,
         generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
-        "streaming procedural terrain spawned"
+        "streaming procedural terrain bootstrapped"
     );
 }
 
 fn update_visible_chunks(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     world_map: Res<WorldMap>,
-    seed: Res<WorldSeed>,
-    terrain_context: (
-        Res<TerrainRuntimeMaterial>,
-        Res<DetailMaterials>,
-        Res<VisibleChunkConfig>,
-    ),
+    visible_config: Res<VisibleChunkConfig>,
     streaming_context: ChunkStreamingContext<'_, '_>,
 ) {
-    let (terrain_material, detail_materials, visible_config) = terrain_context;
-    let (mut visibility_state, camera_query, existing_chunks, existing_details) = streaming_context;
+    let (mut visibility_state, mut queue, camera_query, existing_chunks, existing_details) =
+        streaming_context;
 
     let Some(camera_transform) = camera_query.iter().next() else {
         return;
@@ -856,15 +1000,16 @@ fn update_visible_chunks(
     if chunk_coords == visibility_state.active {
         return;
     }
+    let visible_set: HashSet<WorldChunkCoord> = chunk_coords.iter().copied().collect();
 
     for (entity, chunk_component) in &existing_chunks {
-        if !chunk_coords.contains(&chunk_component.coord) {
+        if !visible_set.contains(&chunk_component.coord) {
             commands.entity(entity).despawn();
         }
     }
 
     for (entity, detail_component) in &existing_details {
-        if !chunk_coords.contains(&detail_component.coord) {
+        if !visible_set.contains(&detail_component.coord) {
             commands.entity(entity).despawn();
         }
     }
@@ -873,22 +1018,61 @@ fn update_visible_chunks(
         .iter()
         .map(|(_, chunk)| chunk.coord)
         .collect();
-    let new_chunks: Vec<WorldChunkCoord> = chunk_coords
-        .iter()
-        .copied()
-        .filter(|coord| !existing_set.contains(coord))
-        .collect();
-    spawn_streamed_terrain_chunks(
-        &mut commands,
-        &mut meshes,
-        &world_map,
-        terrain_material.handle.clone(),
-        &detail_materials,
-        seed.0,
-        &new_chunks,
-    );
+    queue.retain_visible(&visible_set);
+    queue.enqueue_missing(chunk_coords.iter().copied(), &existing_set);
 
     visibility_state.active = chunk_coords;
+}
+
+fn stream_terrain_chunks(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut queue: ResMut<TerrainStreamingQueue>,
+    resources: TerrainStreamResources<'_>,
+    existing_chunks: Query<&TerrainChunkEntity>,
+) {
+    if queue.is_empty() {
+        return;
+    }
+
+    let (world_map, seed, terrain_material, detail_materials, detail_meshes, streaming_config) =
+        resources;
+    let mut existing_set: HashSet<WorldChunkCoord> =
+        existing_chunks.iter().map(|chunk| chunk.coord).collect();
+    let spawn_context = TerrainChunkSpawnContext {
+        world_map: &world_map,
+        material: &terrain_material.handle,
+        detail_materials: &detail_materials,
+        detail_meshes: &detail_meshes,
+        seed: seed.0,
+    };
+    let started_at = Instant::now();
+    let mut spawned = 0_usize;
+    let budget = streaming_config.chunk_budget_per_frame.max(1);
+
+    while spawned < budget {
+        let Some(coord) = queue.pop_next() else {
+            break;
+        };
+        if existing_set.contains(&coord) {
+            continue;
+        }
+        if !spawn_terrain_chunk(&mut commands, &mut meshes, &spawn_context, coord) {
+            continue;
+        }
+        existing_set.insert(coord);
+        spawned += 1;
+    }
+
+    if spawned > 0 {
+        tracing::debug!(
+            target: "dao_game::world::streaming",
+            chunk_count = spawned,
+            pending_chunks = queue.len(),
+            generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
+            "terrain chunks streamed within frame budget"
+        );
+    }
 }
 
 fn advance_world_cycle(
@@ -1141,6 +1325,11 @@ fn vertex_color(sample: &TerrainVertexSample, water_level: f32) -> Color {
     )
 }
 
+fn normal_from_neighbor_heights(left: f32, right: f32, down: f32, up: f32, step: f32) -> Vec3 {
+    let normal = Vec3::new(left - right, step * 2.0, down - up).normalize_or_zero();
+    if normal.y > 0.0 { normal } else { Vec3::Y }
+}
+
 #[cfg(test)]
 fn accumulate_normals(positions: &[[f32; 3]], indices: &[u32], normals: &mut [[f32; 3]]) {
     for triangle in indices.chunks_exact(3) {
@@ -1164,11 +1353,11 @@ fn accumulate_normals(positions: &[[f32; 3]], indices: &[u32], normals: &mut [[f
 
 fn scatter_biome_details_for_chunk(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     seed: u64,
     world_map: &WorldMap,
     coord: WorldChunkCoord,
     materials: &DetailMaterials,
+    detail_meshes: &DetailMeshes,
 ) {
     let Some((tile_x_min, tile_x_mesh_max, tile_z_min, tile_z_mesh_max)) =
         world_map.chunk_mesh_tile_bounds(coord)
@@ -1211,63 +1400,42 @@ fn scatter_biome_details_for_chunk(
                 scale: 0.72 + scatter_noise(seed, tile_x, tile_z, 89) * 0.8 + tile.river() * 0.18
                     - tile.erosion() * 0.1,
             };
-            spawn_scatter(commands, meshes, placement, coord, materials);
+            spawn_scatter(commands, placement, coord, materials, detail_meshes);
         }
     }
 }
 
-fn spawn_streamed_terrain_chunks(
+fn spawn_terrain_chunk(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    world_map: &WorldMap,
-    material: Handle<StandardMaterial>,
-    detail_materials: &DetailMaterials,
-    seed: u64,
-    coords: &[WorldChunkCoord],
-) {
-    if coords.is_empty() {
-        return;
-    }
-
-    let started_at = Instant::now();
-    let mut spawned = 0_u32;
-
-    for coord in coords {
-        let Some(chunk) = world_map.describe_chunk(*coord) else {
-            continue;
-        };
-        let Some(mesh) = world_map.build_terrain_mesh_for_chunk(chunk.coord) else {
-            continue;
-        };
-        commands.spawn((
-            Name::new(format!(
-                "TerrainChunk({}, {})",
-                chunk.coord.x, chunk.coord.z
-            )),
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(material.clone()),
-            Transform::default(),
-            TerrainChunkEntity { coord: chunk.coord },
-        ));
-        scatter_biome_details_for_chunk(
-            commands,
-            meshes,
-            seed,
-            world_map,
-            chunk.coord,
-            detail_materials,
-        );
-        spawned += 1;
-    }
-
-    if spawned > 0 {
-        tracing::debug!(
-            target: "dao_game::world::streaming",
-            chunk_count = spawned,
-            generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
-            "terrain chunks streamed"
-        );
-    }
+    context: &TerrainChunkSpawnContext<'_>,
+    coord: WorldChunkCoord,
+) -> bool {
+    let Some(chunk) = context.world_map.describe_chunk(coord) else {
+        return false;
+    };
+    let Some(mesh) = context.world_map.build_terrain_mesh_for_chunk(chunk.coord) else {
+        return false;
+    };
+    commands.spawn((
+        Name::new(format!(
+            "TerrainChunk({}, {})",
+            chunk.coord.x, chunk.coord.z
+        )),
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d((*context.material).clone()),
+        Transform::default(),
+        TerrainChunkEntity { coord: chunk.coord },
+    ));
+    scatter_biome_details_for_chunk(
+        commands,
+        context.seed,
+        context.world_map,
+        chunk.coord,
+        context.detail_materials,
+        context.detail_meshes,
+    );
+    true
 }
 
 fn slope_hint(normalized_height: f32) -> f32 {
@@ -1312,6 +1480,11 @@ fn visible_chunk_coords(
             }
         }
     }
+    coords.sort_by_key(|coord| {
+        let dx = coord.x - center.x;
+        let dz = coord.z - center.z;
+        dx * dx + dz * dz
+    });
     coords
 }
 
@@ -1382,58 +1555,57 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
 
 fn spawn_scatter(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     placement: ScatterPlacement,
     coord: WorldChunkCoord,
     materials: &DetailMaterials,
+    detail_meshes: &DetailMeshes,
 ) {
     match placement.biome {
         BiomeKind::Meadow => {
             commands.spawn((
                 Name::new("MeadowTuft"),
-                Mesh3d(meshes.add(Mesh::from(Capsule3d::new(0.09, 0.6 * placement.scale)))),
+                Mesh3d(detail_meshes.meadow.clone()),
                 MeshMaterial3d(materials.meadow.clone()),
-                Transform::from_translation(placement.position + Vec3::Y * 0.35 * placement.scale),
+                scatter_transform(placement.position, 0.35, placement.scale),
                 TerrainDetailEntity { coord },
             ));
         }
         BiomeKind::Grove => {
             commands.spawn((
                 Name::new("GroveTree"),
-                Mesh3d(meshes.add(Mesh::from(Cylinder::new(
-                    0.18 * placement.scale,
-                    1.8 * placement.scale,
-                )))),
+                Mesh3d(detail_meshes.grove.clone()),
                 MeshMaterial3d(materials.grove.clone()),
-                Transform::from_translation(placement.position + Vec3::Y * 0.92 * placement.scale),
+                scatter_transform(placement.position, 0.92, placement.scale),
                 TerrainDetailEntity { coord },
             ));
         }
         BiomeKind::Steppe => {
             commands.spawn((
                 Name::new("SteppeStone"),
-                Mesh3d(meshes.add(Mesh::from(Cylinder::new(
-                    0.28 * placement.scale,
-                    0.42 * placement.scale,
-                )))),
+                Mesh3d(detail_meshes.steppe.clone()),
                 MeshMaterial3d(materials.steppe.clone()),
-                Transform::from_translation(placement.position + Vec3::Y * 0.18 * placement.scale),
+                scatter_transform(placement.position, 0.18, placement.scale),
                 TerrainDetailEntity { coord },
             ));
         }
         BiomeKind::Ridge => {
             commands.spawn((
                 Name::new("RidgeSpire"),
-                Mesh3d(meshes.add(Mesh::from(Cylinder::new(
-                    0.16 * placement.scale,
-                    2.4 * placement.scale,
-                )))),
+                Mesh3d(detail_meshes.ridge.clone()),
                 MeshMaterial3d(materials.ridge.clone()),
-                Transform::from_translation(placement.position + Vec3::Y * 1.15 * placement.scale),
+                scatter_transform(placement.position, 1.15, placement.scale),
                 TerrainDetailEntity { coord },
             ));
         }
         BiomeKind::Water => {}
+    }
+}
+
+fn scatter_transform(position: Vec3, vertical_offset: f32, scale: f32) -> Transform {
+    Transform {
+        translation: position + Vec3::Y * vertical_offset * scale,
+        scale: Vec3::splat(scale),
+        ..Default::default()
     }
 }
 
@@ -1537,7 +1709,7 @@ fn scatter_noise(seed: u64, x: i32, z: i32, salt: u64) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{collections::HashSet, path::PathBuf};
 
     use bevy::prelude::{Mesh, Vec3};
 
@@ -1547,8 +1719,8 @@ mod tests {
     };
 
     use super::{
-        BiomeKind, WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals, determine_biome,
-        sample_terrain, visible_chunk_coords,
+        BiomeKind, TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals,
+        determine_biome, sample_terrain, visible_chunk_coords,
     };
 
     fn test_config() -> AppConfig {
@@ -1580,6 +1752,7 @@ mod tests {
                 sediment_bias: 0.22,
                 visible_chunk_radius: 1,
                 showcase_search_radius: 4,
+                streaming_chunk_budget: 1,
                 material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {
@@ -1707,6 +1880,37 @@ mod tests {
                 .iter()
                 .all(|coord| world_map.describe_chunk(*coord).is_some())
         );
+    }
+
+    #[test]
+    fn visible_chunk_coords_prioritize_nearest_chunk() {
+        let config = test_config();
+        let world_map = WorldMap::new(42, &config);
+        let coords = visible_chunk_coords(&world_map, Vec3::new(0.2, 0.0, 0.2), 1);
+
+        assert_eq!(coords.first(), Some(&WorldChunkCoord { x: 0, z: 0 }));
+    }
+
+    #[test]
+    fn streaming_queue_deduplicates_and_drops_invisible_chunks() {
+        let mut queue = TerrainStreamingQueue::from_coords([
+            WorldChunkCoord { x: 0, z: 0 },
+            WorldChunkCoord { x: 0, z: 0 },
+            WorldChunkCoord { x: 1, z: 0 },
+        ]);
+        let visible = HashSet::from([WorldChunkCoord { x: 1, z: 0 }]);
+        queue.retain_visible(&visible);
+        queue.enqueue_missing(
+            [
+                WorldChunkCoord { x: 1, z: 0 },
+                WorldChunkCoord { x: 2, z: 0 },
+            ],
+            &HashSet::from([WorldChunkCoord { x: 2, z: 0 }]),
+        );
+
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.pop_next(), Some(WorldChunkCoord { x: 1, z: 0 }));
+        assert!(queue.is_empty());
     }
 
     #[test]

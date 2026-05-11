@@ -68,6 +68,7 @@ mod tests {
                 sediment_bias: 0.15,
                 visible_chunk_radius: 1,
                 showcase_search_radius: 4,
+                streaming_chunk_budget: 1,
                 material_texture_resolution: 64,
             },
             environment: EnvironmentConfig {

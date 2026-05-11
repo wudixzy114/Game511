@@ -41,6 +41,7 @@ pub struct WorldConfig {
     pub sediment_bias: f32,
     pub visible_chunk_radius: i32,
     pub showcase_search_radius: i32,
+    pub streaming_chunk_budget: u32,
     pub material_texture_resolution: u32,
 }
 
@@ -138,6 +139,7 @@ erosion_strength = 0.4
 sediment_bias = 0.22
 visible_chunk_radius = 2
 showcase_search_radius = 12
+streaming_chunk_budget = 2
 material_texture_resolution = 192
 
 [presentation]
@@ -187,6 +189,7 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.world.river_frequency, 0.22);
         assert_eq!(config.world.visible_chunk_radius, 2);
         assert_eq!(config.world.showcase_search_radius, 12);
+        assert_eq!(config.world.streaming_chunk_budget, 2);
         assert_eq!(config.world.material_texture_resolution, 192);
         assert_eq!(config.player.walk_speed, 7.0);
         assert_eq!(config.player.eye_height, 1.65);
