@@ -6,7 +6,9 @@ use bevy::{
 
 use crate::{
     core::config::AppConfig,
-    game::world::{TerrainCollisionProxy, WandererPrototype, WorldCamera, WorldMap},
+    game::world::{
+        TerrainCollisionProxy, TerrainCollisionSample, WandererPrototype, WorldCamera, WorldMap,
+    },
 };
 
 pub struct PlayerPlugin;
@@ -50,6 +52,81 @@ impl Default for FirstPersonState {
             cursor_locked: true,
         }
     }
+}
+
+const CAPSULE_SUPPORT_DIRECTIONS: [Vec2; 8] = [
+    Vec2::new(1.0, 0.0),
+    Vec2::new(-1.0, 0.0),
+    Vec2::new(0.0, 1.0),
+    Vec2::new(0.0, -1.0),
+    Vec2::new(0.70710677, 0.70710677),
+    Vec2::new(0.70710677, -0.70710677),
+    Vec2::new(-0.70710677, 0.70710677),
+    Vec2::new(-0.70710677, -0.70710677),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TerrainWalkerConfig {
+    capsule_radius: f32,
+    max_ground_normal_y: f32,
+    step_height: f32,
+    ground_snap_distance: f32,
+    contact_substeps: usize,
+}
+
+impl TerrainWalkerConfig {
+    fn from_app_config(config: &AppConfig) -> Self {
+        Self {
+            capsule_radius: config.player.capsule_radius.max(0.05),
+            max_ground_normal_y: config
+                .player
+                .max_slope_degrees
+                .clamp(1.0, 89.0)
+                .to_radians()
+                .cos(),
+            step_height: config.player.step_height.max(0.0),
+            ground_snap_distance: config.player.ground_snap_distance.max(0.0),
+            contact_substeps: config.player.contact_substeps.max(1) as usize,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TerrainSupport {
+    height: f32,
+    normal: Vec3,
+}
+
+impl TerrainSupport {
+    fn is_walkable(self, max_ground_normal_y: f32) -> bool {
+        self.normal.y >= max_ground_normal_y
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HorizontalContactResult {
+    position: Vec2,
+    support: TerrainSupport,
+    blocked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VerticalContactResult {
+    y: f32,
+    vertical_velocity: f32,
+    grounded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VerticalContactInput {
+    current_y: f32,
+    ground_y: f32,
+    vertical_velocity: f32,
+    grounded: bool,
+    jump_requested: bool,
+    delta_secs: f32,
+    jump_velocity: f32,
+    gravity: f32,
 }
 
 fn initialize_first_person_state(
@@ -162,32 +239,192 @@ fn move_player_body(
     };
     let horizontal_speed = config.player.walk_speed * sprint_multiplier;
     let horizontal_delta = movement * horizontal_speed * time.delta_secs();
-    transform.translation += Vec3::new(horizontal_delta.x, 0.0, horizontal_delta.z);
+    let walker = TerrainWalkerConfig::from_app_config(&config);
+    let ground_sampler = &mut |x: f32, z: f32| collision_proxy.sample_ground(&world_map, x, z);
+    let horizontal_contact = resolve_horizontal_contact(
+        Vec2::new(transform.translation.x, transform.translation.z),
+        Vec2::new(horizontal_delta.x, horizontal_delta.z),
+        walker,
+        ground_sampler,
+    );
+    let Some(horizontal_contact) = horizontal_contact else {
+        return;
+    };
+    transform.translation.x = horizontal_contact.position.x;
+    transform.translation.z = horizontal_contact.position.y;
 
-    if let Some(ground_sample) =
-        collision_proxy.sample_ground(&world_map, transform.translation.x, transform.translation.z)
-    {
-        let target_y = ground_sample.height + config.player.body_height;
-        if state.grounded && keys.just_pressed(KeyCode::Space) {
-            state.vertical_velocity = config.player.jump_velocity;
-            state.grounded = false;
+    let vertical_contact = resolve_vertical_contact(
+        VerticalContactInput {
+            current_y: transform.translation.y,
+            ground_y: horizontal_contact.support.height + config.player.body_height,
+            vertical_velocity: state.vertical_velocity,
+            grounded: state.grounded,
+            jump_requested: keys.just_pressed(KeyCode::Space),
+            delta_secs: time.delta_secs(),
+            jump_velocity: config.player.jump_velocity,
+            gravity: config.player.gravity,
+        },
+        walker,
+    );
+    transform.translation.y = vertical_contact.y;
+    state.vertical_velocity = vertical_contact.vertical_velocity;
+    state.grounded = vertical_contact.grounded;
+
+    transform.rotation = Quat::from_rotation_y(state.yaw);
+}
+
+fn resolve_horizontal_contact(
+    start: Vec2,
+    desired_delta: Vec2,
+    settings: TerrainWalkerConfig,
+    mut sample_ground: impl FnMut(f32, f32) -> Option<TerrainCollisionSample>,
+) -> Option<HorizontalContactResult> {
+    let mut position = start;
+    let mut support =
+        sample_capsule_support(position, settings.capsule_radius, &mut sample_ground)?;
+    if desired_delta.length_squared() <= f32::EPSILON {
+        return Some(HorizontalContactResult {
+            position,
+            support,
+            blocked: false,
+        });
+    }
+
+    let distance_steps =
+        (desired_delta.length() / settings.capsule_radius.max(0.05)).ceil() as usize;
+    let step_count = settings.contact_substeps.max(distance_steps.max(1));
+    let step_delta = desired_delta / step_count as f32;
+    let mut blocked = false;
+
+    for _ in 0..step_count {
+        let Some((next_position, next_support)) =
+            try_horizontal_step(position, support, step_delta, settings, &mut sample_ground)
+        else {
+            blocked = true;
+            break;
+        };
+        position = next_position;
+        support = next_support;
+    }
+
+    Some(HorizontalContactResult {
+        position,
+        support,
+        blocked,
+    })
+}
+
+fn try_horizontal_step(
+    position: Vec2,
+    current_support: TerrainSupport,
+    step_delta: Vec2,
+    settings: TerrainWalkerConfig,
+    sample_ground: &mut impl FnMut(f32, f32) -> Option<TerrainCollisionSample>,
+) -> Option<(Vec2, TerrainSupport)> {
+    for axis_delta in [
+        step_delta,
+        Vec2::new(step_delta.x, 0.0),
+        Vec2::new(0.0, step_delta.y),
+    ] {
+        if axis_delta.length_squared() <= f32::EPSILON {
+            continue;
         }
-
-        if !state.grounded {
-            state.vertical_velocity -= config.player.gravity * time.delta_secs();
-            transform.translation.y += state.vertical_velocity * time.delta_secs();
-        } else {
-            transform.translation.y = transform.translation.y.lerp(target_y, 0.45);
+        let candidate_position = position + axis_delta;
+        let candidate_support =
+            sample_capsule_support(candidate_position, settings.capsule_radius, sample_ground)?;
+        if can_advance_on_support(current_support, candidate_support, settings) {
+            return Some((candidate_position, candidate_support));
         }
+    }
+    None
+}
 
-        if transform.translation.y <= target_y {
-            transform.translation.y = target_y;
-            state.vertical_velocity = 0.0;
-            state.grounded = true;
+fn can_advance_on_support(
+    current_support: TerrainSupport,
+    candidate_support: TerrainSupport,
+    settings: TerrainWalkerConfig,
+) -> bool {
+    let rise = candidate_support.height - current_support.height;
+    if rise <= 0.0 {
+        return true;
+    }
+
+    rise <= settings.step_height && candidate_support.is_walkable(settings.max_ground_normal_y)
+}
+
+fn sample_capsule_support(
+    center: Vec2,
+    capsule_radius: f32,
+    sample_ground: &mut impl FnMut(f32, f32) -> Option<TerrainCollisionSample>,
+) -> Option<TerrainSupport> {
+    let center_sample = sample_ground(center.x, center.y)?;
+    let mut support = TerrainSupport {
+        height: center_sample.height,
+        normal: center_sample.normal,
+    };
+
+    for direction in CAPSULE_SUPPORT_DIRECTIONS {
+        let offset = direction * capsule_radius;
+        let Some(sample) = sample_ground(center.x + offset.x, center.y + offset.y) else {
+            continue;
+        };
+        if sample.height > support.height {
+            support.height = sample.height;
+            support.normal = sample.normal;
         }
     }
 
-    transform.rotation = Quat::from_rotation_y(state.yaw);
+    Some(support)
+}
+
+fn resolve_vertical_contact(
+    input: VerticalContactInput,
+    settings: TerrainWalkerConfig,
+) -> VerticalContactResult {
+    let mut next_grounded = input.grounded;
+    let mut next_velocity = input.vertical_velocity;
+    let mut next_y = input.current_y;
+
+    if next_grounded && input.jump_requested {
+        next_grounded = false;
+        next_velocity = input.jump_velocity;
+    }
+
+    if next_grounded {
+        if input.ground_y >= input.current_y {
+            return VerticalContactResult {
+                y: input.ground_y,
+                vertical_velocity: 0.0,
+                grounded: true,
+            };
+        }
+
+        if input.current_y - input.ground_y <= settings.ground_snap_distance {
+            return VerticalContactResult {
+                y: input.ground_y,
+                vertical_velocity: 0.0,
+                grounded: true,
+            };
+        }
+
+        next_velocity = 0.0;
+    }
+
+    next_velocity -= input.gravity * input.delta_secs;
+    next_y += next_velocity * input.delta_secs;
+    if next_y <= input.ground_y {
+        return VerticalContactResult {
+            y: input.ground_y,
+            vertical_velocity: 0.0,
+            grounded: true,
+        };
+    }
+
+    VerticalContactResult {
+        y: next_y,
+        vertical_velocity: next_velocity,
+        grounded: false,
+    }
 }
 
 fn sync_camera_to_player(
@@ -210,7 +447,14 @@ fn sync_camera_to_player(
 
 #[cfg(test)]
 mod tests {
-    use super::FirstPersonState;
+    use bevy::prelude::{Vec2, Vec3};
+
+    use crate::game::world::TerrainCollisionSample;
+
+    use super::{
+        FirstPersonState, TerrainSupport, TerrainWalkerConfig, VerticalContactInput,
+        resolve_horizontal_contact, resolve_vertical_contact,
+    };
 
     #[test]
     fn default_first_person_state_starts_grounded_and_locked() {
@@ -219,5 +463,107 @@ mod tests {
         assert!(state.cursor_locked);
         assert_eq!(state.pitch, 0.0);
         assert_eq!(state.yaw, 0.0);
+    }
+
+    fn flat_sample(height: f32) -> TerrainCollisionSample {
+        TerrainCollisionSample {
+            height,
+            normal: Vec3::Y,
+            slope: 0.0,
+        }
+    }
+
+    fn walker_config() -> TerrainWalkerConfig {
+        TerrainWalkerConfig {
+            capsule_radius: 0.4,
+            max_ground_normal_y: 0.7,
+            step_height: 0.75,
+            ground_snap_distance: 1.0,
+            contact_substeps: 4,
+        }
+    }
+
+    #[test]
+    fn capsule_contact_can_step_up_small_height_change() {
+        let result =
+            resolve_horizontal_contact(Vec2::ZERO, Vec2::new(1.2, 0.0), walker_config(), |x, _| {
+                if x < 0.8 {
+                    Some(flat_sample(0.0))
+                } else {
+                    Some(flat_sample(0.5))
+                }
+            })
+            .expect("contact should resolve");
+
+        assert!(result.position.x > 1.0);
+        assert_eq!(
+            result.support,
+            TerrainSupport {
+                height: 0.5,
+                normal: Vec3::Y,
+            }
+        );
+    }
+
+    #[test]
+    fn capsule_contact_blocks_steep_uphill_surface() {
+        let result =
+            resolve_horizontal_contact(Vec2::ZERO, Vec2::new(1.2, 0.0), walker_config(), |x, _| {
+                if x < 0.7 {
+                    Some(flat_sample(0.0))
+                } else {
+                    Some(TerrainCollisionSample {
+                        height: 0.55,
+                        normal: Vec3::new(0.0, 0.45, 0.89).normalize(),
+                        slope: 1.3,
+                    })
+                }
+            })
+            .expect("contact should resolve");
+
+        assert!(result.blocked);
+        assert!(result.position.x < 0.8);
+    }
+
+    #[test]
+    fn vertical_contact_snaps_small_drop_and_keeps_grounded() {
+        let result = resolve_vertical_contact(
+            VerticalContactInput {
+                current_y: 2.0,
+                ground_y: 1.35,
+                vertical_velocity: 0.0,
+                grounded: true,
+                jump_requested: false,
+                delta_secs: 0.016,
+                jump_velocity: 6.0,
+                gravity: 18.0,
+            },
+            walker_config(),
+        );
+
+        assert!(result.grounded);
+        assert_eq!(result.y, 1.35);
+        assert_eq!(result.vertical_velocity, 0.0);
+    }
+
+    #[test]
+    fn vertical_contact_starts_fall_on_large_drop() {
+        let result = resolve_vertical_contact(
+            VerticalContactInput {
+                current_y: 2.0,
+                ground_y: 0.2,
+                vertical_velocity: 0.0,
+                grounded: true,
+                jump_requested: false,
+                delta_secs: 0.1,
+                jump_velocity: 6.0,
+                gravity: 18.0,
+            },
+            walker_config(),
+        );
+
+        assert!(!result.grounded);
+        assert!(result.y < 2.0);
+        assert!(result.vertical_velocity < 0.0);
     }
 }

@@ -47,6 +47,7 @@ impl Plugin for WorldPlugin {
                 (
                     update_visible_chunks,
                     stream_terrain_chunks,
+                    update_terrain_impostor,
                     update_collision_proxy,
                 )
                     .chain(),
@@ -237,6 +238,11 @@ struct TerrainRuntimeMaterial {
 }
 
 #[derive(Debug, Resource, Clone)]
+struct TerrainImpostorMaterial {
+    handle: Handle<StandardMaterial>,
+}
+
+#[derive(Debug, Resource, Clone)]
 struct DetailMaterials {
     grove: Handle<StandardMaterial>,
     meadow: Handle<StandardMaterial>,
@@ -310,6 +316,20 @@ struct TerrainStreamingConfig {
     integrate_budget_per_frame: usize,
     background_budget_per_frame: usize,
     cache_capacity: usize,
+}
+
+#[derive(Debug, Resource, Clone, Copy)]
+struct TerrainImpostorConfig {
+    active_radius: i32,
+    radial_bands: u32,
+    angular_segments: u32,
+}
+
+#[derive(Debug, Resource, Default)]
+struct TerrainImpostorState {
+    anchor: Option<WorldChunkCoord>,
+    mesh: Option<Handle<Mesh>>,
+    entity: Option<Entity>,
 }
 
 #[derive(Debug, Resource, Clone, Copy)]
@@ -615,6 +635,22 @@ type WorldSpawnResources<'w> = (
     Res<'w, TerrainLodConfig>,
 );
 
+type WorldStreamingBootstrapResources<'w> = (
+    Res<'w, TerrainImpostorMaterial>,
+    Res<'w, TerrainImpostorConfig>,
+    ResMut<'w, TerrainImpostorState>,
+    ResMut<'w, TerrainCollisionProxy>,
+    Res<'w, TerrainCollisionConfig>,
+);
+
+type TerrainImpostorResources<'w> = (
+    Res<'w, WorldMap>,
+    Res<'w, TerrainImpostorMaterial>,
+    Res<'w, TerrainImpostorConfig>,
+    Res<'w, TerrainLodConfig>,
+    ResMut<'w, TerrainImpostorState>,
+);
+
 #[derive(Debug, Component, Clone, Copy, PartialEq, Eq)]
 struct TerrainChunkEntity {
     key: TerrainChunkKey,
@@ -624,6 +660,9 @@ struct TerrainChunkEntity {
 struct TerrainDetailEntity {
     key: TerrainChunkKey,
 }
+
+#[derive(Debug, Component)]
+struct TerrainImpostorEntity;
 
 impl WorldMap {
     fn new(seed: u64, config: &AppConfig) -> Self {
@@ -1179,9 +1218,19 @@ fn create_terrain_material_texture(
         reflectance: 0.18,
         ..Default::default()
     });
+    let impostor_material_handle = materials.add(StandardMaterial {
+        base_color_texture: Some(image_handle.clone()),
+        base_color: Color::srgb(0.84, 0.87, 0.91),
+        perceptual_roughness: 1.0,
+        reflectance: 0.04,
+        ..Default::default()
+    });
 
     commands.insert_resource(TerrainRuntimeMaterial {
         handle: material_handle,
+    });
+    commands.insert_resource(TerrainImpostorMaterial {
+        handle: impostor_material_handle,
     });
     commands.insert_resource(ChunkVisibilityState::default());
     commands.insert_resource(TerrainStreamingQueue::default());
@@ -1201,6 +1250,15 @@ fn create_terrain_material_texture(
         background_budget_per_frame: config.world.background_generation_budget.max(1) as usize,
         cache_capacity: config.world.streaming_cache_capacity.max(1),
     });
+    commands.insert_resource(TerrainImpostorConfig {
+        active_radius: config
+            .world
+            .impostor_chunk_radius
+            .max(config.world.low_detail_chunk_radius.max(0) + 1),
+        radial_bands: config.world.impostor_radial_bands.max(1),
+        angular_segments: config.world.impostor_angular_segments.max(16),
+    });
+    commands.insert_resource(TerrainImpostorState::default());
     commands.insert_resource(TerrainCollisionConfig {
         active_radius: config.world.collision_proxy_radius.max(0),
         subdivisions: config
@@ -1291,10 +1349,16 @@ fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut collision_proxy: ResMut<TerrainCollisionProxy>,
-    collision_config: Res<TerrainCollisionConfig>,
+    runtime_resources: WorldStreamingBootstrapResources<'_>,
     resources: WorldSpawnResources<'_>,
 ) {
+    let (
+        impostor_material,
+        impostor_config,
+        mut impostor_state,
+        mut collision_proxy,
+        collision_config,
+    ) = runtime_resources;
     let started_at = Instant::now();
     let (world_map, seed, spots, terrain_material, lod_config) = resources;
     let water_material = materials.add(StandardMaterial {
@@ -1389,6 +1453,25 @@ fn spawn_world(
     collision_proxy.active = initial_collision_coords.clone();
     collision_proxy.pending.clear();
 
+    if let Some(anchor) = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z)
+        && let Some(mesh) =
+            build_terrain_impostor_mesh(&world_map, anchor, lod_config.low_radius, *impostor_config)
+    {
+        let mesh_handle = meshes.add(mesh);
+        let entity = commands
+            .spawn((
+                Name::new("TerrainImpostor"),
+                Mesh3d(mesh_handle.clone()),
+                MeshMaterial3d(impostor_material.handle.clone()),
+                Transform::default(),
+                TerrainImpostorEntity,
+            ))
+            .id();
+        impostor_state.anchor = Some(anchor);
+        impostor_state.mesh = Some(mesh_handle);
+        impostor_state.entity = Some(entity);
+    }
+
     commands.spawn((
         Name::new("WaterPlane"),
         Mesh3d(meshes.add(Mesh::from(Cylinder::new(world_map.extent() * 1.42, 0.03)))),
@@ -1415,6 +1498,7 @@ fn spawn_world(
         extent = world_map.extent(),
         initial_chunk_count = initial_targets.len(),
         queued_chunk_count = queued_chunk_count,
+        initial_impostor_anchor = ?impostor_state.anchor,
         initial_collision_chunk_count = initial_collision_coords.len(),
         generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
         "lod streaming terrain bootstrapped"
@@ -1609,6 +1693,59 @@ fn stream_terrain_chunks(
             "terrain lod stream advanced"
         );
     }
+}
+
+fn update_terrain_impostor(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    resources: TerrainImpostorResources<'_>,
+    camera_query: Query<&Transform, With<WorldCamera>>,
+) {
+    let (world_map, impostor_material, impostor_config, lod_config, mut impostor_state) = resources;
+    let Some(camera_transform) = camera_query.iter().next() else {
+        return;
+    };
+    let Some(anchor) = world_map.chunk_coord_at(
+        camera_transform.translation.x,
+        camera_transform.translation.z,
+    ) else {
+        return;
+    };
+    if impostor_state.anchor == Some(anchor) {
+        return;
+    }
+
+    let started_at = Instant::now();
+    let Some(mesh) =
+        build_terrain_impostor_mesh(&world_map, anchor, lod_config.low_radius, *impostor_config)
+    else {
+        return;
+    };
+    let mesh_handle = meshes.add(mesh);
+    let entity = commands
+        .spawn((
+            Name::new("TerrainImpostor"),
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(impostor_material.handle.clone()),
+            Transform::default(),
+            TerrainImpostorEntity,
+        ))
+        .id();
+    if let Some(previous_entity) = impostor_state.entity.replace(entity) {
+        commands.entity(previous_entity).despawn();
+    }
+    if let Some(previous_mesh) = impostor_state.mesh.replace(mesh_handle) {
+        meshes.remove(previous_mesh.id());
+    }
+    impostor_state.anchor = Some(anchor);
+
+    tracing::debug!(
+        target: "dao_game::world::impostor",
+        anchor_x = anchor.x,
+        anchor_z = anchor.z,
+        generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
+        "terrain impostor refreshed"
+    );
 }
 
 fn update_collision_proxy(
@@ -1956,6 +2093,110 @@ fn build_collision_chunk(
     })
 }
 
+fn build_terrain_impostor_mesh(
+    world_map: &WorldMap,
+    anchor: WorldChunkCoord,
+    low_detail_radius: i32,
+    config: TerrainImpostorConfig,
+) -> Option<Mesh> {
+    if config.active_radius <= low_detail_radius {
+        return None;
+    }
+
+    let chunk_span = world_map.chunk_world_span();
+    let inner_radius = (low_detail_radius.max(0) as f32 + 0.35) * chunk_span;
+    let outer_radius = (config.active_radius as f32 + 0.85) * chunk_span;
+    if outer_radius <= inner_radius + 0.01 {
+        return None;
+    }
+
+    let radial_bands = config.radial_bands.max(1) as usize;
+    let angular_segments = config.angular_segments.max(16) as usize;
+    let center = chunk_world_center(world_map, anchor);
+    let vertex_count = (radial_bands + 1) * (angular_segments + 1);
+    let uv_scale = world_map.chunk_world_span().max(0.001);
+
+    let mut positions = Vec::with_capacity(vertex_count);
+    let mut colors = Vec::with_capacity(vertex_count);
+    let mut uvs = Vec::with_capacity(vertex_count);
+    for radial_index in 0..=radial_bands {
+        let radial_t = radial_index as f32 / radial_bands as f32;
+        let radius = inner_radius + (outer_radius - inner_radius) * radial_t;
+        for angular_index in 0..=angular_segments {
+            let angular_t = angular_index as f32 / angular_segments as f32;
+            let angle = angular_t * std::f32::consts::TAU;
+            let direction = Vec2::new(angle.cos(), angle.sin());
+            let world_x = center.x + direction.x * radius;
+            let world_z = center.y + direction.y * radius;
+            let clamped_x = world_x.clamp(-world_map.extent(), world_map.extent());
+            let clamped_z = world_z.clamp(-world_map.extent(), world_map.extent());
+            let source = world_map
+                .sample_vertex(clamped_x, clamped_z)
+                .expect("clamped impostor sample should exist");
+            let vertex = TerrainVertexSample {
+                world_x,
+                world_z,
+                height: source.height,
+                moisture: source.moisture,
+                temperature: source.temperature,
+                slope: source.slope,
+                river: source.river,
+                erosion: source.erosion,
+                sediment: source.sediment,
+                biome: source.biome,
+            };
+            positions.push([vertex.world_x, vertex.height, vertex.world_z]);
+            colors.push(
+                terrain_texture_color(&vertex, world_map.water_level())
+                    .to_linear()
+                    .to_f32_array(),
+            );
+            uvs.push([clamped_x / uv_scale, clamped_z / uv_scale]);
+        }
+    }
+
+    let mut indices = Vec::with_capacity(radial_bands * angular_segments * 6);
+    let stride = angular_segments + 1;
+    for radial_index in 0..radial_bands {
+        for angular_index in 0..angular_segments {
+            let top_left = (radial_index * stride + angular_index) as u32;
+            let top_right = top_left + 1;
+            let bottom_left = ((radial_index + 1) * stride + angular_index) as u32;
+            let bottom_right = bottom_left + 1;
+            indices.extend_from_slice(&[
+                top_left,
+                bottom_left,
+                top_right,
+                top_right,
+                bottom_left,
+                bottom_right,
+            ]);
+        }
+    }
+
+    let mut normals = vec![[0.0, 0.0, 0.0]; positions.len()];
+    accumulate_normals(&positions, &indices, &mut normals);
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    Some(mesh)
+}
+
+fn chunk_world_center(world_map: &WorldMap, coord: WorldChunkCoord) -> Vec2 {
+    let span = world_map.chunk_world_span();
+    Vec2::new(
+        coord.x as f32 * span + span * 0.5,
+        coord.z as f32 * span + span * 0.5,
+    )
+}
+
 fn vertex_color(sample: &TerrainVertexSample, water_level: f32) -> Color {
     if sample.height <= water_level + 0.05 {
         return Color::srgb(0.29, 0.31, 0.26);
@@ -1989,7 +2230,6 @@ fn normal_from_neighbor_heights(left: f32, right: f32, down: f32, up: f32, step:
     if normal.y > 0.0 { normal } else { Vec3::Y }
 }
 
-#[cfg(test)]
 fn accumulate_normals(positions: &[[f32; 3]], indices: &[u32], normals: &mut [[f32; 3]]) {
     for triangle in indices.chunks_exact(3) {
         let a = Vec3::from_array(positions[triangle[0] as usize]);
@@ -2487,10 +2727,11 @@ mod tests {
 
     use super::{
         BiomeKind, TerrainChunkBuildContext, TerrainChunkCache, TerrainChunkKey,
-        TerrainCollisionProxy, TerrainLodConfig, TerrainLodLevel, TerrainStreamingQueue,
-        WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals, build_chunk_mesh_for_lod,
-        build_collision_chunk, chunk_targets_for_camera, collision_chunk_coords_for_position,
-        determine_biome, sample_terrain, should_keep_chunk_key,
+        TerrainCollisionProxy, TerrainImpostorConfig, TerrainLodConfig, TerrainLodLevel,
+        TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed, accumulate_normals,
+        build_chunk_mesh_for_lod, build_collision_chunk, build_terrain_impostor_mesh,
+        chunk_targets_for_camera, collision_chunk_coords_for_position, determine_biome,
+        sample_terrain, should_keep_chunk_key,
     };
 
     fn test_config() -> AppConfig {
@@ -2524,6 +2765,9 @@ mod tests {
                 high_detail_chunk_radius: 1,
                 low_detail_chunk_radius: 1,
                 preload_chunk_radius: 2,
+                impostor_chunk_radius: 4,
+                impostor_radial_bands: 3,
+                impostor_angular_segments: 24,
                 showcase_search_radius: 4,
                 streaming_chunk_budget: 1,
                 background_generation_budget: 2,
@@ -2545,6 +2789,11 @@ mod tests {
                 mouse_sensitivity: 0.002,
                 eye_height: 1.65,
                 body_height: 1.2,
+                capsule_radius: 0.4,
+                max_slope_degrees: 45.0,
+                step_height: 0.6,
+                ground_snap_distance: 1.0,
+                contact_substeps: 4,
                 jump_velocity: 6.0,
                 gravity: 18.0,
             },
@@ -2768,6 +3017,27 @@ mod tests {
 
         assert!(sample.normal.y > 0.2);
         assert!(sample.slope >= 0.0);
+    }
+
+    #[test]
+    fn terrain_impostor_mesh_builds_ring_geometry() {
+        let config = test_config();
+        let world_map = WorldMap::new(42, &config);
+        let mesh = build_terrain_impostor_mesh(
+            &world_map,
+            WorldChunkCoord { x: 0, z: 0 },
+            1,
+            TerrainImpostorConfig {
+                active_radius: 4,
+                radial_bands: 3,
+                angular_segments: 24,
+            },
+        )
+        .expect("impostor mesh should build");
+        let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions");
+        let expected_vertices = (3_usize + 1) * (24_usize + 1);
+
+        assert_eq!(positions.len(), expected_vertices);
     }
 
     #[test]

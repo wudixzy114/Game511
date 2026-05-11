@@ -43,6 +43,9 @@ pub struct WorldConfig {
     pub high_detail_chunk_radius: i32,
     pub low_detail_chunk_radius: i32,
     pub preload_chunk_radius: i32,
+    pub impostor_chunk_radius: i32,
+    pub impostor_radial_bands: u32,
+    pub impostor_angular_segments: u32,
     pub showcase_search_radius: i32,
     pub streaming_chunk_budget: u32,
     pub background_generation_budget: u32,
@@ -75,6 +78,11 @@ pub struct PlayerConfig {
     pub mouse_sensitivity: f32,
     pub eye_height: f32,
     pub body_height: f32,
+    pub capsule_radius: f32,
+    pub max_slope_degrees: f32,
+    pub step_height: f32,
+    pub ground_snap_distance: f32,
+    pub contact_substeps: u32,
     pub jump_velocity: f32,
     pub gravity: f32,
 }
@@ -150,6 +158,9 @@ visible_chunk_radius = 2
 high_detail_chunk_radius = 1
 low_detail_chunk_radius = 2
 preload_chunk_radius = 3
+impostor_chunk_radius = 8
+impostor_radial_bands = 4
+impostor_angular_segments = 56
 showcase_search_radius = 12
 streaming_chunk_budget = 2
 background_generation_budget = 3
@@ -176,6 +187,11 @@ sprint_multiplier = 1.65
 mouse_sensitivity = 0.0022
 eye_height = 1.65
 body_height = 1.2
+capsule_radius = 0.42
+max_slope_degrees = 46.0
+step_height = 0.7
+ground_snap_distance = 1.1
+contact_substeps = 4
 jump_velocity = 6.2
 gravity = 18.0
 
@@ -209,6 +225,9 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.world.high_detail_chunk_radius, 1);
         assert_eq!(config.world.low_detail_chunk_radius, 2);
         assert_eq!(config.world.preload_chunk_radius, 3);
+        assert_eq!(config.world.impostor_chunk_radius, 8);
+        assert_eq!(config.world.impostor_radial_bands, 4);
+        assert_eq!(config.world.impostor_angular_segments, 56);
         assert_eq!(config.world.showcase_search_radius, 12);
         assert_eq!(config.world.streaming_chunk_budget, 2);
         assert_eq!(config.world.background_generation_budget, 3);
@@ -220,6 +239,11 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.world.material_texture_resolution, 192);
         assert_eq!(config.player.walk_speed, 7.0);
         assert_eq!(config.player.eye_height, 1.65);
+        assert_eq!(config.player.capsule_radius, 0.42);
+        assert_eq!(config.player.max_slope_degrees, 46.0);
+        assert_eq!(config.player.step_height, 0.7);
+        assert_eq!(config.player.ground_snap_distance, 1.1);
+        assert_eq!(config.player.contact_substeps, 4);
         assert_eq!(config.environment.day_length_seconds, 180.0);
         assert_eq!(config.environment.wander_radius, 4.5);
         assert_eq!(config.quality.target_fps, 144.0);
