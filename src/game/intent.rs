@@ -8,8 +8,9 @@ use crate::game::{
         record_notebook_entry,
     },
     places::{PlaceKind, planar_distance},
+    regions::{RegionGraphState, TransitionGateKind},
     signs::SignState,
-    village::{VillageAreaKind, VillageState},
+    village::{VillageActorKind, VillageAreaKind, VillageState},
     world::{WandererPrototype, WorldCamera},
 };
 
@@ -112,6 +113,7 @@ pub struct PerceptionState {
     pub intensity: f32,
     pub result: Option<PerceptionResult>,
     pub last_feedback: Option<PerceptionFeedback>,
+    pub sound_event: Option<PerceptionSoundEvent>,
 }
 
 impl Default for PerceptionState {
@@ -123,6 +125,7 @@ impl Default for PerceptionState {
             intensity: 0.0,
             result: None,
             last_feedback: None,
+            sound_event: None,
         }
     }
 }
@@ -140,6 +143,34 @@ pub enum PerceptionFeedback {
     BirdCall,
     DreamImage,
     Silence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerceptionSoundEvent {
+    pub cue: PerceptionSoundCue,
+    pub intensity: f32,
+    pub remaining_seconds: f32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum PerceptionSoundCue {
+    BirdCall,
+    WindTone,
+    WaterRush,
+    DistantSand,
+    Silence,
+}
+
+impl PerceptionSoundCue {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BirdCall => "鸟鸣",
+            Self::WindTone => "风声",
+            Self::WaterRush => "水声",
+            Self::DistantSand => "远沙",
+            Self::Silence => "静默",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -232,6 +263,12 @@ pub fn advance_perception_state(
 ) -> Option<PerceptionResult> {
     let delta_seconds = context.delta_seconds.max(0.0);
     perception.cooldown_seconds = (perception.cooldown_seconds - delta_seconds).max(0.0);
+    if let Some(sound_event) = perception.sound_event.as_mut() {
+        sound_event.remaining_seconds = (sound_event.remaining_seconds - delta_seconds).max(0.0);
+        if sound_event.remaining_seconds <= 0.0 {
+            perception.sound_event = None;
+        }
+    }
     if perception.active {
         perception.remaining_seconds = (perception.remaining_seconds - delta_seconds).max(0.0);
         perception.intensity =
@@ -248,6 +285,11 @@ pub fn advance_perception_state(
 
     if perception.cooldown_seconds > 0.0 {
         perception.last_feedback = Some(PerceptionFeedback::Silence);
+        perception.sound_event = Some(PerceptionSoundEvent {
+            cue: PerceptionSoundCue::Silence,
+            intensity: 0.08,
+            remaining_seconds: 0.6,
+        });
         return Some(PerceptionResult::QuietFailure);
     }
 
@@ -273,6 +315,10 @@ pub fn advance_perception_state(
         PerceptionResult::DreamEcho => PerceptionFeedback::DreamImage,
         PerceptionResult::QuietFailure => PerceptionFeedback::Silence,
     });
+    perception.sound_event = Some(perception_sound_event_for_result(
+        result,
+        context.dominant_intent,
+    ));
 
     if result != PerceptionResult::QuietFailure {
         perception.active = true;
@@ -282,6 +328,93 @@ pub fn advance_perception_state(
     }
 
     Some(result)
+}
+
+fn perception_sound_event_for_result(
+    result: PerceptionResult,
+    dominant_intent: Option<IntentKind>,
+) -> PerceptionSoundEvent {
+    let cue = match result {
+        PerceptionResult::DreamEcho => PerceptionSoundCue::DistantSand,
+        PerceptionResult::ClarifiedOmen => match dominant_intent {
+            Some(IntentKind::Sea) => PerceptionSoundCue::WaterRush,
+            Some(IntentKind::Animals) => PerceptionSoundCue::BirdCall,
+            Some(IntentKind::DreamLandmark | IntentKind::BeyondVillage | IntentKind::Mountain) => {
+                PerceptionSoundCue::WindTone
+            }
+            Some(IntentKind::People | IntentKind::Stillness) | None => PerceptionSoundCue::WindTone,
+        },
+        PerceptionResult::QuietFailure => PerceptionSoundCue::Silence,
+    };
+    let intensity = match result {
+        PerceptionResult::ClarifiedOmen => 0.72,
+        PerceptionResult::DreamEcho => 0.9,
+        PerceptionResult::QuietFailure => 0.12,
+    };
+    PerceptionSoundEvent {
+        cue,
+        intensity,
+        remaining_seconds: 2.8,
+    }
+}
+
+pub fn village_dialogue_intent_samples(kind: VillageActorKind) -> Vec<IntentSample> {
+    match kind {
+        VillageActorKind::Sheep => vec![
+            IntentSample {
+                kind: IntentKind::Animals,
+                source: IntentSource::Dialogue,
+                amount: 0.9,
+            },
+            IntentSample {
+                kind: IntentKind::Stillness,
+                source: IntentSource::Dialogue,
+                amount: 0.35,
+            },
+        ],
+        VillageActorKind::Shepherd => vec![
+            IntentSample {
+                kind: IntentKind::Animals,
+                source: IntentSource::Dialogue,
+                amount: 0.95,
+            },
+            IntentSample {
+                kind: IntentKind::BeyondVillage,
+                source: IntentSource::Dialogue,
+                amount: 0.55,
+            },
+        ],
+        VillageActorKind::Merchant => vec![
+            IntentSample {
+                kind: IntentKind::DreamLandmark,
+                source: IntentSource::Dialogue,
+                amount: 1.25,
+            },
+            IntentSample {
+                kind: IntentKind::BeyondVillage,
+                source: IntentSource::Dialogue,
+                amount: 0.75,
+            },
+            IntentSample {
+                kind: IntentKind::People,
+                source: IntentSource::Dialogue,
+                amount: 0.35,
+            },
+        ],
+    }
+}
+
+pub fn apply_village_dialogue_intent(
+    state: &mut IntentState,
+    actor_kind: VillageActorKind,
+    elapsed_seconds: f32,
+) -> Option<IntentKind> {
+    advance_intent_state(
+        state,
+        0.0,
+        elapsed_seconds,
+        village_dialogue_intent_samples(actor_kind),
+    )
 }
 
 fn initialize_intent_session(mut commands: Commands) {
@@ -298,6 +431,7 @@ fn sample_intent_from_world(
     time: Res<Time>,
     intent: Option<ResMut<IntentState>>,
     village: Option<Res<VillageState>>,
+    regions: Option<Res<RegionGraphState>>,
     journey: Option<Res<JourneyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
@@ -312,6 +446,7 @@ fn sample_intent_from_world(
         player_transform,
         camera_query.iter().next(),
         village.as_deref(),
+        regions.as_deref(),
         journey.as_deref(),
     );
     let changed =
@@ -330,6 +465,7 @@ fn collect_intent_samples(
     player_transform: &Transform,
     camera_transform: Option<&Transform>,
     village: Option<&VillageState>,
+    regions: Option<&RegionGraphState>,
     journey: Option<&JourneyState>,
 ) -> Vec<IntentSample> {
     let mut samples = Vec::new();
@@ -383,6 +519,41 @@ fn collect_intent_samples(
                 source: IntentSource::Gazing,
                 amount: (alignment - 0.72) / 0.28,
             });
+        }
+    }
+
+    if let Some(regions) = regions
+        && let Some(proximity) = regions.nearest_gate
+        && let Some(gate) = regions.nearest_gate()
+    {
+        let falloff_radius = (gate.radius * 1.8).max(0.1);
+        let gate_proximity = (1.0 - proximity.distance / falloff_radius).clamp(0.0, 1.0);
+        if gate_proximity > 0.0 {
+            let source = if proximity.distance <= gate.radius {
+                IntentSource::Staying
+            } else {
+                IntentSource::Approaching
+            };
+            let primary = match gate.kind {
+                TransitionGateKind::MistRiverFord => IntentKind::BeyondVillage,
+                TransitionGateKind::MountainPass => IntentKind::Mountain,
+                TransitionGateKind::Harbor => IntentKind::Sea,
+            };
+            samples.push(IntentSample {
+                kind: primary,
+                source,
+                amount: gate_proximity * if proximity.open { 1.15 } else { 0.75 },
+            });
+            if matches!(
+                gate.kind,
+                TransitionGateKind::MistRiverFord | TransitionGateKind::MountainPass
+            ) {
+                samples.push(IntentSample {
+                    kind: IntentKind::DreamLandmark,
+                    source,
+                    amount: gate_proximity * 0.42,
+                });
+            }
         }
     }
 
@@ -507,7 +678,11 @@ pub fn intent_debug_line(
         })
         .unwrap_or_else(|| "无明显意愿".to_string());
     let perception_text = perception.map(perception_label).unwrap_or("感知未初始化");
-    format!("意愿：{intent_text}  感知：{perception_text}")
+    let sound_text = perception
+        .and_then(|perception| perception.sound_event)
+        .map(|event| format!("  声音预留：{}", event.cue.label()))
+        .unwrap_or_default();
+    format!("意愿：{intent_text}  感知：{perception_text}{sound_text}")
 }
 
 fn omen_for_place(kind: PlaceKind) -> IntentKind {
@@ -534,10 +709,10 @@ pub fn sign_affinity_for_intent(place_kind: Option<PlaceKind>, intent: Option<In
 mod tests {
     use super::{
         IntentKind, IntentSample, IntentSource, IntentState, PerceptionRequestContext,
-        PerceptionResult, PerceptionState, advance_intent_state, advance_perception_state,
-        sign_affinity_for_intent,
+        PerceptionResult, PerceptionSoundCue, PerceptionState, advance_intent_state,
+        advance_perception_state, apply_village_dialogue_intent, sign_affinity_for_intent,
     };
-    use crate::game::{journey::DreamPhase, places::PlaceKind};
+    use crate::game::{journey::DreamPhase, places::PlaceKind, village::VillageActorKind};
 
     #[test]
     fn intent_accumulates_and_decays() {
@@ -601,6 +776,10 @@ mod tests {
         assert_eq!(result, Some(PerceptionResult::ClarifiedOmen));
         assert!(state.active);
         assert!(state.cooldown_seconds > 0.0);
+        assert_eq!(
+            state.sound_event.map(|event| event.cue),
+            Some(PerceptionSoundCue::WaterRush)
+        );
     }
 
     #[test]
@@ -620,6 +799,20 @@ mod tests {
         );
 
         assert_eq!(result, Some(PerceptionResult::DreamEcho));
+        assert_eq!(
+            state.sound_event.map(|event| event.cue),
+            Some(PerceptionSoundCue::DistantSand)
+        );
+    }
+
+    #[test]
+    fn merchant_dialogue_strengthens_dream_landmark_intent() {
+        let mut state = IntentState::default();
+
+        apply_village_dialogue_intent(&mut state, VillageActorKind::Merchant, 12.0);
+
+        assert!(state.strength(IntentKind::DreamLandmark) > 0.16);
+        assert_eq!(state.dominant(), Some(IntentKind::DreamLandmark));
     }
 
     #[test]

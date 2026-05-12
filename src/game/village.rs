@@ -7,6 +7,7 @@ use bevy::{
 
 use crate::game::{
     flow::{AppScreen, InGameState},
+    intent::{IntentState, apply_village_dialogue_intent},
     notebook::{
         NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
         record_notebook_entry,
@@ -692,6 +693,10 @@ fn update_village_actor_behavior(
 }
 
 fn actor_target_position(actor: &VillageActor, elapsed: f32) -> Vec3 {
+    if actor.kind == VillageActorKind::Shepherd {
+        return shepherd_schedule_position(actor.home, actor.radius, elapsed).target;
+    }
+
     let phase = elapsed * actor_motion_frequency(actor.kind) + actor.seed as f32 * 0.017;
     let radius = match actor.kind {
         VillageActorKind::Sheep => actor.radius * 0.48,
@@ -704,6 +709,57 @@ fn actor_target_position(actor: &VillageActor, elapsed: f32) -> Vec3 {
             0.0,
             (phase * 0.73 + 0.4).sin() * radius,
         )
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum ShepherdSchedulePhase {
+    TendingFlock,
+    WatchingGate,
+    ReturningVillage,
+    RestingVillage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShepherdSchedulePosition {
+    pub phase: ShepherdSchedulePhase,
+    pub target: Vec3,
+}
+
+pub fn shepherd_schedule_position(
+    sheep_pen_home: Vec3,
+    radius: f32,
+    elapsed: f32,
+) -> ShepherdSchedulePosition {
+    let day_progress = (elapsed / 48.0).fract();
+    let village_rest = sheep_pen_home + Vec3::new(-18.0, 0.0, 14.0);
+    let gate_watch = sheep_pen_home + Vec3::new(radius * 0.42, 0.0, -radius * 0.18);
+    let phase_wave = elapsed * 0.18;
+    if day_progress < 0.48 {
+        ShepherdSchedulePosition {
+            phase: ShepherdSchedulePhase::TendingFlock,
+            target: sheep_pen_home
+                + Vec3::new(
+                    phase_wave.cos() * radius * 0.22,
+                    0.0,
+                    (phase_wave * 0.7).sin() * radius * 0.18,
+                ),
+        }
+    } else if day_progress < 0.64 {
+        ShepherdSchedulePosition {
+            phase: ShepherdSchedulePhase::WatchingGate,
+            target: gate_watch,
+        }
+    } else if day_progress < 0.82 {
+        ShepherdSchedulePosition {
+            phase: ShepherdSchedulePhase::ReturningVillage,
+            target: village_rest.lerp(sheep_pen_home, (day_progress - 0.64) / 0.18),
+        }
+    } else {
+        ShepherdSchedulePosition {
+            phase: ShepherdSchedulePhase::RestingVillage,
+            target: village_rest,
+        }
+    }
 }
 
 fn actor_motion_frequency(kind: VillageActorKind) -> f32 {
@@ -735,6 +791,7 @@ fn update_village_interaction(
     village: Option<ResMut<VillageState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     actor_query: Query<(&VillageActor, &Transform), Without<WandererPrototype>>,
+    mut intent: Option<ResMut<IntentState>>,
     mut notebook: Option<ResMut<NotebookState>>,
 ) {
     let Some(mut village) = village else {
@@ -768,6 +825,18 @@ fn update_village_interaction(
     };
     let record = village_interaction_record(actor.kind, time.elapsed_secs());
     let _ = record_notebook_entry(notebook.as_deref_mut(), record);
+    if let Some(intent) = intent.as_deref_mut() {
+        let changed = apply_village_dialogue_intent(intent, actor.kind, time.elapsed_secs());
+        if let Some(kind) = changed {
+            tracing::info!(
+                target: "dao_game::village::interaction",
+                actor = actor.kind.label(),
+                intent = kind.label(),
+                strength = intent.strength(kind),
+                "village dialogue shaped player intent"
+            );
+        }
+    }
     tracing::info!(
         target: "dao_game::village::interaction",
         actor_id = actor.id,
@@ -898,8 +967,8 @@ mod tests {
         },
         game::{
             village::{
-                VillageActorKind, VillageAreaKind, VillageLayoutConfig, actor_target_position,
-                build_village_layout,
+                ShepherdSchedulePhase, VillageActorKind, VillageAreaKind, VillageLayoutConfig,
+                actor_target_position, build_village_layout, shepherd_schedule_position,
             },
             world::WorldMap,
         },
@@ -976,6 +1045,18 @@ mod tests {
         let target = actor_target_position(&actor, 12.0);
 
         assert!(target.distance(actor.home) <= actor.radius);
+    }
+
+    #[test]
+    fn shepherd_schedule_visits_flock_and_village_rest() {
+        let home = Vec3::new(10.0, 0.0, -2.0);
+        let tending = shepherd_schedule_position(home, 9.0, 2.0);
+        let resting = shepherd_schedule_position(home, 9.0, 42.0);
+
+        assert_eq!(tending.phase, ShepherdSchedulePhase::TendingFlock);
+        assert!(tending.target.distance(home) < 9.0);
+        assert_eq!(resting.phase, ShepherdSchedulePhase::RestingVillage);
+        assert!(resting.target.distance(home) > 15.0);
     }
 
     fn test_config() -> AppConfig {

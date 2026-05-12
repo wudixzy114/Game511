@@ -13,7 +13,7 @@ use crate::game::{
     journey::{JourneyStage, JourneyState, format_journey_memory_line},
     landmarks::LandmarkState,
     notebook::{NotebookEntry, NotebookEntryKind, NotebookState, format_notebook_entry_line},
-    places::PlaceKind,
+    places::{MeaningfulPlaces, PlaceKind, planar_distance},
     player::{CameraMode, FirstPersonState},
     regions::RegionGraphState,
     signs::{OmenGuidancePhase, OmenKind, SignState},
@@ -44,6 +44,7 @@ impl Plugin for UiPlugin {
                     update_hud_stats_text,
                     update_hud_omen_text,
                     update_hud_context_text,
+                    update_hud_compass_text,
                     update_notebook_overlay,
                 )
                     .run_if(in_state(AppScreen::InGame)),
@@ -98,6 +99,12 @@ struct HudInteractionText;
 struct HudNotebookText;
 
 #[derive(Component)]
+struct HudCompassPanel;
+
+#[derive(Component)]
+struct HudCompassText;
+
+#[derive(Component)]
 struct Crosshair;
 
 #[derive(Debug, Resource, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +112,7 @@ pub struct UiModeState {
     pub hud_mode: HudMode,
     pub notebook_open: bool,
     pub notebook_category: NotebookEntryKind,
+    pub compass_open: bool,
 }
 
 impl Default for UiModeState {
@@ -113,6 +121,7 @@ impl Default for UiModeState {
             hud_mode: HudMode::Formal,
             notebook_open: false,
             notebook_category: NotebookEntryKind::Dream,
+            compass_open: true,
         }
     }
 }
@@ -186,6 +195,14 @@ type HudResources<'w> = (
     Option<Res<'w, LandmarkState>>,
     Option<Res<'w, EcologyState>>,
     Option<Res<'w, DirectorState>>,
+    Option<Res<'w, MeaningfulPlaces>>,
+);
+
+type CompassResources<'w> = (
+    Option<Res<'w, WorldMap>>,
+    Option<Res<'w, MeaningfulPlaces>>,
+    Option<Res<'w, RegionGraphState>>,
+    Option<Res<'w, FirstPersonState>>,
 );
 
 const TEXT_PRIMARY: Color = Color::srgb(0.92, 0.9, 0.85);
@@ -490,6 +507,29 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                     ui_text_font(&font, 16.0),
                     TextColor(TEXT_MUTED),
                     HudControlText,
+                )],
+            ));
+
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(24),
+                    top: px(24),
+                    padding: UiRect::axes(px(14), px(12)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(8)),
+                    width: px(260),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.06, 0.07, 0.07, 0.5)),
+                BorderColor::all(Color::srgba(0.32, 0.36, 0.34, 0.72)),
+                Visibility::Hidden,
+                HudCompassPanel,
+                children![(
+                    Text::new("方位感正在形成"),
+                    ui_text_font(&font, 14.0),
+                    TextColor(TEXT_MUTED),
+                    HudCompassText,
                 )],
             ));
 
@@ -890,6 +930,10 @@ fn handle_ui_mode_input(
         };
     }
 
+    if keys.just_pressed(KeyCode::KeyM) {
+        ui_mode.compass_open = !ui_mode.compass_open;
+    }
+
     if keys.just_pressed(KeyCode::KeyN) {
         ui_mode.notebook_open = !ui_mode.notebook_open;
         if ui_mode.notebook_open
@@ -943,7 +987,7 @@ fn update_hud_control_text(
         return;
     };
     controls_text.0 = format!(
-        "{}\nF 交谈/观察  E 感知  N 记事本  Tab 分类  G 通过边界  F3 {}",
+        "{}\nF 交谈/观察  E 感知  M 方位感  N 记事本  Tab 分类  G 通过边界  F3 {}",
         control_hint(*session_mode),
         ui_mode.hud_mode.label()
     );
@@ -979,6 +1023,7 @@ fn update_hud_stats_text(
         landmarks,
         ecology,
         director,
+        places,
     ) = resources;
     for mut visibility in &mut panel_query {
         *visibility = if ui_mode.hud_mode == HudMode::Development {
@@ -1113,12 +1158,27 @@ fn update_hud_stats_text(
             })
         })
         .unwrap_or_else(|| "导演建议：待定".to_string());
+    let place_line = places
+        .as_deref()
+        .and_then(|places| {
+            places.nearest_place().map(|place| {
+                format!(
+                    "近处地点：{} {}",
+                    place.kind.label(),
+                    places
+                        .nearest_distance
+                        .map(|distance| format!("{distance:.0}m"))
+                        .unwrap_or_else(|| "--".to_string())
+                )
+            })
+        })
+        .unwrap_or_else(|| "近处地点：未理解".to_string());
 
     let Some(mut stats_text) = stats_query.iter_mut().next() else {
         return;
     };
     stats_text.0 = format!(
-        "{status_line}\n{resonance_line}\n{sign_detail_line}\n{journey_line}\n{intent_line}\n{camera_line}\n{region_line}\n{pyramid_line}\n{ecology_line}\n{director_line}"
+        "{status_line}\n{resonance_line}\n{sign_detail_line}\n{journey_line}\n{intent_line}\n{camera_line}\n{region_line}\n{place_line}\n{pyramid_line}\n{ecology_line}\n{director_line}"
     );
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
@@ -1211,6 +1271,35 @@ fn update_hud_context_text(
                 })
             })
             .unwrap_or_default();
+    }
+}
+
+fn update_hud_compass_text(
+    ui_mode: Res<UiModeState>,
+    resources: CompassResources<'_>,
+    wanderer_query: Query<&Transform, With<WandererPrototype>>,
+    mut compass_query: Query<&mut Text, With<HudCompassText>>,
+    mut compass_panel_query: Query<&mut Visibility, With<HudCompassPanel>>,
+) {
+    let (world_map, places, regions, camera_state) = resources;
+    if let Some(mut compass_visibility) = compass_panel_query.iter_mut().next() {
+        *compass_visibility = if ui_mode.compass_open
+            && !ui_mode.notebook_open
+            && ui_mode.hud_mode == HudMode::Formal
+        {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    if let Some(mut compass_text) = compass_query.iter_mut().next() {
+        compass_text.0 = compass_text_for_context(
+            wanderer_query.iter().next(),
+            world_map.as_deref(),
+            camera_state.as_deref(),
+            places.as_deref(),
+            regions.as_deref(),
+        );
     }
 }
 
@@ -1311,6 +1400,104 @@ fn biome_label(biome: BiomeKind) -> &'static str {
         BiomeKind::Steppe => "旷野",
         BiomeKind::Ridge => "山脊",
     }
+}
+
+fn compass_text_for_context(
+    player: Option<&Transform>,
+    world_map: Option<&WorldMap>,
+    camera_state: Option<&FirstPersonState>,
+    places: Option<&MeaningfulPlaces>,
+    regions: Option<&RegionGraphState>,
+) -> String {
+    let Some(player) = player else {
+        return "方位感正在形成".to_string();
+    };
+    let position = player.translation;
+    let facing = camera_state
+        .map(|state| facing_label_from_yaw(state.yaw))
+        .unwrap_or_else(|| {
+            let forward = player.forward();
+            facing_label_from_direction(Vec3::new(forward.x, forward.y, forward.z))
+        });
+    let terrain = world_map
+        .map(|world_map| nearby_terrain_line(world_map, position))
+        .unwrap_or_else(|| "地貌：未知".to_string());
+    let place_line = places
+        .and_then(|places| nearest_memory_marker(position, places))
+        .unwrap_or_else(|| "附近还没有清晰的记忆标记。".to_string());
+    let gate_line = regions
+        .and_then(|regions| regions.nearest_gate)
+        .map(|gate| {
+            if gate.open {
+                format!("边界在{}，雾已经让出路。", distance_band(gate.distance))
+            } else {
+                format!("{}有边界气息。", distance_band(gate.distance))
+            }
+        })
+        .unwrap_or_else(|| "边界仍在雾外。".to_string());
+    format!("朝向：{facing}\n{terrain}\n{place_line}\n{gate_line}")
+}
+
+fn nearby_terrain_line(world_map: &WorldMap, position: Vec3) -> String {
+    let label_at = |offset: Vec3| {
+        world_map
+            .sample_biome(position.x + offset.x, position.z + offset.z)
+            .map(biome_label)
+            .unwrap_or("未知")
+    };
+    let step = 18.0;
+    format!(
+        "地貌：脚下{} 北{} 东{} 南{} 西{}",
+        label_at(Vec3::ZERO),
+        label_at(Vec3::new(0.0, 0.0, -step)),
+        label_at(Vec3::new(step, 0.0, 0.0)),
+        label_at(Vec3::new(0.0, 0.0, step)),
+        label_at(Vec3::new(-step, 0.0, 0.0)),
+    )
+}
+
+fn nearest_memory_marker(position: Vec3, places: &MeaningfulPlaces) -> Option<String> {
+    let place = places.nearest_place()?;
+    let distance = places
+        .nearest_distance
+        .unwrap_or_else(|| planar_distance(position, place.position));
+    if distance > 130.0 {
+        return None;
+    }
+    Some(format!(
+        "{}在{}的{}。",
+        place.kind.label(),
+        direction_label_between(position, place.position),
+        distance_band(distance)
+    ))
+}
+
+fn distance_band(distance: f32) -> &'static str {
+    match distance.max(0.0) {
+        value if value < 18.0 => "身边",
+        value if value < 48.0 => "近处",
+        value if value < 95.0 => "远处",
+        _ => "天边",
+    }
+}
+
+fn facing_label_from_yaw(yaw: f32) -> &'static str {
+    let direction = Quat::from_rotation_y(yaw) * -Vec3::Z;
+    facing_label_from_direction(direction)
+}
+
+fn direction_label_between(from: Vec3, to: Vec3) -> &'static str {
+    facing_label_from_direction(to - from)
+}
+
+fn facing_label_from_direction(direction: Vec3) -> &'static str {
+    let flat = Vec3::new(direction.x, 0.0, direction.z).normalize_or_zero();
+    if flat == Vec3::ZERO {
+        return "未定";
+    }
+    let angle = flat.x.atan2(-flat.z).rem_euclid(std::f32::consts::TAU);
+    let octant = ((angle / (std::f32::consts::TAU / 8.0)).round() as usize) % 8;
+    ["北", "东北", "东", "东南", "南", "西南", "西", "西北"][octant]
 }
 
 fn omen_label(omen: Option<OmenKind>) -> &'static str {
@@ -1486,8 +1673,9 @@ mod tests {
     };
 
     use super::{
-        biome_label, control_hint, notebook_overlay_text, omen_label,
-        process_pending_session_launch, shift_notebook_category, time_of_day_label,
+        biome_label, compass_text_for_context, control_hint, distance_band, facing_label_from_yaw,
+        notebook_overlay_text, omen_label, process_pending_session_launch, shift_notebook_category,
+        time_of_day_label,
     };
 
     #[test]
@@ -1573,5 +1761,21 @@ mod tests {
         assert!(place_text.contains("抵达静水湾"));
         assert!(!place_text.contains("山鸣"));
         assert!(sign_text.contains("山鸣曾经显现"));
+    }
+
+    #[test]
+    fn compass_direction_labels_cardinal_yaw() {
+        assert_eq!(facing_label_from_yaw(0.0), "北");
+        assert_eq!(facing_label_from_yaw(std::f32::consts::FRAC_PI_2), "西");
+        assert_eq!(distance_band(12.0), "身边");
+        assert_eq!(distance_band(70.0), "远处");
+    }
+
+    #[test]
+    fn compass_text_avoids_task_route_language() {
+        let text = compass_text_for_context(None, None, None, None, None);
+
+        assert!(!text.contains("任务"));
+        assert!(!text.contains("前往"));
     }
 }

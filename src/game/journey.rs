@@ -651,11 +651,13 @@ fn advance_story_arc_state(
     state.dream.echo_strength = match state.dream.phase {
         DreamPhase::Afterglow => {
             let drift = if context.leaving_village {
-                -0.012
+                0.035
+            } else if context.village_focus {
+                -0.04
             } else {
-                -0.028
+                -0.022
             };
-            (state.dream.echo_strength + drift * context.delta_seconds).clamp(0.18, 1.0)
+            (state.dream.echo_strength + drift * context.delta_seconds).clamp(0.0, 1.0)
         }
         DreamPhase::InDream => 1.0,
         DreamPhase::Ready => 0.45,
@@ -1467,6 +1469,54 @@ mod tests {
                 .iter()
                 .any(|memory| memory.kind == JourneyMemoryKind::Dream)
         );
+    }
+
+    #[test]
+    fn dream_afterglow_recovers_when_player_tries_to_leave() {
+        let mut state = JourneyState {
+            story_stage: StoryArcStage::DreamAfterglow,
+            dream: super::DreamState {
+                phase: DreamPhase::Afterglow,
+                echo_strength: 0.36,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 4.0,
+                leaving_village: true,
+                ..context(0.0, None, false)
+            },
+        );
+
+        assert!(state.dream.echo_strength > 0.36);
+    }
+
+    #[test]
+    fn dream_afterglow_fades_when_player_only_stays_in_village() {
+        let mut state = JourneyState {
+            story_stage: StoryArcStage::DreamAfterglow,
+            dream: super::DreamState {
+                phase: DreamPhase::Afterglow,
+                echo_strength: 0.6,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 4.0,
+                village_focus: true,
+                ..context(0.0, None, false)
+            },
+        );
+
+        assert!(state.dream.echo_strength < 0.6);
     }
 
     #[test]
