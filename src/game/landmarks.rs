@@ -1,14 +1,12 @@
-use bevy::{
-    asset::RenderAssetUsages,
-    mesh::{Indices, PrimitiveTopology},
-    pbr::MeshMaterial3d,
-    prelude::*,
-};
+use bevy::prelude::*;
 
 use crate::{
     core::performance::{FramePerformance, PerformancePhase},
     game::{
-        assets::{ProceduralAsset, ProceduralAssetKind, registered_spec},
+        assets::{
+            ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials,
+            ProceduralSpawnRequest, spawn_procedural_asset_entity,
+        },
         flow::{AppScreen, InGameState},
         intent::PerceptionState,
         journey::{DreamPhase, JourneyState},
@@ -109,14 +107,6 @@ struct LandmarkVisual {
     feature_kind: LandmarkFeatureKind,
 }
 
-#[derive(Debug, Resource, Clone)]
-struct LandmarkMaterials {
-    pyramid: Handle<StandardMaterial>,
-    oasis_water: Handle<StandardMaterial>,
-    old_stone: Handle<StandardMaterial>,
-    relic: Handle<StandardMaterial>,
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 enum LandmarkFeatureKind {
     Silhouette,
@@ -132,7 +122,7 @@ fn initialize_landmarks(
     regions: Option<Res<RegionGraphState>>,
     existing: Option<Res<LandmarkState>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    materials: Res<ProceduralAssetMaterials>,
 ) {
     if existing.is_some() {
         return;
@@ -140,10 +130,9 @@ fn initialize_landmarks(
     let (Some(world_map), Some(regions)) = (world_map, regions) else {
         return;
     };
-    let landmark_materials = LandmarkMaterials::new(&mut materials);
     let landmarks = build_landmarks(&world_map, &regions);
     for landmark in &landmarks {
-        spawn_landmark_visual(&mut commands, &mut meshes, &landmark_materials, landmark);
+        spawn_landmark_visual(&mut commands, &mut meshes, &materials, landmark);
     }
 
     let pyramid = landmarks
@@ -162,7 +151,6 @@ fn initialize_landmarks(
         pyramid_signal: PyramidSignal::default(),
         recorded_near_pyramid: false,
     });
-    commands.insert_resource(landmark_materials);
 }
 
 pub fn build_landmarks(world_map: &WorldMap, regions: &RegionGraphState) -> Vec<Landmark> {
@@ -307,65 +295,77 @@ fn update_landmark_visibility(
 fn spawn_landmark_visual(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &LandmarkMaterials,
+    materials: &ProceduralAssetMaterials,
     landmark: &Landmark,
 ) {
     match landmark.kind {
         RegionLandmarkKind::DesertPyramid => {
-            commands.spawn((
-                Name::new("DesertPyramidSilhouette"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(meshes.add(pyramid_mesh(landmark.scale, landmark.scale * 0.72))),
-                MeshMaterial3d(materials.pyramid.clone()),
-                Transform::from_translation(landmark.position),
+            let pyramid_entity = spawn_procedural_asset_entity(
+                commands,
+                meshes,
+                materials,
+                ProceduralSpawnRequest::new(
+                    ProceduralAssetKind::DesertPyramid,
+                    landmark.id,
+                    "DesertPyramidSilhouette",
+                    Transform::from_translation(landmark.position),
+                )
+                .with_lod(ProceduralAssetLod::Near),
+            );
+            commands.entity(pyramid_entity).insert((
                 Visibility::Hidden,
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Silhouette,
                 },
-                procedural_asset(ProceduralAssetKind::DesertPyramid, landmark.id),
             ));
-            commands.spawn((
-                Name::new("DesertOasis"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(meshes.add(Mesh::from(bevy::math::primitives::Cylinder::new(
-                    landmark.scale * 0.18,
-                    0.08,
-                )))),
-                MeshMaterial3d(materials.oasis_water.clone()),
-                Transform::from_translation(
-                    landmark.position
-                        + Vec3::new(-landmark.scale * 0.74, 0.08, landmark.scale * 0.36),
+            let oasis_entity = spawn_procedural_asset_entity(
+                commands,
+                meshes,
+                materials,
+                ProceduralSpawnRequest::new(
+                    ProceduralAssetKind::DesertOasis,
+                    landmark.id,
+                    "DesertOasis",
+                    Transform::from_translation(
+                        landmark.position
+                            + Vec3::new(-landmark.scale * 0.74, 0.08, landmark.scale * 0.36),
+                    ),
                 )
-                .with_scale(Vec3::new(1.8, 1.0, 0.72)),
+                .with_lod(ProceduralAssetLod::Near),
+            );
+            commands.entity(oasis_entity).insert((
                 Visibility::Hidden,
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: true,
                     feature_kind: LandmarkFeatureKind::Oasis,
                 },
-                procedural_asset(ProceduralAssetKind::DesertOasis, landmark.id),
             ));
-            commands.spawn((
-                Name::new("DesertRelicPlaceholder"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(meshes.add(Mesh::from(bevy::math::primitives::Cuboid::new(
-                    1.2, 2.2, 1.2,
-                )))),
-                MeshMaterial3d(materials.relic.clone()),
-                Transform::from_translation(
-                    landmark.position
-                        + Vec3::new(landmark.scale * 0.48, 1.1, -landmark.scale * 0.62),
+            let relic_entity = spawn_procedural_asset_entity(
+                commands,
+                meshes,
+                materials,
+                ProceduralSpawnRequest::new(
+                    ProceduralAssetKind::DesertRelic,
+                    landmark.id,
+                    "DesertRelicPlaceholder",
+                    Transform::from_translation(
+                        landmark.position
+                            + Vec3::new(landmark.scale * 0.48, 0.0, -landmark.scale * 0.62),
+                    )
+                    .with_rotation(Quat::from_rotation_y(0.7)),
                 )
-                .with_rotation(Quat::from_rotation_y(0.7)),
+                .with_lod(ProceduralAssetLod::Near),
+            );
+            commands.entity(relic_entity).insert((
                 Visibility::Hidden,
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: true,
                     feature_kind: LandmarkFeatureKind::Relic,
                 },
-                procedural_asset(ProceduralAssetKind::DesertRelic, landmark.id),
             ));
             for (index, offset) in [
                 Vec3::new(-landmark.scale * 0.28, 0.0, landmark.scale * 0.42),
@@ -375,27 +375,26 @@ fn spawn_landmark_visual(
             .into_iter()
             .enumerate()
             {
-                commands.spawn((
-                    Name::new("PyramidRuinWall"),
-                    DespawnOnExit(AppScreen::InGame),
-                    Mesh3d(meshes.add(Mesh::from(bevy::math::primitives::Cuboid::new(
-                        landmark.scale * 0.28,
-                        2.4,
-                        1.2,
-                    )))),
-                    MeshMaterial3d(materials.old_stone.clone()),
-                    Transform::from_translation(landmark.position + offset + Vec3::Y * 1.2)
-                        .with_rotation(Quat::from_rotation_y(offset.x * 0.008)),
+                let ruin_entity = spawn_procedural_asset_entity(
+                    commands,
+                    meshes,
+                    materials,
+                    ProceduralSpawnRequest::new(
+                        ProceduralAssetKind::PyramidRuinWall,
+                        landmark.id.wrapping_add(index as u64),
+                        "PyramidRuinWall",
+                        Transform::from_translation(landmark.position + offset)
+                            .with_rotation(Quat::from_rotation_y(offset.x * 0.008)),
+                    )
+                    .with_lod(ProceduralAssetLod::Near),
+                );
+                commands.entity(ruin_entity).insert((
                     Visibility::Hidden,
                     LandmarkVisual {
                         landmark_id: landmark.id,
                         near_detail: true,
                         feature_kind: LandmarkFeatureKind::Ruin,
                     },
-                    procedural_asset(
-                        ProceduralAssetKind::PyramidRuinWall,
-                        landmark.id.wrapping_add(index as u64),
-                    ),
                 ));
             }
             commands.spawn((
@@ -416,46 +415,50 @@ fn spawn_landmark_visual(
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Silhouette,
                 },
-                procedural_asset(ProceduralAssetKind::DesertPyramid, landmark.id + 97),
             ));
         }
         RegionLandmarkKind::MistRiver => {
-            commands.spawn((
-                Name::new("MistRiverLandmark"),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(meshes.add(Mesh::from(bevy::math::primitives::Cylinder::new(
-                    landmark.scale,
-                    0.08,
-                )))),
-                MeshMaterial3d(materials.oasis_water.clone()),
-                Transform::from_translation(landmark.position)
-                    .with_scale(Vec3::new(1.8, 1.0, 0.38)),
+            let entity = spawn_procedural_asset_entity(
+                commands,
+                meshes,
+                materials,
+                ProceduralSpawnRequest::new(
+                    ProceduralAssetKind::MistRiver,
+                    landmark.id,
+                    "MistRiverLandmark",
+                    Transform::from_translation(landmark.position),
+                )
+                .with_lod(ProceduralAssetLod::Near),
+            );
+            commands.entity(entity).insert((
                 Visibility::Visible,
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Boundary,
                 },
-                procedural_asset(ProceduralAssetKind::MistRiver, landmark.id),
             ));
         }
         RegionLandmarkKind::VillageHeadland | RegionLandmarkKind::FarIslandLight => {
-            commands.spawn((
-                Name::new(landmark.kind.label()),
-                DespawnOnExit(AppScreen::InGame),
-                Mesh3d(meshes.add(Mesh::from(bevy::math::primitives::Cylinder::new(
-                    1.0,
-                    landmark.scale * 0.8,
-                )))),
-                MeshMaterial3d(materials.old_stone.clone()),
-                Transform::from_translation(landmark.position + Vec3::Y * landmark.scale * 0.4),
+            let entity = spawn_procedural_asset_entity(
+                commands,
+                meshes,
+                materials,
+                ProceduralSpawnRequest::new(
+                    ProceduralAssetKind::HeadlandMarker,
+                    landmark.id,
+                    landmark.kind.label(),
+                    Transform::from_translation(landmark.position),
+                )
+                .with_lod(ProceduralAssetLod::Near),
+            );
+            commands.entity(entity).insert((
                 Visibility::Visible,
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Boundary,
                 },
-                procedural_asset(ProceduralAssetKind::HeadlandMarker, landmark.id),
             ));
         }
     }
@@ -484,35 +487,6 @@ pub fn sandstorm_strength_for_pyramid(
 ) -> f32 {
     let distance_haze = (distance / 900.0).clamp(0.18, 1.0);
     (distance_haze * 0.72 + dream_echo * 0.18 - perception_boost * 0.38).clamp(0.18, 1.0)
-}
-
-fn pyramid_mesh(width: f32, height: f32) -> Mesh {
-    let half = width * 0.5;
-    let positions = vec![
-        [-half, 0.0, -half],
-        [half, 0.0, -half],
-        [half, 0.0, half],
-        [-half, 0.0, half],
-        [0.0, height, 0.0],
-    ];
-    let normals = vec![
-        [0.0, -1.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [0.0, 1.0, 0.0],
-    ];
-    let uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5]];
-    let indices = vec![0, 2, 1, 0, 3, 2, 0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4];
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
 }
 
 fn tags_for_landmark(kind: RegionLandmarkKind) -> Vec<LandmarkTag> {
@@ -549,44 +523,8 @@ fn stable_landmark_id(seed: u64, kind: RegionLandmarkKind) -> u64 {
     value ^ (value >> 31)
 }
 
-fn procedural_asset(kind: ProceduralAssetKind, seed_salt: u64) -> ProceduralAsset {
-    ProceduralAsset::new(registered_spec(kind).instance(seed_salt))
-}
-
-impl LandmarkMaterials {
-    fn new(materials: &mut Assets<StandardMaterial>) -> Self {
-        Self {
-            pyramid: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.72, 0.58, 0.36),
-                perceptual_roughness: 0.96,
-                reflectance: 0.06,
-                ..Default::default()
-            }),
-            oasis_water: materials.add(StandardMaterial {
-                base_color: Color::srgba(0.18, 0.46, 0.56, 0.64),
-                alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 0.22,
-                metallic: 0.02,
-                ..Default::default()
-            }),
-            old_stone: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.48, 0.43, 0.35),
-                perceptual_roughness: 0.98,
-                ..Default::default()
-            }),
-            relic: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.72, 0.64, 0.46),
-                emissive: bevy::color::LinearRgba::rgb(0.18, 0.12, 0.04),
-                perceptual_roughness: 0.88,
-                ..Default::default()
-            }),
-        }
-    }
-}
-
 fn cleanup_landmark_session(mut commands: Commands) {
     commands.remove_resource::<LandmarkState>();
-    commands.remove_resource::<LandmarkMaterials>();
 }
 
 #[cfg(test)]

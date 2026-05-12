@@ -1,8 +1,4 @@
-use bevy::{
-    math::primitives::{Capsule3d, Sphere},
-    pbr::MeshMaterial3d,
-    prelude::*,
-};
+use bevy::prelude::*;
 
 use crate::{
     core::{
@@ -10,7 +6,10 @@ use crate::{
         performance::{FramePerformance, PerformancePhase},
     },
     game::{
-        assets::{ProceduralAsset, ProceduralAssetKind, registered_spec},
+        assets::{
+            ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials,
+            ProceduralSpawnRequest, spawn_procedural_asset_entity,
+        },
         flow::{AppScreen, InGameState},
         intent::{IntentKind, IntentState, PerceptionState},
         journey::{DreamPhase, JourneyState},
@@ -138,13 +137,6 @@ enum EcologyActorKind {
     FortuneTeller,
 }
 
-#[derive(Debug, Resource, Clone)]
-struct EcologyMaterials {
-    bird: Handle<StandardMaterial>,
-    fish: Handle<StandardMaterial>,
-    npc: Handle<StandardMaterial>,
-}
-
 const ECOLOGY_INTERACTION_RADIUS: f32 = 4.8;
 
 type EcologyStateResources<'w> = (
@@ -168,7 +160,7 @@ fn initialize_ecology(
     mut commands: Commands,
     resources: EcologyInitResources<'_>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    materials: Res<ProceduralAssetMaterials>,
 ) {
     let (world_map, village, regions, existing, config) = resources;
     if existing.is_some() {
@@ -177,12 +169,11 @@ fn initialize_ecology(
     let (Some(world_map), Some(village), Some(regions)) = (world_map, village, regions) else {
         return;
     };
-    let ecology_materials = EcologyMaterials::new(&mut materials);
     let ecology = build_ecology_state(&world_map, &village, &regions);
     spawn_ecology_visuals(
         &mut commands,
         &mut meshes,
-        &ecology_materials,
+        &materials,
         &ecology,
         &world_map,
         &config,
@@ -196,7 +187,6 @@ fn initialize_ecology(
     );
 
     commands.insert_resource(ecology);
-    commands.insert_resource(ecology_materials);
 }
 
 pub fn build_ecology_state(
@@ -589,47 +579,51 @@ fn update_ecology_interactions(
 fn spawn_ecology_visuals(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &EcologyMaterials,
+    materials: &ProceduralAssetMaterials,
     ecology: &EcologyState,
     world_map: &WorldMap,
     config: &AppConfig,
 ) {
-    let bird_mesh = meshes.add(Mesh::from(Capsule3d::new(0.12, 0.42)));
     for index in 0..config.ecology.bird_count {
         let id = stable_ecology_id(index as u64, 101);
-        commands.spawn((
-            Name::new("BirdFlockMember"),
-            DespawnOnExit(AppScreen::InGame),
-            Mesh3d(bird_mesh.clone()),
-            MeshMaterial3d(materials.bird.clone()),
-            Transform::from_translation(Vec3::new(0.0, -120.0, 0.0))
-                .with_scale(Vec3::new(1.6, 0.34, 0.62)),
-            EcologyActor {
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::Bird,
                 id,
-                kind: EcologyActorKind::Bird,
-                index,
-            },
-            procedural_asset(ProceduralAssetKind::Bird, id),
-        ));
+                "BirdFlockMember",
+                Transform::from_translation(Vec3::new(0.0, -120.0, 0.0)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert(EcologyActor {
+            id,
+            kind: EcologyActorKind::Bird,
+            index,
+        });
     }
 
-    let fish_mesh = meshes.add(Sphere::new(0.22).mesh().uv(12, 8));
     for index in 0..config.ecology.fish_count {
         let id = stable_ecology_id(index as u64, 203);
-        commands.spawn((
-            Name::new("ShoreFish"),
-            DespawnOnExit(AppScreen::InGame),
-            Mesh3d(fish_mesh.clone()),
-            MeshMaterial3d(materials.fish.clone()),
-            Transform::from_translation(Vec3::new(0.0, world_map.water_level(), 0.0))
-                .with_scale(Vec3::new(1.8, 0.42, 0.72)),
-            EcologyActor {
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::Fish,
                 id,
-                kind: EcologyActorKind::Fish,
-                index,
-            },
-            procedural_asset(ProceduralAssetKind::Fish, id),
-        ));
+                "ShoreFish",
+                Transform::from_translation(Vec3::new(0.0, world_map.water_level(), 0.0)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert(EcologyActor {
+            id,
+            kind: EcologyActorKind::Fish,
+            index,
+        });
     }
 
     if let Some(npc) = ecology
@@ -637,19 +631,25 @@ fn spawn_ecology_visuals(
         .iter()
         .find(|npc| npc.kind == NpcKind::FortuneTeller)
     {
-        commands.spawn((
-            Name::new("FortuneTeller"),
-            DespawnOnExit(AppScreen::InGame),
-            Mesh3d(meshes.add(Mesh::from(Capsule3d::new(0.38, 1.42)))),
-            MeshMaterial3d(materials.npc.clone()),
-            Transform::from_translation(ground_position(world_map, npc.home, 1.05)),
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::FortuneTeller,
+                npc.id,
+                "FortuneTeller",
+                Transform::from_translation(ground_position(world_map, npc.home, 1.05)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert((
             Visibility::Hidden,
             EcologyActor {
                 id: npc.id,
                 kind: EcologyActorKind::FortuneTeller,
                 index: 0,
             },
-            procedural_asset(ProceduralAssetKind::FortuneTeller, npc.id),
         ));
     }
 }
@@ -713,28 +713,6 @@ fn ground_position(world_map: &WorldMap, position: Vec3, y_offset: f32) -> Vec3 
     Vec3::new(position.x, height + y_offset, position.z)
 }
 
-impl EcologyMaterials {
-    fn new(materials: &mut Assets<StandardMaterial>) -> Self {
-        Self {
-            bird: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.18, 0.18, 0.16),
-                perceptual_roughness: 0.8,
-                ..Default::default()
-            }),
-            fish: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.34, 0.56, 0.62),
-                perceptual_roughness: 0.42,
-                ..Default::default()
-            }),
-            npc: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.28, 0.22, 0.36),
-                perceptual_roughness: 0.94,
-                ..Default::default()
-            }),
-        }
-    }
-}
-
 fn stable_ecology_id(seed: u64, salt: u64) -> u64 {
     let mut value = seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -746,13 +724,8 @@ fn stable_ecology_id(seed: u64, salt: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-fn procedural_asset(kind: ProceduralAssetKind, seed_salt: u64) -> ProceduralAsset {
-    ProceduralAsset::new(registered_spec(kind).instance(seed_salt))
-}
-
 fn cleanup_ecology_session(mut commands: Commands) {
     commands.remove_resource::<EcologyState>();
-    commands.remove_resource::<EcologyMaterials>();
 }
 
 #[cfg(test)]

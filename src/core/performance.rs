@@ -30,6 +30,7 @@ impl Default for PerformanceSessionId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PerformancePhase {
+    Assets,
     Director,
     Ecology,
     Environment,
@@ -45,7 +46,8 @@ pub enum PerformancePhase {
 }
 
 impl PerformancePhase {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
+        Self::Assets,
         Self::Director,
         Self::Ecology,
         Self::Environment,
@@ -62,6 +64,7 @@ impl PerformancePhase {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Assets => "assets",
             Self::Director => "director",
             Self::Ecology => "ecology",
             Self::Environment => "environment",
@@ -258,6 +261,7 @@ pub fn track_frame_timing(
 
     if should_log_frame(snapshot.frame_count, config.performance_detail_interval) {
         let environment_ms = performance.previous_frame_phase_ms(PerformancePhase::Environment);
+        let assets_ms = performance.previous_frame_phase_ms(PerformancePhase::Assets);
         let director_ms = performance.previous_frame_phase_ms(PerformancePhase::Director);
         let ecology_ms = performance.previous_frame_phase_ms(PerformancePhase::Ecology);
         let landmarks_ms = performance.previous_frame_phase_ms(PerformancePhase::Landmarks);
@@ -286,6 +290,7 @@ pub fn track_frame_timing(
             budget_ms = config.quality.frame_time_budget_ms,
             budget_delta_ms = snapshot.frame_ms - config.quality.frame_time_budget_ms,
             profiled_phase_ms = profiled_phase_ms,
+            assets_ms = assets_ms,
             director_ms = director_ms,
             ecology_ms = ecology_ms,
             environment_ms = environment_ms,

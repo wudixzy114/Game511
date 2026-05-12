@@ -1112,8 +1112,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::core::config::{
-        AppConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig, PlayerConfig,
-        PresentationConfig, QualityConfig, SignConfig, WorldConfig,
+        AppConfig, AssetConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig,
+        PlayerConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
     };
 
     use super::{
@@ -1250,6 +1250,12 @@ mod tests {
                 state_update_interval_seconds: 0.2,
                 visual_update_interval_seconds: 0.066,
                 max_visible_bird_distance: 240.0,
+            },
+            assets: AssetConfig {
+                color_saturation: 1.0,
+                warm_light_intensity: 1.0,
+                water_alpha: 0.64,
+                shadow_alpha: 0.58,
             },
             desert: DesertConfig {
                 dune_height: 3.2,

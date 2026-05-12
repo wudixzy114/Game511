@@ -1,12 +1,10 @@
-use bevy::{
-    color::LinearRgba,
-    math::primitives::{Capsule3d, Cuboid, Cylinder},
-    pbr::MeshMaterial3d,
-    prelude::*,
-};
+use bevy::prelude::*;
 
 use crate::game::{
-    assets::{ProceduralAsset, ProceduralAssetKind, registered_spec},
+    assets::{
+        ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials, ProceduralSpawnRequest,
+        spawn_procedural_asset, spawn_procedural_asset_entity,
+    },
     flow::{AppScreen, InGameState},
     intent::{IntentState, apply_village_dialogue_intent},
     notebook::{
@@ -24,10 +22,7 @@ type VillageInitQueries<'w, 's> = (
     Query<'w, 's, &'static mut Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 );
 
-type VillageInitAssets<'w> = (
-    ResMut<'w, Assets<Mesh>>,
-    ResMut<'w, Assets<StandardMaterial>>,
-);
+type VillageInitAssets<'w> = (ResMut<'w, Assets<Mesh>>, Res<'w, ProceduralAssetMaterials>);
 
 impl Plugin for VillagePlugin {
     fn build(&self, app: &mut App) {
@@ -151,19 +146,6 @@ struct VillageActor {
 #[derive(Debug, Component)]
 struct VillageVisual;
 
-#[derive(Debug, Resource, Clone)]
-struct VillageMaterials {
-    wall: Handle<StandardMaterial>,
-    roof: Handle<StandardMaterial>,
-    wood: Handle<StandardMaterial>,
-    stone: Handle<StandardMaterial>,
-    cloth: Handle<StandardMaterial>,
-    water: Handle<StandardMaterial>,
-    wool: Handle<StandardMaterial>,
-    npc: Handle<StandardMaterial>,
-    marker: Handle<StandardMaterial>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VillageLayoutConfig {
     pub house_count: usize,
@@ -208,21 +190,8 @@ fn initialize_village_session(
 
     let origin = choose_village_origin(&world_map, spots.meadow.position);
     let layout = build_layout_internal(&world_map, origin, VillageLayoutConfig::default());
-    let village_materials = VillageMaterials::new(&mut assets.1);
-    spawn_village_visuals(
-        &mut commands,
-        &mut assets.0,
-        &village_materials,
-        &layout,
-        &world_map,
-    );
-    spawn_village_actors(
-        &mut commands,
-        &mut assets.0,
-        &village_materials,
-        &layout,
-        &world_map,
-    );
+    spawn_village_visuals(&mut commands, &mut assets.0, &assets.1, &layout, &world_map);
+    spawn_village_actors(&mut commands, &mut assets.0, &assets.1, &layout, &world_map);
 
     tracing::info!(
         target: "dao_game::village::generation",
@@ -244,12 +213,10 @@ fn initialize_village_session(
     };
     bootstrap_player_to_village(&world_map, &mut state, &mut queries.0, &mut queries.1);
     commands.insert_resource(state);
-    commands.insert_resource(village_materials);
 }
 
 fn cleanup_village_session(mut commands: Commands) {
     commands.remove_resource::<VillageState>();
-    commands.remove_resource::<VillageMaterials>();
 }
 
 fn bootstrap_player_to_village(
@@ -446,7 +413,7 @@ fn ground_position(world_map: &WorldMap, position: Vec3, y_offset: f32) -> Vec3 
 fn spawn_village_visuals(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     layout: &VillageLayout,
     world_map: &WorldMap,
 ) {
@@ -480,56 +447,49 @@ fn spawn_village_visuals(
 fn spawn_house(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     position: Vec3,
     index: usize,
 ) {
     let yaw = index as f32 * 0.43;
-    parent.spawn((
-        Name::new("VillageHouseBody"),
-        Mesh3d(meshes.add(Mesh::from(Cuboid::new(4.8, 2.4, 4.0)))),
-        MeshMaterial3d(materials.wall.clone()),
-        Transform::from_translation(position + Vec3::Y * 1.2)
-            .with_rotation(Quat::from_rotation_y(yaw)),
-        procedural_asset(ProceduralAssetKind::VillageHouse, index as u64 * 10),
-    ));
-    parent.spawn((
-        Name::new("VillageHouseRoof"),
-        Mesh3d(meshes.add(Mesh::from(Cuboid::new(5.4, 0.75, 4.6)))),
-        MeshMaterial3d(materials.roof.clone()),
-        Transform::from_translation(position + Vec3::Y * 2.75)
-            .with_rotation(Quat::from_rotation_y(yaw))
-            .with_scale(Vec3::new(1.0, 1.0, 1.0)),
-        procedural_asset(ProceduralAssetKind::VillageHouse, index as u64 * 10 + 1),
-    ));
+    spawn_procedural_asset(
+        parent,
+        meshes,
+        materials,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::VillageHouse,
+            index as u64,
+            "VillageHouse",
+            Transform::from_translation(position).with_rotation(Quat::from_rotation_y(yaw)),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
 }
 
 fn spawn_well(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     position: Vec3,
 ) {
-    parent.spawn((
-        Name::new("VillageWell"),
-        Mesh3d(meshes.add(Mesh::from(Cylinder::new(1.1, 0.8)))),
-        MeshMaterial3d(materials.stone.clone()),
-        Transform::from_translation(position + Vec3::Y * 0.4),
-        procedural_asset(ProceduralAssetKind::VillageWell, 1),
-    ));
-    parent.spawn((
-        Name::new("VillageWellWater"),
-        Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.82, 0.05)))),
-        MeshMaterial3d(materials.water.clone()),
-        Transform::from_translation(position + Vec3::Y * 0.84),
-        procedural_asset(ProceduralAssetKind::VillageWell, 2),
-    ));
+    spawn_procedural_asset(
+        parent,
+        meshes,
+        materials,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::VillageWell,
+            1,
+            "VillageWell",
+            Transform::from_translation(position),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
 }
 
 fn spawn_sheep_pen(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     position: Vec3,
 ) {
     for side in 0..4 {
@@ -540,90 +500,95 @@ fn spawn_sheep_pen(
             2 => Vec3::new(-8.0, 0.55, 0.0),
             _ => Vec3::new(8.0, 0.55, 0.0),
         };
-        let size = if horizontal {
-            Cuboid::new(15.5, 0.22, 0.24)
+        let rotation = if horizontal {
+            Quat::IDENTITY
         } else {
-            Cuboid::new(0.24, 0.22, 15.5)
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
         };
-        parent.spawn((
-            Name::new("SheepPenRail"),
-            Mesh3d(meshes.add(Mesh::from(size))),
-            MeshMaterial3d(materials.wood.clone()),
-            Transform::from_translation(position + offset),
-            procedural_asset(ProceduralAssetKind::SheepPenRail, side as u64),
-        ));
+        spawn_procedural_asset(
+            parent,
+            meshes,
+            materials,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::SheepPenRail,
+                side as u64,
+                "SheepPenRail",
+                Transform::from_translation(position + offset).with_rotation(rotation),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
     }
 }
 
 fn spawn_market(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     position: Vec3,
 ) {
-    parent.spawn((
-        Name::new("MarketStallCounter"),
-        Mesh3d(meshes.add(Mesh::from(Cuboid::new(4.8, 0.7, 1.4)))),
-        MeshMaterial3d(materials.wood.clone()),
-        Transform::from_translation(position + Vec3::new(0.0, 0.45, 0.0)),
-        procedural_asset(ProceduralAssetKind::MarketStall, 1),
-    ));
-    parent.spawn((
-        Name::new("MarketStallCloth"),
-        Mesh3d(meshes.add(Mesh::from(Cuboid::new(5.4, 0.15, 3.0)))),
-        MeshMaterial3d(materials.cloth.clone()),
-        Transform::from_translation(position + Vec3::new(0.0, 2.1, -0.2)),
-        procedural_asset(ProceduralAssetKind::MarketStall, 2),
-    ));
+    spawn_procedural_asset(
+        parent,
+        meshes,
+        materials,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::MarketStall,
+            1,
+            "MarketStall",
+            Transform::from_translation(position),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
 }
 
 fn spawn_shore(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     position: Vec3,
     _world_map: &WorldMap,
 ) {
-    parent.spawn((
-        Name::new("VillageShoreWater"),
-        Mesh3d(meshes.add(Mesh::from(Cylinder::new(18.0, 0.04)))),
-        MeshMaterial3d(materials.water.clone()),
-        Transform::from_translation(position + Vec3::Y * 0.03)
-            .with_scale(Vec3::new(1.45, 1.0, 0.52)),
-        procedural_asset(ProceduralAssetKind::VillageShore, 1),
-    ));
-    parent.spawn((
-        Name::new("VillageShoreSand"),
-        Mesh3d(meshes.add(Mesh::from(Cuboid::new(28.0, 0.08, 5.0)))),
-        MeshMaterial3d(materials.marker.clone()),
-        Transform::from_translation(position + Vec3::new(0.0, 0.05, -5.5)),
-        procedural_asset(ProceduralAssetKind::VillageShore, 2),
-    ));
+    spawn_procedural_asset(
+        parent,
+        meshes,
+        materials,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::VillageShore,
+            1,
+            "VillageShore",
+            Transform::from_translation(position),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
 }
 
 fn spawn_path_marker(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     position: Vec3,
 ) {
     for index in 0..5 {
-        parent.spawn((
-            Name::new("OuterPathStone"),
-            Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.45, 0.16)))),
-            MeshMaterial3d(materials.stone.clone()),
-            Transform::from_translation(
-                position + Vec3::new((index as f32 - 2.0) * 1.8, 0.08, index as f32 * -1.1),
-            ),
-            procedural_asset(ProceduralAssetKind::PathStone, index as u64),
-        ));
+        spawn_procedural_asset(
+            parent,
+            meshes,
+            materials,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::PathStone,
+                index as u64,
+                "OuterPathStone",
+                Transform::from_translation(
+                    position + Vec3::new((index as f32 - 2.0) * 1.8, 0.0, index as f32 * -1.1),
+                ),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
     }
 }
 
 fn spawn_village_actors(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &VillageMaterials,
+    materials: &ProceduralAssetMaterials,
     layout: &VillageLayout,
     world_map: &WorldMap,
 ) {
@@ -632,21 +597,25 @@ fn spawn_village_actors(
         let position = ground_position(world_map, actor.home, actor_y_offset(actor.kind));
         match actor.kind {
             VillageActorKind::Sheep => {
-                commands.spawn((
-                    Name::new("VillageSheep"),
-                    DespawnOnExit(AppScreen::InGame),
-                    Mesh3d(meshes.add(Mesh::from(Capsule3d::new(0.42, 0.72)))),
-                    MeshMaterial3d(materials.wool.clone()),
-                    Transform::from_translation(position).with_scale(Vec3::new(1.2, 0.82, 0.82)),
-                    VillageActor {
-                        id: actor.id,
-                        kind: actor.kind,
-                        home: actor.home,
-                        radius: actor.radius,
-                        seed,
-                    },
-                    procedural_asset(ProceduralAssetKind::Sheep, actor.id),
-                ));
+                let entity = spawn_procedural_asset_entity(
+                    commands,
+                    meshes,
+                    materials,
+                    ProceduralSpawnRequest::new(
+                        ProceduralAssetKind::Sheep,
+                        actor.id,
+                        "VillageSheep",
+                        Transform::from_translation(position),
+                    )
+                    .with_lod(ProceduralAssetLod::Near),
+                );
+                commands.entity(entity).insert(VillageActor {
+                    id: actor.id,
+                    kind: actor.kind,
+                    home: actor.home,
+                    radius: actor.radius,
+                    seed,
+                });
             }
             VillageActorKind::Shepherd | VillageActorKind::Merchant => {
                 let asset_kind = match actor.kind {
@@ -654,21 +623,25 @@ fn spawn_village_actors(
                     VillageActorKind::Merchant => ProceduralAssetKind::Merchant,
                     VillageActorKind::Sheep => ProceduralAssetKind::Sheep,
                 };
-                commands.spawn((
-                    Name::new(actor.kind.label()),
-                    DespawnOnExit(AppScreen::InGame),
-                    Mesh3d(meshes.add(Mesh::from(Capsule3d::new(0.36, 1.35)))),
-                    MeshMaterial3d(materials.npc.clone()),
-                    Transform::from_translation(position),
-                    VillageActor {
-                        id: actor.id,
-                        kind: actor.kind,
-                        home: actor.home,
-                        radius: actor.radius,
-                        seed,
-                    },
-                    procedural_asset(asset_kind, actor.id),
-                ));
+                let entity = spawn_procedural_asset_entity(
+                    commands,
+                    meshes,
+                    materials,
+                    ProceduralSpawnRequest::new(
+                        asset_kind,
+                        actor.id,
+                        actor.kind.label(),
+                        Transform::from_translation(position),
+                    )
+                    .with_lod(ProceduralAssetLod::Near),
+                );
+                commands.entity(entity).insert(VillageActor {
+                    id: actor.id,
+                    kind: actor.kind,
+                    home: actor.home,
+                    radius: actor.radius,
+                    seed,
+                });
             }
         }
     }
@@ -905,61 +878,6 @@ fn village_interaction_record(kind: VillageActorKind, at_seconds: f32) -> Notebo
     }
 }
 
-impl VillageMaterials {
-    fn new(materials: &mut Assets<StandardMaterial>) -> Self {
-        Self {
-            wall: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.56, 0.48, 0.36),
-                perceptual_roughness: 0.9,
-                ..Default::default()
-            }),
-            roof: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.34, 0.24, 0.18),
-                perceptual_roughness: 0.95,
-                ..Default::default()
-            }),
-            wood: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.32, 0.23, 0.15),
-                perceptual_roughness: 0.92,
-                ..Default::default()
-            }),
-            stone: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.46, 0.45, 0.41),
-                perceptual_roughness: 0.98,
-                ..Default::default()
-            }),
-            cloth: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.58, 0.28, 0.22),
-                perceptual_roughness: 0.86,
-                ..Default::default()
-            }),
-            water: materials.add(StandardMaterial {
-                base_color: Color::srgba(0.2, 0.52, 0.64, 0.68),
-                alpha_mode: AlphaMode::Blend,
-                metallic: 0.02,
-                perceptual_roughness: 0.18,
-                emissive: LinearRgba::rgb(0.02, 0.05, 0.06),
-                ..Default::default()
-            }),
-            wool: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.86, 0.82, 0.72),
-                perceptual_roughness: 0.98,
-                ..Default::default()
-            }),
-            npc: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.62, 0.52, 0.38),
-                perceptual_roughness: 0.9,
-                ..Default::default()
-            }),
-            marker: materials.add(StandardMaterial {
-                base_color: Color::srgb(0.64, 0.58, 0.42),
-                perceptual_roughness: 1.0,
-                ..Default::default()
-            }),
-        }
-    }
-}
-
 fn stable_actor_id(index: u64, kind: VillageActorKind) -> u64 {
     let salt = match kind {
         VillageActorKind::Sheep => 11,
@@ -972,10 +890,6 @@ fn stable_actor_id(index: u64, kind: VillageActorKind) -> u64 {
     value ^ (value >> 27)
 }
 
-fn procedural_asset(kind: ProceduralAssetKind, seed_salt: u64) -> ProceduralAsset {
-    ProceduralAsset::new(registered_spec(kind).instance(seed_salt))
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -984,8 +898,8 @@ mod tests {
 
     use crate::{
         core::config::{
-            AppConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig, PlayerConfig,
-            PresentationConfig, QualityConfig, SignConfig, WorldConfig,
+            AppConfig, AssetConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig,
+            PlayerConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
         },
         game::{
             village::{
@@ -1160,6 +1074,12 @@ mod tests {
                 state_update_interval_seconds: 0.2,
                 visual_update_interval_seconds: 0.066,
                 max_visible_bird_distance: 240.0,
+            },
+            assets: AssetConfig {
+                color_saturation: 1.0,
+                warm_light_intensity: 1.0,
+                water_alpha: 0.64,
+                shadow_alpha: 0.58,
             },
             desert: DesertConfig {
                 dune_height: 3.2,

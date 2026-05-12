@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub player: PlayerConfig,
     pub camera: CameraConfig,
     pub ecology: EcologyConfig,
+    pub assets: AssetConfig,
     pub desert: DesertConfig,
     pub signs: SignConfig,
     pub quality: QualityConfig,
@@ -109,6 +110,14 @@ pub struct EcologyConfig {
     pub state_update_interval_seconds: f32,
     pub visual_update_interval_seconds: f32,
     pub max_visible_bird_distance: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AssetConfig {
+    pub color_saturation: f32,
+    pub warm_light_intensity: f32,
+    pub water_alpha: f32,
+    pub shadow_alpha: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -248,6 +257,12 @@ state_update_interval_seconds = 0.2
 visual_update_interval_seconds = 0.066
 max_visible_bird_distance = 240.0
 
+[assets]
+color_saturation = 1.0
+warm_light_intensity = 1.0
+water_alpha = 0.64
+shadow_alpha = 0.58
+
 [desert]
 dune_height = 3.2
 dune_frequency = 0.22
@@ -309,6 +324,10 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.player.contact_substeps, 4);
         assert_eq!(config.camera.third_person_default_distance, 6.2);
         assert_eq!(config.ecology.bird_count, 18);
+        assert_eq!(config.assets.color_saturation, 1.0);
+        assert_eq!(config.assets.warm_light_intensity, 1.0);
+        assert_eq!(config.assets.water_alpha, 0.64);
+        assert_eq!(config.assets.shadow_alpha, 0.58);
         assert_eq!(config.desert.dune_height, 3.2);
         assert_eq!(config.environment.day_length_seconds, 180.0);
         assert_eq!(config.environment.wander_radius, 4.5);

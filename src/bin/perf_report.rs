@@ -11,7 +11,8 @@ use serde_json::{Map, Value};
 
 const DEFAULT_LOG_DIR: &str = "logs";
 const DEFAULT_PERF_LOG_NAME: &str = "performance.log";
-const DETAIL_PHASES: [&str; 12] = [
+const DETAIL_PHASES: [&str; 13] = [
+    "assets",
     "director",
     "ecology",
     "environment",
@@ -1831,8 +1832,8 @@ mod tests {
             &path,
             concat!(
                 "{\"target\":\"dao_game::performance::session_start\",\"fields\":{\"session_id\":\"77\",\"budget_ms\":16.6}}\n",
-                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"77\",\"frame\":1,\"frame_ms\":10.0,\"average_ms\":10.0,\"budget_ms\":16.6,\"profiled_phase_ms\":3.0,\"ui_ms\":1.0,\"world_streaming_ms\":2.0}}\n",
-                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"77\",\"frame\":2,\"frame_ms\":20.0,\"average_ms\":11.0,\"budget_ms\":16.6,\"profiled_phase_ms\":6.0,\"ui_ms\":2.0,\"world_streaming_ms\":4.0}}\n",
+                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"77\",\"frame\":1,\"frame_ms\":10.0,\"average_ms\":10.0,\"budget_ms\":16.6,\"profiled_phase_ms\":3.25,\"assets_ms\":0.25,\"ui_ms\":1.0,\"world_streaming_ms\":2.0}}\n",
+                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"77\",\"frame\":2,\"frame_ms\":20.0,\"average_ms\":11.0,\"budget_ms\":16.6,\"profiled_phase_ms\":6.50,\"assets_ms\":0.5,\"ui_ms\":2.0,\"world_streaming_ms\":4.0}}\n",
                 "{\"target\":\"dao_game::performance::session\",\"fields\":{\"session_id\":\"77\",\"frames\":2,\"over_budget_frames\":1,\"worst_frame_ms\":20.0,\"average_frame_ms\":15.0,\"average_over_budget_frame_ms\":20.0,\"hot_phase_1_name\":\"world_streaming\",\"hot_phase_1_avg_ms\":3.0,\"hot_phase_1_max_ms\":4.0}}\n"
             ),
         )
@@ -1848,6 +1849,9 @@ mod tests {
         let streaming = report.phase_totals.get("world_streaming").unwrap();
         assert_eq!(streaming.total_ms, 6.0);
         assert_eq!(streaming.max_ms, 4.0);
+        let assets = report.phase_totals.get("assets").unwrap();
+        assert_eq!(assets.total_ms, 0.75);
+        assert_eq!(assets.max_ms, 0.5);
 
         let _ = fs::remove_file(path);
     }

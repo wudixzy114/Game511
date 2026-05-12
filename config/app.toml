@@ -77,6 +77,12 @@ state_update_interval_seconds = 0.2
 visual_update_interval_seconds = 0.066
 max_visible_bird_distance = 240.0
 
+[assets]
+color_saturation = 1.0
+warm_light_intensity = 1.0
+water_alpha = 0.64
+shadow_alpha = 0.58
+
 [desert]
 dune_height = 3.2
 dune_frequency = 0.22
