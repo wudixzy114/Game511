@@ -4,8 +4,10 @@ use bevy::prelude::*;
 
 use crate::game::{
     flow::{AppScreen, InGameState},
+    notebook::{NotebookState, dream_record, record_notebook_entry},
     places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance},
     signs::{OmenKind, SignState},
+    village::{VillageAreaKind, VillageState},
     world::{BiomeKind, WandererPrototype, WorldCamera, WorldGridCoord},
 };
 
@@ -36,6 +38,11 @@ pub struct JourneyState {
     pub memories: Vec<JourneyMemory>,
     pub session_elapsed: f32,
     pub stage_elapsed: f32,
+    pub story_stage: StoryArcStage,
+    pub story_elapsed: f32,
+    pub village_day: u32,
+    pub dream: DreamState,
+    pub long_term_goal: Option<LongTermGoal>,
     pub last_distance_to_target: Option<f32>,
     pub last_player_position: Option<Vec3>,
 }
@@ -51,6 +58,11 @@ impl Default for JourneyState {
             memories: Vec::new(),
             session_elapsed: 0.0,
             stage_elapsed: 0.0,
+            story_stage: StoryArcStage::VillageAwakening,
+            story_elapsed: 0.0,
+            village_day: 1,
+            dream: DreamState::default(),
+            long_term_goal: None,
             last_distance_to_target: None,
             last_player_position: None,
         }
@@ -65,6 +77,78 @@ pub enum JourneyStage {
     PlaceReached,
     WorldResponded,
     EchoSettled,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum StoryArcStage {
+    VillageAwakening,
+    VillageLife,
+    DreamApproaching,
+    Dreaming,
+    DreamAfterglow,
+}
+
+impl StoryArcStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::VillageAwakening => "村庄醒来",
+            Self::VillageLife => "村庄生活",
+            Self::DreamApproaching => "梦境将至",
+            Self::Dreaming => "梦中沙暴",
+            Self::DreamAfterglow => "梦后回响",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DreamState {
+    pub phase: DreamPhase,
+    pub phase_elapsed: f32,
+    pub seen_pyramid: bool,
+    pub echo_strength: f32,
+}
+
+impl Default for DreamState {
+    fn default() -> Self {
+        Self {
+            phase: DreamPhase::Unseen,
+            phase_elapsed: 0.0,
+            seen_pyramid: false,
+            echo_strength: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum DreamPhase {
+    Unseen,
+    Ready,
+    InDream,
+    Afterglow,
+}
+
+impl DreamPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unseen => "未入梦",
+            Self::Ready => "梦将至",
+            Self::InDream => "梦中",
+            Self::Afterglow => "梦后",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum LongTermGoal {
+    DesertPyramid,
+}
+
+impl LongTermGoal {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DesertPyramid => "沙漠金字塔",
+        }
+    }
 }
 
 impl JourneyStage {
@@ -129,6 +213,7 @@ pub enum JourneyMemoryKind {
     Arrival,
     Response,
     Echo,
+    Dream,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -201,6 +286,16 @@ pub enum JourneyEvent {
         to: JourneyStage,
         at_seconds: f32,
     },
+    StoryStageChanged {
+        from: StoryArcStage,
+        to: StoryArcStage,
+        at_seconds: f32,
+    },
+    DreamChanged {
+        from: DreamPhase,
+        to: DreamPhase,
+        at_seconds: f32,
+    },
     InteractionCompleted {
         kind: JourneyInteractionKind,
         at_seconds: f32,
@@ -220,6 +315,8 @@ pub struct JourneyAdvanceContext {
     pub calm: f32,
     pub omen_triggered: bool,
     pub current_omen: Option<OmenKind>,
+    pub village_focus: bool,
+    pub leaving_village: bool,
 }
 
 const DEFAULT_ARRIVAL_RADIUS: f32 = 13.5;
@@ -233,6 +330,9 @@ const GAZE_ALIGNMENT_THRESHOLD: f32 = 0.82;
 const LISTEN_CALM_THRESHOLD: f32 = 0.72;
 const RESPONSE_DURATION_SECONDS: f32 = 7.5;
 const ECHO_DELAY_SECONDS: f32 = 2.1;
+const VILLAGE_LIFE_SECONDS: f32 = 9.0;
+const DREAM_READY_SECONDS: f32 = 5.0;
+const DREAM_DURATION_SECONDS: f32 = 5.8;
 const MAX_OMEN_MEMORIES: usize = 12;
 const MAX_JOURNEY_MEMORIES: usize = 16;
 
@@ -300,7 +400,9 @@ fn select_journey_target(
 fn advance_journey_session(
     time: Res<Time>,
     signs: Option<Res<SignState>>,
+    village: Option<Res<VillageState>>,
     journey: Option<ResMut<JourneyState>>,
+    mut notebook: Option<ResMut<NotebookState>>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 ) {
@@ -323,6 +425,7 @@ fn advance_journey_session(
             None => look_alignment(transform, target.position),
         });
     let sign_state = signs.as_deref();
+    let village_context = village_context(village.as_deref(), transform.translation);
     let events = advance_journey_state(
         &mut journey,
         JourneyAdvanceContext {
@@ -335,11 +438,25 @@ fn advance_journey_session(
             calm: sign_state.map_or(1.0, |signs| signs.calm),
             omen_triggered: sign_state.is_some_and(|signs| signs.omen_triggered),
             current_omen: sign_state.and_then(|signs| signs.current_omen),
+            village_focus: village_context.0,
+            leaving_village: village_context.1,
         },
     );
 
     for event in &events {
         log_journey_event(event);
+        if matches!(
+            event,
+            JourneyEvent::DreamChanged {
+                to: DreamPhase::Afterglow,
+                ..
+            }
+        ) {
+            let _ = record_notebook_entry(
+                notebook.as_deref_mut(),
+                dream_record(journey.session_elapsed),
+            );
+        }
     }
 }
 
@@ -351,12 +468,16 @@ pub fn advance_journey_state(
     let delta_seconds = context.delta_seconds.max(0.0);
     state.session_elapsed += delta_seconds;
     state.stage_elapsed += delta_seconds;
+    state.story_elapsed += delta_seconds;
+    state.dream.phase_elapsed += delta_seconds;
+    state.village_day = village_day_for_elapsed(state.session_elapsed);
     let player_speed = state
         .last_player_position
         .map(|last| planar_distance(last, context.player_position) / delta_seconds.max(0.001))
         .unwrap_or(0.0);
     state.last_player_position = Some(context.player_position);
     advance_response_state(&mut state.response, delta_seconds);
+    advance_story_arc_state(state, context, &mut events);
 
     if let Some(distance) = context.distance_to_target {
         state.last_distance_to_target = Some(distance);
@@ -437,6 +558,111 @@ fn transition_stage(state: &mut JourneyState, next: JourneyStage, events: &mut V
         to: next,
         at_seconds: state.session_elapsed,
     });
+}
+
+fn transition_story_stage(
+    state: &mut JourneyState,
+    next: StoryArcStage,
+    events: &mut Vec<JourneyEvent>,
+) {
+    if state.story_stage == next {
+        return;
+    }
+    let previous = state.story_stage;
+    state.story_stage = next;
+    state.story_elapsed = 0.0;
+    events.push(JourneyEvent::StoryStageChanged {
+        from: previous,
+        to: next,
+        at_seconds: state.session_elapsed,
+    });
+}
+
+fn transition_dream_phase(
+    state: &mut JourneyState,
+    next: DreamPhase,
+    events: &mut Vec<JourneyEvent>,
+) {
+    if state.dream.phase == next {
+        return;
+    }
+    let previous = state.dream.phase;
+    state.dream.phase = next;
+    state.dream.phase_elapsed = 0.0;
+    if next == DreamPhase::InDream {
+        state.dream.seen_pyramid = true;
+    }
+    if next == DreamPhase::Afterglow {
+        state.long_term_goal = Some(LongTermGoal::DesertPyramid);
+        state.dream.echo_strength = 1.0;
+        record_dream_memory(state);
+    }
+    events.push(JourneyEvent::DreamChanged {
+        from: previous,
+        to: next,
+        at_seconds: state.session_elapsed,
+    });
+}
+
+fn advance_story_arc_state(
+    state: &mut JourneyState,
+    context: JourneyAdvanceContext,
+    events: &mut Vec<JourneyEvent>,
+) {
+    state.dream.echo_strength = match state.dream.phase {
+        DreamPhase::Afterglow => {
+            let drift = if context.leaving_village {
+                -0.012
+            } else {
+                -0.028
+            };
+            (state.dream.echo_strength + drift * context.delta_seconds).clamp(0.18, 1.0)
+        }
+        DreamPhase::InDream => 1.0,
+        DreamPhase::Ready => 0.45,
+        DreamPhase::Unseen => 0.0,
+    };
+
+    match state.story_stage {
+        StoryArcStage::VillageAwakening => {
+            if state.story_elapsed >= 2.0 || context.village_focus {
+                transition_story_stage(state, StoryArcStage::VillageLife, events);
+            }
+        }
+        StoryArcStage::VillageLife => {
+            if state.story_elapsed >= VILLAGE_LIFE_SECONDS || state.village_day >= 2 {
+                transition_story_stage(state, StoryArcStage::DreamApproaching, events);
+                transition_dream_phase(state, DreamPhase::Ready, events);
+            }
+        }
+        StoryArcStage::DreamApproaching => {
+            if state.dream.phase_elapsed >= DREAM_READY_SECONDS || context.leaving_village {
+                transition_story_stage(state, StoryArcStage::Dreaming, events);
+                transition_dream_phase(state, DreamPhase::InDream, events);
+            }
+        }
+        StoryArcStage::Dreaming => {
+            if state.dream.phase_elapsed >= DREAM_DURATION_SECONDS {
+                transition_story_stage(state, StoryArcStage::DreamAfterglow, events);
+                transition_dream_phase(state, DreamPhase::Afterglow, events);
+            }
+        }
+        StoryArcStage::DreamAfterglow => {}
+    }
+}
+
+fn record_dream_memory(state: &mut JourneyState) {
+    let memory = JourneyMemory {
+        kind: JourneyMemoryKind::Dream,
+        stage: state.stage,
+        at_seconds: state.session_elapsed,
+        position: state.last_player_position.unwrap_or(Vec3::ZERO),
+        place_kind: None,
+        omen: Some(OmenKind::DawnLight),
+        interaction: None,
+        text: "梦里有沙暴、巨大金字塔，以及金字塔下的宝藏。".to_string(),
+    };
+    push_bounded(&mut state.memories, memory, MAX_JOURNEY_MEMORIES);
 }
 
 fn record_journey_memory(
@@ -581,6 +807,7 @@ fn memory_text(
             None => format!("{place}回应了你的停留。"),
         },
         JourneyMemoryKind::Echo => format!("{place}的回响沉入记忆。"),
+        JourneyMemoryKind::Dream => "梦里有沙暴、巨大金字塔，以及金字塔下的宝藏。".to_string(),
     }
 }
 
@@ -612,6 +839,32 @@ fn log_journey_event(event: &JourneyEvent) {
                 to = to.label(),
                 at_seconds,
                 "journey stage advanced"
+            );
+        }
+        JourneyEvent::StoryStageChanged {
+            from,
+            to,
+            at_seconds,
+        } => {
+            tracing::info!(
+                target: "dao_game::journey::story",
+                from = from.label(),
+                to = to.label(),
+                at_seconds,
+                "story arc stage advanced"
+            );
+        }
+        JourneyEvent::DreamChanged {
+            from,
+            to,
+            at_seconds,
+        } => {
+            tracing::info!(
+                target: "dao_game::journey::dream",
+                from = from.label(),
+                to = to.label(),
+                at_seconds,
+                "dream phase changed"
             );
         }
         JourneyEvent::OmenRecorded(memory) => {
@@ -665,6 +918,33 @@ fn smoothstep_unit(value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+fn village_day_for_elapsed(session_elapsed: f32) -> u32 {
+    (session_elapsed.max(0.0) / 24.0).floor() as u32 + 1
+}
+
+fn village_context(village: Option<&VillageState>, player_position: Vec3) -> (bool, bool) {
+    let Some(village) = village else {
+        return (false, false);
+    };
+    let village_focus = village
+        .areas
+        .iter()
+        .filter(|area| {
+            matches!(
+                area.kind,
+                VillageAreaKind::Shore
+                    | VillageAreaKind::SheepPen
+                    | VillageAreaKind::Market
+                    | VillageAreaKind::Well
+            )
+        })
+        .any(|area| planar_distance(player_position, area.position) <= area.radius);
+    let leaving_village = village
+        .area(VillageAreaKind::OuterPath)
+        .is_some_and(|area| planar_distance(player_position, area.position) <= area.radius);
+    (village_focus, leaving_village)
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::{
@@ -675,9 +955,9 @@ mod tests {
     use crate::game::{
         flow::{AppScreen, InGameState},
         journey::{
-            JourneyAdvanceContext, JourneyEvent, JourneyInteractionKind, JourneyMemoryKind,
-            JourneyPlaceKind, JourneyPlugin, JourneyStage, JourneyState, JourneyTarget,
-            advance_journey_state, format_journey_memory_line,
+            DreamPhase, JourneyAdvanceContext, JourneyEvent, JourneyInteractionKind,
+            JourneyMemoryKind, JourneyPlaceKind, JourneyPlugin, JourneyStage, JourneyState,
+            JourneyTarget, StoryArcStage, advance_journey_state, format_journey_memory_line,
         },
         signs::OmenKind,
         world::{BiomeKind, WorldGridCoord},
@@ -710,6 +990,8 @@ mod tests {
             calm: 0.8,
             omen_triggered,
             current_omen: omen_triggered.then_some(OmenKind::GroveWhisper),
+            village_focus: false,
+            leaving_village: false,
         }
     }
 
@@ -718,6 +1000,8 @@ mod tests {
         let state = JourneyState::default();
 
         assert_eq!(state.stage, JourneyStage::FirstArrival);
+        assert_eq!(state.story_stage, StoryArcStage::VillageAwakening);
+        assert_eq!(state.dream.phase, DreamPhase::Unseen);
         assert!(state.target.is_none());
         assert!(state.triggered_omens.is_empty());
         assert!(state.memories.is_empty());
@@ -906,6 +1190,67 @@ mod tests {
             events
                 .iter()
                 .all(|event| !matches!(event, JourneyEvent::StageChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn story_arc_reaches_dream_after_village_life() {
+        let mut state = JourneyState::default();
+
+        let events = advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 2.1,
+                village_focus: true,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::VillageLife);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                JourneyEvent::StoryStageChanged {
+                    to: StoryArcStage::VillageLife,
+                    ..
+                }
+            )
+        }));
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 9.2,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::DreamApproaching);
+        assert_eq!(state.dream.phase, DreamPhase::Ready);
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 5.1,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::Dreaming);
+        assert_eq!(state.dream.phase, DreamPhase::InDream);
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 6.0,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::DreamAfterglow);
+        assert_eq!(state.dream.phase, DreamPhase::Afterglow);
+        assert!(state.long_term_goal.is_some());
+        assert!(
+            state
+                .memories
+                .iter()
+                .any(|memory| memory.kind == JourneyMemoryKind::Dream)
         );
     }
 

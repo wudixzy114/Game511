@@ -8,9 +8,13 @@ use crate::{
     game::{
         environment::WeatherKind,
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
-        journey::{JourneyAdvanceContext, JourneyStage, JourneyState, advance_journey_state},
+        journey::{
+            DreamPhase, JourneyAdvanceContext, JourneyStage, JourneyState, StoryArcStage,
+            advance_journey_state,
+        },
         places::{MeaningfulPlaces, PlaceKind, planar_distance},
         signs::{OmenKind, SignState},
+        village::{VillageAreaKind, VillageState},
         world::{
             BiomeKind, TerrainTile, WandererPrototype, WorldCamera, WorldMap,
             WorldPresentationControl,
@@ -69,6 +73,10 @@ struct PresentationScene {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PresentationJourneyStep {
     Scenic,
+    VillageBirth,
+    VillageLife,
+    Dream,
+    DreamEcho,
     Spawn,
     Omen,
     Approach,
@@ -96,6 +104,7 @@ fn initialize_presentation(
     config: Res<AppConfig>,
     world_map: Option<Res<WorldMap>>,
     places: Option<Res<MeaningfulPlaces>>,
+    village: Option<Res<VillageState>>,
     director: Option<Res<PresentationDirector>>,
 ) {
     if director.is_some() {
@@ -121,101 +130,102 @@ fn initialize_presentation(
     let meadow_anchor = find_anchor(&world_map, BiomeKind::Meadow).unwrap_or(grove_anchor);
     let steppe_anchor = find_anchor(&world_map, BiomeKind::Steppe).unwrap_or(meadow_anchor);
 
-    let scenes = build_journey_scenes(&places, &world_map).unwrap_or_else(|| {
-        vec![
-            build_scene(
-                "Panorama Sweep",
-                "overview of terrain layers, clear daylight and long-range sky tone",
-                meadow_anchor,
-                &world_map,
-                SceneVisuals {
-                    camera_offset: Vec3::new(-15.0, 9.5, 15.0),
-                    time_override: 0.18,
-                    weather: WeatherKind::Clear,
-                    expected_omen: None,
-                },
-                PresentationJourneyStep::Scenic,
-            ),
-            build_scene(
-                "Grove Whisper",
-                "misty grove atmosphere with close-range vegetation silhouettes",
-                grove_anchor,
-                &world_map,
-                SceneVisuals {
-                    camera_offset: Vec3::new(-6.0, 4.8, 7.0),
-                    time_override: 0.34,
-                    weather: WeatherKind::Mist,
-                    expected_omen: Some(OmenKind::GroveWhisper),
-                },
-                PresentationJourneyStep::Scenic,
-            ),
-            build_scene(
-                "Ridge Dawn",
-                "sunrise lighting shift with a clear east-west solar arc",
-                ridge_anchor,
-                &world_map,
-                SceneVisuals {
-                    camera_offset: Vec3::new(-9.0, 6.2, 10.0),
-                    time_override: 0.02,
-                    weather: WeatherKind::Clear,
-                    expected_omen: Some(OmenKind::DawnLight),
-                },
-                PresentationJourneyStep::Scenic,
-            ),
-            build_scene(
-                "Storm Front",
-                "heavy rain, dark atmosphere and lightning-driven contrast",
-                meadow_anchor,
-                &world_map,
-                SceneVisuals {
-                    camera_offset: Vec3::new(-8.5, 5.4, 9.5),
-                    time_override: 0.46,
-                    weather: WeatherKind::Storm,
-                    expected_omen: None,
-                },
-                PresentationJourneyStep::Scenic,
-            ),
-            build_scene(
-                "Snow Ridge",
-                "cold snowfall, reduced visibility and summit response",
-                ridge_anchor,
-                &world_map,
-                SceneVisuals {
-                    camera_offset: Vec3::new(-10.0, 7.0, 11.5),
-                    time_override: 0.61,
-                    weather: WeatherKind::Snow,
-                    expected_omen: Some(OmenKind::SummitCall),
-                },
-                PresentationJourneyStep::Scenic,
-            ),
-            build_scene(
-                "Starfield Watch",
-                "clear midnight sky for star visibility and moon transition",
-                steppe_anchor,
-                &world_map,
-                SceneVisuals {
-                    camera_offset: Vec3::new(-7.2, 4.5, 8.6),
-                    time_override: 0.76,
-                    weather: WeatherKind::Clear,
-                    expected_omen: None,
-                },
-                PresentationJourneyStep::Scenic,
-            ),
-            build_scene(
-                "Moonlit Water",
-                "waterline calm test with moonlight and cool omen response",
-                water_anchor,
-                &world_map,
-                SceneVisuals {
-                    camera_offset: Vec3::new(0.0, 4.2, 8.5),
-                    time_override: 0.84,
-                    weather: WeatherKind::Clear,
-                    expected_omen: Some(OmenKind::StillWater),
-                },
-                PresentationJourneyStep::Scenic,
-            ),
-        ]
-    });
+    let scenes =
+        build_presentation_scenes(village.as_deref(), &places, &world_map).unwrap_or_else(|| {
+            vec![
+                build_scene(
+                    "Panorama Sweep",
+                    "overview of terrain layers, clear daylight and long-range sky tone",
+                    meadow_anchor,
+                    &world_map,
+                    SceneVisuals {
+                        camera_offset: Vec3::new(-15.0, 9.5, 15.0),
+                        time_override: 0.18,
+                        weather: WeatherKind::Clear,
+                        expected_omen: None,
+                    },
+                    PresentationJourneyStep::Scenic,
+                ),
+                build_scene(
+                    "Grove Whisper",
+                    "misty grove atmosphere with close-range vegetation silhouettes",
+                    grove_anchor,
+                    &world_map,
+                    SceneVisuals {
+                        camera_offset: Vec3::new(-6.0, 4.8, 7.0),
+                        time_override: 0.34,
+                        weather: WeatherKind::Mist,
+                        expected_omen: Some(OmenKind::GroveWhisper),
+                    },
+                    PresentationJourneyStep::Scenic,
+                ),
+                build_scene(
+                    "Ridge Dawn",
+                    "sunrise lighting shift with a clear east-west solar arc",
+                    ridge_anchor,
+                    &world_map,
+                    SceneVisuals {
+                        camera_offset: Vec3::new(-9.0, 6.2, 10.0),
+                        time_override: 0.02,
+                        weather: WeatherKind::Clear,
+                        expected_omen: Some(OmenKind::DawnLight),
+                    },
+                    PresentationJourneyStep::Scenic,
+                ),
+                build_scene(
+                    "Storm Front",
+                    "heavy rain, dark atmosphere and lightning-driven contrast",
+                    meadow_anchor,
+                    &world_map,
+                    SceneVisuals {
+                        camera_offset: Vec3::new(-8.5, 5.4, 9.5),
+                        time_override: 0.46,
+                        weather: WeatherKind::Storm,
+                        expected_omen: None,
+                    },
+                    PresentationJourneyStep::Scenic,
+                ),
+                build_scene(
+                    "Snow Ridge",
+                    "cold snowfall, reduced visibility and summit response",
+                    ridge_anchor,
+                    &world_map,
+                    SceneVisuals {
+                        camera_offset: Vec3::new(-10.0, 7.0, 11.5),
+                        time_override: 0.61,
+                        weather: WeatherKind::Snow,
+                        expected_omen: Some(OmenKind::SummitCall),
+                    },
+                    PresentationJourneyStep::Scenic,
+                ),
+                build_scene(
+                    "Starfield Watch",
+                    "clear midnight sky for star visibility and moon transition",
+                    steppe_anchor,
+                    &world_map,
+                    SceneVisuals {
+                        camera_offset: Vec3::new(-7.2, 4.5, 8.6),
+                        time_override: 0.76,
+                        weather: WeatherKind::Clear,
+                        expected_omen: None,
+                    },
+                    PresentationJourneyStep::Scenic,
+                ),
+                build_scene(
+                    "Moonlit Water",
+                    "waterline calm test with moonlight and cool omen response",
+                    water_anchor,
+                    &world_map,
+                    SceneVisuals {
+                        camera_offset: Vec3::new(0.0, 4.2, 8.5),
+                        time_override: 0.84,
+                        weather: WeatherKind::Clear,
+                        expected_omen: Some(OmenKind::StillWater),
+                    },
+                    PresentationJourneyStep::Scenic,
+                ),
+            ]
+        });
 
     tracing::info!(
         target: "dao_game::presentation",
@@ -422,6 +432,133 @@ fn build_journey_scenes(
     ])
 }
 
+fn build_presentation_scenes(
+    village: Option<&VillageState>,
+    places: &MeaningfulPlaces,
+    world_map: &WorldMap,
+) -> Option<Vec<PresentationScene>> {
+    let mut scenes = Vec::new();
+    if let Some(village) = village {
+        scenes.extend(build_village_scenes(village, world_map));
+    }
+    if let Some(mut journey_scenes) = build_journey_scenes(places, world_map) {
+        scenes.append(&mut journey_scenes);
+    }
+    (!scenes.is_empty()).then_some(scenes)
+}
+
+fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<PresentationScene> {
+    let sheep_pen = village
+        .area(VillageAreaKind::SheepPen)
+        .map(|area| area.position)
+        .unwrap_or(village.origin + Vec3::new(18.0, 0.0, -12.0));
+    let market = village
+        .area(VillageAreaKind::Market)
+        .map(|area| area.position)
+        .unwrap_or(village.origin + Vec3::new(-16.0, 0.0, -8.0));
+    let shore = village
+        .area(VillageAreaKind::Shore)
+        .map(|area| area.position)
+        .unwrap_or(village.origin + Vec3::new(0.0, 0.0, 30.0));
+    let outer = village
+        .area(VillageAreaKind::OuterPath)
+        .map(|area| area.position)
+        .unwrap_or(village.origin + Vec3::new(0.0, 0.0, -36.0));
+
+    vec![
+        village_scene(
+            "Village Birth",
+            "opening village spawn without task prompts",
+            village.spawn_point,
+            village.origin + Vec3::Y * 1.2,
+            world_map,
+            Vec3::new(-10.0, 6.0, 12.0),
+            0.18,
+            WeatherKind::Clear,
+            PresentationJourneyStep::VillageBirth,
+        ),
+        village_scene(
+            "Village Flock",
+            "sheep pen, shepherd and quiet daily life",
+            sheep_pen,
+            sheep_pen + Vec3::Y * 1.0,
+            world_map,
+            Vec3::new(-7.0, 4.6, 8.0),
+            0.3,
+            WeatherKind::Clear,
+            PresentationJourneyStep::VillageLife,
+        ),
+        village_scene(
+            "Village Market",
+            "merchant rumor and human place before departure",
+            market,
+            market + Vec3::Y * 1.0,
+            world_map,
+            Vec3::new(-6.5, 4.5, 7.0),
+            0.42,
+            WeatherKind::Mist,
+            PresentationJourneyStep::VillageLife,
+        ),
+        village_scene(
+            "Pyramid Dream",
+            "hard-coded first dream of desert, sandstorm and pyramid",
+            shore,
+            shore + Vec3::Y * 1.0,
+            world_map,
+            Vec3::new(-8.0, 5.8, 9.0),
+            0.74,
+            WeatherKind::Storm,
+            PresentationJourneyStep::Dream,
+        ),
+        village_scene(
+            "Dream Afterglow",
+            "dream echo becomes non-task omen toward the outer path",
+            outer,
+            outer + Vec3::Y * 1.0,
+            world_map,
+            Vec3::new(-9.0, 5.2, 10.0),
+            0.05,
+            WeatherKind::Mist,
+            PresentationJourneyStep::DreamEcho,
+        ),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn village_scene(
+    name: &'static str,
+    description: &'static str,
+    wander_target: Vec3,
+    focus: Vec3,
+    world_map: &WorldMap,
+    camera_offset: Vec3,
+    time_override: f32,
+    weather: WeatherKind,
+    journey_step: PresentationJourneyStep,
+) -> PresentationScene {
+    let focus_height = world_map
+        .sample_height(focus.x, focus.z)
+        .unwrap_or(focus.y)
+        .max(world_map.water_level())
+        + 1.25;
+    let wander_height = world_map
+        .sample_height(wander_target.x, wander_target.z)
+        .unwrap_or(wander_target.y)
+        .max(world_map.water_level())
+        + 1.2;
+    PresentationScene {
+        name,
+        description,
+        focus: Vec3::new(focus.x, focus_height, focus.z),
+        camera_offset,
+        wander_target: Vec3::new(wander_target.x, wander_height, wander_target.z),
+        time_override,
+        weather,
+        expected_omen: Some(OmenKind::DawnLight),
+        journey_step,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_journey_scene(
     name: &'static str,
@@ -559,9 +696,51 @@ fn drive_journey_showcase(
     {
         return;
     }
+    if matches!(
+        scene.journey_step,
+        PresentationJourneyStep::VillageBirth
+            | PresentationJourneyStep::VillageLife
+            | PresentationJourneyStep::Dream
+            | PresentationJourneyStep::DreamEcho
+    ) {
+        match scene.journey_step {
+            PresentationJourneyStep::VillageBirth => {
+                journey.story_stage = StoryArcStage::VillageAwakening;
+                journey.dream.phase = DreamPhase::Unseen;
+            }
+            PresentationJourneyStep::VillageLife => {
+                journey.story_stage = StoryArcStage::VillageLife;
+                journey.dream.phase = DreamPhase::Unseen;
+            }
+            PresentationJourneyStep::Dream => {
+                journey.story_stage = StoryArcStage::Dreaming;
+                journey.dream.phase = DreamPhase::InDream;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 1.0;
+                signs.omen_triggered = true;
+                signs.current_omen = Some(OmenKind::DawnLight);
+                signs.omen_intensity = signs.omen_intensity.max(0.96);
+            }
+            PresentationJourneyStep::DreamEcho => {
+                journey.story_stage = StoryArcStage::DreamAfterglow;
+                journey.dream.phase = DreamPhase::Afterglow;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 0.84;
+                signs.omen_triggered = true;
+                signs.current_omen = Some(OmenKind::DawnLight);
+                signs.omen_intensity = signs.omen_intensity.max(0.78);
+            }
+            _ => {}
+        }
+        return;
+    }
 
     match scene.journey_step {
         PresentationJourneyStep::Scenic => {}
+        PresentationJourneyStep::VillageBirth
+        | PresentationJourneyStep::VillageLife
+        | PresentationJourneyStep::Dream
+        | PresentationJourneyStep::DreamEcho => {}
         PresentationJourneyStep::Spawn => {
             let _ = advance_journey_state(
                 journey,
@@ -629,6 +808,8 @@ fn presentation_context(
         } else {
             None
         },
+        village_focus: false,
+        leaving_village: false,
     }
 }
 

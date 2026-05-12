@@ -1,11 +1,14 @@
 pub mod environment;
 pub mod flow;
+pub mod intent;
 pub mod journey;
+pub mod notebook;
 pub mod places;
 pub mod player;
 pub mod presentation;
 pub mod signs;
 pub mod ui;
+pub mod village;
 pub mod world;
 
 use std::env;
@@ -36,9 +39,12 @@ impl Plugin for GamePlugin {
 
         app.add_plugins(ui::UiPlugin);
         app.add_plugins(world::WorldPlugin);
+        app.add_plugins(notebook::NotebookPlugin);
+        app.add_plugins(village::VillagePlugin);
         app.add_plugins(places::PlacesPlugin);
         app.add_plugins(environment::EnvironmentPlugin);
         app.add_plugins(signs::SignPlugin);
+        app.add_plugins(intent::IntentPlugin);
         app.add_plugins(player::PlayerPlugin);
         app.add_plugins(journey::JourneyPlugin);
         app.add_plugins(presentation::PresentationPlugin);

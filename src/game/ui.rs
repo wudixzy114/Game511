@@ -7,9 +7,12 @@ use std::{fs, path::PathBuf};
 use crate::core::performance::{FramePerformance, PerformancePhase};
 use crate::game::{
     flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
+    intent::{IntentState, PerceptionState, intent_debug_line, perception_label},
     journey::{JourneyStage, JourneyState, format_journey_memory_line},
+    notebook::{NotebookState, format_notebook_entry_line},
     places::PlaceKind,
     signs::{OmenGuidancePhase, OmenKind, SignState},
+    village::VillageState,
     world::{BiomeKind, WandererPrototype, WorldCycle, WorldMap},
 };
 
@@ -33,6 +36,7 @@ impl Plugin for UiPlugin {
                     update_hud_control_text,
                     update_hud_stats_text,
                     update_hud_omen_text,
+                    update_hud_context_text,
                 )
                     .run_if(in_state(AppScreen::InGame)),
                 update_crosshair_visibility.run_if(in_state(AppScreen::InGame)),
@@ -62,6 +66,12 @@ enum UiButtonAction {
 struct HudStatsText;
 
 #[derive(Component)]
+struct HudDevPanel;
+
+#[derive(Component)]
+struct HudControlPanel;
+
+#[derive(Component)]
 struct HudControlText;
 
 #[derive(Component)]
@@ -72,6 +82,12 @@ struct HudOmenContainer;
 
 #[derive(Component)]
 struct HudJourneyText;
+
+#[derive(Component)]
+struct HudInteractionText;
+
+#[derive(Component)]
+struct HudNotebookText;
 
 #[derive(Component)]
 struct Crosshair;
@@ -110,6 +126,8 @@ type HudResources<'w> = (
     Option<Res<'w, SignState>>,
     Option<Res<'w, WorldMap>>,
     Option<Res<'w, JourneyState>>,
+    Option<Res<'w, IntentState>>,
+    Option<Res<'w, PerceptionState>>,
 );
 
 const TEXT_PRIMARY: Color = Color::srgb(0.92, 0.9, 0.85);
@@ -377,6 +395,8 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                 },
                 BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.72)),
                 BorderColor::all(Color::srgba(0.32, 0.35, 0.28, 0.85)),
+                Visibility::Hidden,
+                HudDevPanel,
                 children![
                     (
                         Text::new(format!("开发 HUD / {}模式", session_mode.label())),
@@ -405,6 +425,8 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                 },
                 BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.66)),
                 BorderColor::all(Color::srgba(0.28, 0.34, 0.37, 0.8)),
+                Visibility::Hidden,
+                HudControlPanel,
                 children![(
                     Text::new(control_hint(*session_mode)),
                     ui_text_font(&font, 16.0),
@@ -432,6 +454,37 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                     TextColor(TEXT_PRIMARY),
                     HudJourneyText,
                 )],
+            ));
+
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(24),
+                    bottom: px(28),
+                    padding: UiRect::axes(px(16), px(12)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(8)),
+                    width: px(360),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(6),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.54)),
+                BorderColor::all(Color::srgba(0.35, 0.32, 0.24, 0.72)),
+                children![
+                    (
+                        Text::new(""),
+                        ui_text_font(&font, 16.0),
+                        TextColor(TEXT_PRIMARY),
+                        HudInteractionText,
+                    ),
+                    (
+                        Text::new(""),
+                        ui_text_font(&font, 14.0),
+                        TextColor(TEXT_MUTED),
+                        HudNotebookText,
+                    )
+                ],
             ));
 
             parent.spawn((
@@ -485,6 +538,7 @@ fn spawn_pause_menu(
     mut commands: Commands,
     session_mode: Res<SessionMode>,
     journey: Option<Res<JourneyState>>,
+    notebook: Option<Res<NotebookState>>,
     ui_font: Res<UiFontHandle>,
 ) {
     let font = ui_font.0.clone();
@@ -553,6 +607,31 @@ fn spawn_pause_menu(
                             ));
                             parent.spawn((
                                 Text::new(pause_echo_text(journey.as_deref())),
+                                ui_text_font(&font, 15.0),
+                                TextColor(TEXT_MUTED),
+                            ));
+                        });
+                    parent
+                        .spawn((
+                            Node {
+                                padding: UiRect::all(px(14)),
+                                border: UiRect::all(px(1)),
+                                border_radius: BorderRadius::all(px(8)),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(8),
+                                ..Default::default()
+                            },
+                            BackgroundColor(Color::srgba(0.11, 0.12, 0.1, 0.72)),
+                            BorderColor::all(Color::srgba(0.34, 0.34, 0.3, 0.76)),
+                        ))
+                        .with_children(|parent| {
+                            parent.spawn((
+                                Text::new("记事本"),
+                                ui_text_font(&font, 20.0),
+                                TextColor(TEXT_ACCENT),
+                            ));
+                            parent.spawn((
+                                Text::new(notebook_pause_text(notebook.as_deref())),
                                 ui_text_font(&font, 15.0),
                                 TextColor(TEXT_MUTED),
                             ));
@@ -726,24 +805,46 @@ fn toggle_pause_with_escape(
 fn update_hud_control_text(
     mut performance: ResMut<FramePerformance>,
     session_mode: Res<SessionMode>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut controls_query: Query<&mut Text, With<HudControlText>>,
+    mut panel_query: Query<&mut Visibility, With<HudControlPanel>>,
 ) {
     let started_at = std::time::Instant::now();
     let Some(mut controls_text) = controls_query.iter_mut().next() else {
         return;
     };
-    controls_text.0 = control_hint(*session_mode).to_string();
+    controls_text.0 = format!(
+        "{}\n{}",
+        control_hint(*session_mode),
+        "F 交谈/观察  E 感知  F3 开发 HUD"
+    );
+    for mut visibility in &mut panel_query {
+        *visibility = if keys.pressed(KeyCode::F3) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
 fn update_hud_stats_text(
     mut performance: ResMut<FramePerformance>,
+    keys: Res<ButtonInput<KeyCode>>,
     resources: HudResources<'_>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     mut stats_query: Query<&mut Text, With<HudStatsText>>,
+    mut panel_query: Query<&mut Visibility, With<HudDevPanel>>,
 ) {
     let started_at = std::time::Instant::now();
-    let (_, cycle, signs, world_map, journey) = resources;
+    let (_, cycle, signs, world_map, journey, intent, perception) = resources;
+    for mut visibility in &mut panel_query {
+        *visibility = if keys.pressed(KeyCode::F3) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
 
     let status_line = if let (Some(cycle), Some(world_map), Some(transform)) = (
         cycle.as_deref(),
@@ -781,8 +882,10 @@ fn update_hud_stats_text(
         .as_deref()
         .map(|journey| {
             format!(
-                "旅程：{}  距离：{}",
+                "旅程：{} / {} / {}  距离：{}",
                 journey.stage.label(),
+                journey.story_stage.label(),
+                journey.dream.phase.label(),
                 journey
                     .last_distance_to_target
                     .map(|distance| format!("{distance:.0}m"))
@@ -790,11 +893,12 @@ fn update_hud_stats_text(
             )
         })
         .unwrap_or_else(|| "旅程：未开始  距离：--".to_string());
+    let intent_line = intent_debug_line(intent.as_deref(), perception.as_deref());
 
     let Some(mut stats_text) = stats_query.iter_mut().next() else {
         return;
     };
-    stats_text.0 = format!("{status_line}\n{resonance_line}\n{journey_line}");
+    stats_text.0 = format!("{status_line}\n{resonance_line}\n{journey_line}\n{intent_line}");
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
@@ -802,6 +906,7 @@ fn update_hud_omen_text(
     mut performance: ResMut<FramePerformance>,
     signs: Option<Res<SignState>>,
     journey: Option<Res<JourneyState>>,
+    perception: Option<Res<PerceptionState>>,
     mut omen_text_query: Query<&mut Text, With<HudOmenText>>,
     mut omen_container_query: Query<&mut Visibility, With<HudOmenContainer>>,
     mut journey_text_query: Query<&mut Text, (With<HudJourneyText>, Without<HudOmenText>)>,
@@ -816,7 +921,7 @@ fn update_hud_omen_text(
     if let Some(mut journey_text) = journey_text_query.iter_mut().next()
         && let Some(journey) = journey.as_deref()
     {
-        journey_text.0 = formal_journey_hint(journey, signs.as_deref());
+        journey_text.0 = formal_journey_hint(journey, signs.as_deref(), perception.as_deref());
     }
     if let Some(signs) = signs
         .as_deref()
@@ -829,6 +934,46 @@ fn update_hud_omen_text(
         *visibility = Visibility::Hidden;
     }
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
+}
+
+fn update_hud_context_text(
+    village: Option<Res<VillageState>>,
+    notebook: Option<Res<NotebookState>>,
+    perception: Option<Res<PerceptionState>>,
+    mut interaction_query: Query<&mut Text, With<HudInteractionText>>,
+    mut notebook_query: Query<&mut Text, (With<HudNotebookText>, Without<HudInteractionText>)>,
+) {
+    if let Some(mut interaction_text) = interaction_query.iter_mut().next() {
+        let interaction = village
+            .as_deref()
+            .and_then(|village| village.interaction_prompt.as_deref())
+            .map(|prompt| format!("{prompt}  F"))
+            .unwrap_or_default();
+        let perception = perception
+            .as_deref()
+            .map(|perception| format!("{}  E", perception_label(perception)))
+            .unwrap_or_default();
+        interaction_text.0 = [interaction, perception]
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("    ");
+    }
+
+    if let Some(mut notebook_text) = notebook_query.iter_mut().next() {
+        notebook_text.0 = notebook
+            .as_deref()
+            .and_then(|notebook| {
+                notebook.latest().map(|entry| {
+                    if notebook.unread_count > 0 {
+                        format!("记事本有新记录：{}", entry.title)
+                    } else {
+                        format_notebook_entry_line(entry)
+                    }
+                })
+            })
+            .unwrap_or_default();
+    }
 }
 
 fn update_crosshair_visibility(
@@ -940,7 +1085,20 @@ fn formal_omen_hint(signs: &SignState) -> String {
     )
 }
 
-fn formal_journey_hint(journey: &JourneyState, signs: Option<&SignState>) -> String {
+fn formal_journey_hint(
+    journey: &JourneyState,
+    signs: Option<&SignState>,
+    perception: Option<&PerceptionState>,
+) -> String {
+    if journey.dream.phase == crate::game::journey::DreamPhase::InDream {
+        return "沙暴遮住天空，金字塔的轮廓在远处浮现。".to_string();
+    }
+    if journey.dream.phase == crate::game::journey::DreamPhase::Afterglow {
+        if perception.is_some_and(|perception| perception.active) {
+            return "梦中的金色斜面短暂清晰。".to_string();
+        }
+        return "梦醒后，风仍带着沙的气味。".to_string();
+    }
     if matches!(
         journey.stage,
         JourneyStage::WorldResponded | JourneyStage::EchoSettled
@@ -957,7 +1115,7 @@ fn formal_journey_hint(journey: &JourneyState, signs: Option<&SignState>) -> Str
     signs
         .and_then(|signs| signs.target_place_kind)
         .map(|kind| format!("{}在远处留下气息。", kind.label()))
-        .unwrap_or_else(|| journey.stage.label().to_string())
+        .unwrap_or_else(|| journey.story_stage.label().to_string())
 }
 
 fn pause_echo_text(journey: Option<&JourneyState>) -> String {
@@ -983,6 +1141,18 @@ fn pause_echo_text(journey: Option<&JourneyState>) -> String {
     }
     lines.reverse();
     lines.join("\n")
+}
+
+fn notebook_pause_text(notebook: Option<&NotebookState>) -> String {
+    let Some(notebook) = notebook else {
+        return "记事本还没有记录。".to_string();
+    };
+    let lines = notebook.recent_lines(6);
+    if lines.is_empty() {
+        "记事本还没有记录。".to_string()
+    } else {
+        lines.join("\n")
+    }
 }
 
 #[cfg(test)]

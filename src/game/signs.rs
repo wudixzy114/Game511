@@ -7,7 +7,8 @@ use crate::{
     },
     game::{
         flow::{AppScreen, InGameState},
-        journey::JourneyState,
+        intent::{IntentState, PerceptionState, sign_affinity_for_intent},
+        journey::{DreamPhase, JourneyState, StoryArcStage},
         places::{MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance},
         world::{BiomeKind, TerrainTile, WandererPrototype, WorldCycle, WorldMap},
     },
@@ -119,6 +120,9 @@ struct OmenGuidanceContext {
     proximity: f32,
     phase: OmenGuidancePhase,
     response_intensity: f32,
+    intent_affinity: f32,
+    perception_boost: f32,
+    dream_echo: f32,
 }
 
 impl Default for OmenGuidanceContext {
@@ -132,6 +136,9 @@ impl Default for OmenGuidanceContext {
             proximity: 0.0,
             phase: OmenGuidancePhase::Dormant,
             response_intensity: 0.0,
+            intent_affinity: 0.0,
+            perception_boost: 0.0,
+            dream_echo: 0.0,
         }
     }
 }
@@ -152,6 +159,8 @@ type SignUpdateResources<'w> = (
     Res<'w, WorldCycle>,
     Option<Res<'w, MeaningfulPlaces>>,
     Option<Res<'w, JourneyState>>,
+    Option<Res<'w, IntentState>>,
+    Option<Res<'w, PerceptionState>>,
     Res<'w, WandererPresence>,
     ResMut<'w, FramePerformance>,
 );
@@ -198,7 +207,18 @@ fn capture_wanderer_presence(
 }
 
 fn update_resonance(resources: SignUpdateResources<'_>, mut signs: ResMut<SignState>) {
-    let (time, config, world_map, cycle, places, journey, presence, mut performance) = resources;
+    let (
+        time,
+        config,
+        world_map,
+        cycle,
+        places,
+        journey,
+        intent,
+        perception,
+        presence,
+        mut performance,
+    ) = resources;
     let started_at = std::time::Instant::now();
     let Some(tile) = presence.tile else {
         return;
@@ -213,7 +233,13 @@ fn update_resonance(resources: SignUpdateResources<'_>, mut signs: ResMut<SignSt
         normalized_time: cycle.normalized_time,
         delta_seconds: time.delta_secs(),
     };
-    let guidance = build_guidance_context(places.as_deref(), journey.as_deref(), presence.position);
+    let guidance = build_guidance_context(
+        places.as_deref(),
+        journey.as_deref(),
+        intent.as_deref(),
+        perception.as_deref(),
+        presence.position,
+    );
     let previous = *signs;
 
     let update = advance_sign_state(
@@ -288,8 +314,12 @@ fn advance_sign_state(
     let moisture_balance = (1.0 - (context.moisture - 0.58).abs() * 1.75).clamp(0.0, 1.0);
     let omen = choose_omen(context, guidance, horizon, elevation, stillness);
     let omen_bias = omen_resonance_bonus(omen);
-    let guidance_bonus =
-        guidance.proximity * 0.26 + guidance.response_intensity * 0.42 + target_bias(guidance);
+    let guidance_bonus = guidance.proximity * 0.26
+        + guidance.response_intensity * 0.42
+        + guidance.intent_affinity
+        + guidance.perception_boost * 0.3
+        + guidance.dream_echo * 0.16
+        + target_bias(guidance);
     let target_resonance = (biome_affinity(context.biome) * 0.48
         + stillness * 0.18
         + elevation * 0.16
@@ -340,7 +370,10 @@ fn advance_sign_state(
         state.current_omen = None;
     }
 
-    state.omen_intensity = omen_intensity(state, guidance, threshold);
+    state.omen_intensity = (omen_intensity(state, guidance, threshold)
+        + guidance.perception_boost * 0.34
+        + guidance.dream_echo * 0.16)
+        .clamp(0.0, 1.0);
     state.omen_direction = guidance.direction_to_target;
     state.target_place_id = guidance.target_place_id;
     state.target_place_kind = guidance.target_place_kind;
@@ -356,6 +389,8 @@ fn advance_sign_state(
 fn build_guidance_context(
     places: Option<&MeaningfulPlaces>,
     journey: Option<&JourneyState>,
+    intent: Option<&IntentState>,
+    perception: Option<&PerceptionState>,
     player_position: Vec3,
 ) -> OmenGuidanceContext {
     let mut context = OmenGuidanceContext::default();
@@ -401,6 +436,21 @@ fn build_guidance_context(
     context.proximity = proximity;
     context.phase = phase;
     context.response_intensity = response_intensity;
+    context.intent_affinity = sign_affinity_for_intent(
+        context.target_place_kind,
+        intent.and_then(IntentState::dominant),
+    );
+    context.perception_boost = perception
+        .filter(|perception| perception.active)
+        .map(|perception| perception.intensity)
+        .unwrap_or(0.0);
+    context.dream_echo = journey
+        .filter(|journey| {
+            journey.story_stage == StoryArcStage::DreamAfterglow
+                || journey.dream.phase == DreamPhase::Afterglow
+        })
+        .map(|journey| journey.dream.echo_strength)
+        .unwrap_or(0.0);
     context
 }
 
@@ -599,6 +649,9 @@ mod tests {
             proximity: (1.0 - distance / 120.0).clamp(0.0, 1.0),
             phase,
             response_intensity: 0.0,
+            intent_affinity: 0.0,
+            perception_boost: 0.0,
+            dream_echo: 0.0,
         }
     }
 
@@ -743,5 +796,46 @@ mod tests {
         assert_eq!(update.state.guidance_phase, OmenGuidancePhase::Responding);
         assert!(update.state.response_intensity > 0.8);
         assert!(update.state.omen_intensity > 0.7);
+    }
+
+    #[test]
+    fn perception_boost_raises_omen_intensity() {
+        let base_guidance = guidance(PlaceKind::StoneRing, 32.0, OmenGuidancePhase::DrawingNear);
+        let mut boosted_guidance = base_guidance;
+        boosted_guidance.perception_boost = 0.8;
+        boosted_guidance.dream_echo = 0.5;
+
+        let base = advance_sign_state(
+            sign_state(0.5, 0.82),
+            ResonanceContext {
+                biome: BiomeKind::Meadow,
+                height: 0.4,
+                moisture: 0.5,
+                water_level: -0.1,
+                speed: 0.0,
+                normalized_time: 0.02,
+                delta_seconds: 1.0,
+            },
+            base_guidance,
+            &config(0.72, 0.35, 0.02),
+            0.75,
+        );
+        let boosted = advance_sign_state(
+            sign_state(0.5, 0.82),
+            ResonanceContext {
+                biome: BiomeKind::Meadow,
+                height: 0.4,
+                moisture: 0.5,
+                water_level: -0.1,
+                speed: 0.0,
+                normalized_time: 0.02,
+                delta_seconds: 1.0,
+            },
+            boosted_guidance,
+            &config(0.72, 0.35, 0.02),
+            0.75,
+        );
+
+        assert!(boosted.state.omen_intensity > base.state.omen_intensity);
     }
 }
