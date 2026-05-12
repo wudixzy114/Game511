@@ -24,6 +24,9 @@ impl Plugin for EnvironmentPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(WeatherState::default());
         app.insert_resource(WeatherTransition::default());
+        app.insert_resource(EnvironmentSnapshot::default());
+        app.insert_resource(WindField::default());
+        app.insert_resource(EnvironmentTelemetry::default());
         app.add_systems(OnEnter(AppScreen::InGame), reset_environment_state);
         app.add_systems(
             First,
@@ -34,6 +37,7 @@ impl Plugin for EnvironmentPlugin {
             (
                 begin_environment_phase,
                 advance_weather_state,
+                update_environment_snapshot,
                 sync_environment_anchors,
                 update_atmosphere_and_fog,
                 update_celestial_visuals,
@@ -171,6 +175,79 @@ struct EnvironmentFrame {
     flash: f32,
 }
 
+#[derive(Debug, Resource, Clone, Copy, PartialEq)]
+pub struct EnvironmentSnapshot {
+    pub weather: WeatherKind,
+    pub daylight: f32,
+    pub visibility: f32,
+    pub humidity: f32,
+    pub fog_density: f32,
+    pub cloud_cover: f32,
+    pub ambient_energy: f32,
+    pub sea_mist: f32,
+    pub storm_weight: f32,
+    pub sandstorm_weight: f32,
+    pub snow_weight: f32,
+}
+
+impl Default for EnvironmentSnapshot {
+    fn default() -> Self {
+        Self {
+            weather: WeatherKind::Clear,
+            daylight: 1.0,
+            visibility: 170.0,
+            humidity: 0.2,
+            fog_density: 0.08,
+            cloud_cover: 0.12,
+            ambient_energy: 1.0,
+            sea_mist: 0.08,
+            storm_weight: 0.0,
+            sandstorm_weight: 0.0,
+            snow_weight: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Resource, Clone, Copy, PartialEq)]
+pub struct WindField {
+    pub direction: Vec2,
+    pub raw_speed: f32,
+    pub speed: f32,
+    pub gust: f32,
+    pub swirl: f32,
+    pub omen_bias: f32,
+}
+
+impl Default for WindField {
+    fn default() -> Self {
+        Self {
+            direction: Vec2::ZERO,
+            raw_speed: 0.0,
+            speed: 0.0,
+            gust: 0.0,
+            swirl: 0.0,
+            omen_bias: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Resource, Clone, Copy, PartialEq)]
+struct EnvironmentTelemetry {
+    weather: WeatherKind,
+    wind_bucket: i32,
+    visibility_bucket: i32,
+}
+
+impl Default for EnvironmentTelemetry {
+    fn default() -> Self {
+        Self {
+            weather: WeatherKind::Clear,
+            wind_bucket: 0,
+            visibility_bucket: 17,
+        }
+    }
+}
+
 const SKY_RADIUS: f32 = 360.0;
 const SUN_DISC_SCALE: f32 = 11.0;
 const MOON_DISC_SCALE: f32 = 8.2;
@@ -190,6 +267,15 @@ const WEATHER_SEQUENCE: [WeatherKind; 7] = [
     WeatherKind::Clear,
     WeatherKind::Snow,
 ];
+
+type EnvironmentSnapshotResources<'w> = (
+    Res<'w, Time>,
+    Res<'w, AppConfig>,
+    Res<'w, WorldCycle>,
+    Res<'w, WeatherState>,
+    Res<'w, WeatherTransition>,
+    Option<Res<'w, JourneyState>>,
+);
 
 fn begin_environment_phase(mut performance: ResMut<FramePerformance>) {
     performance.begin_phase(PerformancePhase::Environment);
@@ -396,6 +482,60 @@ fn advance_weather_state(
         transition.blend =
             (transition.blend + time.delta_secs() / WEATHER_TRANSITION_SECONDS).clamp(0.0, 1.0);
     }
+}
+
+fn update_environment_snapshot(
+    resources: EnvironmentSnapshotResources<'_>,
+    mut snapshot: ResMut<EnvironmentSnapshot>,
+    mut wind_field: ResMut<WindField>,
+    mut telemetry: ResMut<EnvironmentTelemetry>,
+) {
+    let (time, config, cycle, weather_state, transition, journey) = resources;
+    let environment = build_environment_frame(&time, &config, &cycle, &weather_state, &transition);
+    let response = journey
+        .as_deref()
+        .map(|journey| journey.response.intensity)
+        .unwrap_or(0.0);
+    let next_snapshot = environment_snapshot_from_profile(
+        environment.dominant_kind,
+        environment.profile,
+        cycle.daylight,
+    );
+    let next_wind = wind_field_from_profile(
+        time.elapsed_secs(),
+        environment.dominant_kind,
+        environment.profile,
+        environment.flash,
+        response,
+    );
+    let wind_bucket = (next_wind.speed * 10.0).round() as i32;
+    let visibility_bucket = (next_snapshot.visibility / 10.0).round() as i32;
+
+    if telemetry.weather != next_snapshot.weather
+        || telemetry.wind_bucket != wind_bucket
+        || telemetry.visibility_bucket != visibility_bucket
+    {
+        tracing::info!(
+            target: "dao_game::environment::wind",
+            weather = ?next_snapshot.weather,
+            wind_dir_x = next_wind.direction.x,
+            wind_dir_z = next_wind.direction.y,
+            wind_speed = next_wind.speed,
+            wind_gust = next_wind.gust,
+            visibility = next_snapshot.visibility,
+            humidity = next_snapshot.humidity,
+            sea_mist = next_snapshot.sea_mist,
+            "environment snapshot updated"
+        );
+        *telemetry = EnvironmentTelemetry {
+            weather: next_snapshot.weather,
+            wind_bucket,
+            visibility_bucket,
+        };
+    }
+
+    *snapshot = next_snapshot;
+    *wind_field = next_wind;
 }
 
 #[allow(clippy::type_complexity)]
@@ -742,6 +882,90 @@ fn build_environment_frame(
         dominant_kind,
         celestial,
         flash,
+    }
+}
+
+fn environment_snapshot_from_profile(
+    dominant_kind: WeatherKind,
+    profile: WeatherProfile,
+    daylight: f32,
+) -> EnvironmentSnapshot {
+    let fog_density = (1.0 - profile.visibility / 180.0).clamp(0.0, 1.0);
+    let precipitation = profile.precipitation_strength.clamp(0.0, 1.0);
+    let humidity = match dominant_kind {
+        WeatherKind::Clear => (0.18 + profile.cloud_cover * 0.18).clamp(0.0, 1.0),
+        WeatherKind::Mist => 0.82,
+        WeatherKind::Rain => 0.9,
+        WeatherKind::Storm => 1.0,
+        WeatherKind::Sandstorm => 0.24,
+        WeatherKind::Snow => 0.76,
+    };
+    let sea_mist = match dominant_kind {
+        WeatherKind::Mist => 0.86,
+        WeatherKind::Rain | WeatherKind::Storm => 0.44,
+        WeatherKind::Sandstorm => 0.08,
+        WeatherKind::Snow => 0.24,
+        WeatherKind::Clear => 0.12 + fog_density * 0.42,
+    }
+    .clamp(0.0, 1.0);
+    let storm_weight = match dominant_kind {
+        WeatherKind::Storm => 1.0,
+        WeatherKind::Rain => 0.62,
+        _ => 0.0,
+    };
+    let sandstorm_weight = if dominant_kind == WeatherKind::Sandstorm {
+        1.0
+    } else {
+        0.0
+    };
+    let snow_weight: f32 = if dominant_kind == WeatherKind::Snow {
+        1.0
+    } else {
+        0.0
+    };
+
+    EnvironmentSnapshot {
+        weather: dominant_kind,
+        daylight: daylight.clamp(0.0, 1.0),
+        visibility: profile.visibility,
+        humidity,
+        fog_density,
+        cloud_cover: profile.cloud_cover.clamp(0.0, 1.0),
+        ambient_energy: (profile.ambient_brightness / 360.0).clamp(0.18, 1.2),
+        sea_mist,
+        storm_weight,
+        sandstorm_weight,
+        snow_weight: snow_weight.max(precipitation * 0.55),
+    }
+}
+
+fn wind_field_from_profile(
+    elapsed: f32,
+    dominant_kind: WeatherKind,
+    profile: WeatherProfile,
+    flash: f32,
+    response: f32,
+) -> WindField {
+    let raw_speed = profile.wind.length();
+    let direction = profile.wind.normalize_or_zero();
+    let normalized_speed = (raw_speed / 4.8).clamp(0.0, 1.0);
+    let gust_wave = 0.5 + 0.5 * (elapsed * (0.42 + normalized_speed * 0.58)).sin();
+    let weather_bias = match dominant_kind {
+        WeatherKind::Storm => 0.34,
+        WeatherKind::Sandstorm => 0.42,
+        WeatherKind::Mist => 0.18,
+        WeatherKind::Snow => 0.16,
+        WeatherKind::Rain => 0.22,
+        WeatherKind::Clear => 0.08,
+    };
+
+    WindField {
+        direction,
+        raw_speed,
+        speed: normalized_speed,
+        gust: (normalized_speed * 0.45 + gust_wave * 0.28 + flash * 0.18).clamp(0.0, 1.0),
+        swirl: (profile.particle_sway / 1.8).clamp(0.0, 1.0),
+        omen_bias: (weather_bias + response * 0.52).clamp(0.0, 1.0),
     }
 }
 
@@ -1105,6 +1329,9 @@ fn srgb_color(value: Vec3) -> Color {
 
 fn cleanup_environment_session(mut commands: Commands) {
     commands.remove_resource::<EnvironmentAssets>();
+    commands.insert_resource(EnvironmentSnapshot::default());
+    commands.insert_resource(WindField::default());
+    commands.insert_resource(EnvironmentTelemetry::default());
 }
 
 #[cfg(test)]
@@ -1117,8 +1344,9 @@ mod tests {
     };
 
     use super::{
-        CelestialFrame, WeatherKind, blended_profile, celestial_frame, storm_flash,
-        weather_for_elapsed, weather_profile,
+        CelestialFrame, WeatherKind, blended_profile, celestial_frame,
+        environment_snapshot_from_profile, storm_flash, weather_for_elapsed, weather_profile,
+        wind_field_from_profile,
     };
 
     #[test]
@@ -1169,6 +1397,28 @@ mod tests {
             let flash = storm_flash(sample);
             assert!((0.0..=1.0).contains(&flash));
         }
+    }
+
+    #[test]
+    fn environment_snapshot_marks_sandstorm_as_dry_and_occluding() {
+        let config = test_config();
+        let profile = weather_profile(WeatherKind::Sandstorm, &config);
+        let snapshot = environment_snapshot_from_profile(WeatherKind::Sandstorm, profile, 0.6);
+
+        assert!(snapshot.sandstorm_weight > 0.9);
+        assert!(snapshot.humidity < 0.3);
+        assert!(snapshot.fog_density > 0.6);
+    }
+
+    #[test]
+    fn wind_field_strengthens_under_storm_and_story_response() {
+        let config = test_config();
+        let profile = weather_profile(WeatherKind::Storm, &config);
+        let wind = wind_field_from_profile(12.0, WeatherKind::Storm, profile, 0.4, 0.8);
+
+        assert!(wind.speed > 0.5);
+        assert!(wind.gust > 0.4);
+        assert!(wind.omen_bias > 0.5);
     }
 
     fn test_config() -> AppConfig {

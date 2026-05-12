@@ -65,7 +65,7 @@ pub struct AssetPresentationAnchor {
     pub kind: ProceduralAssetKind,
     pub class: AssetFoundationClass,
     pub placeholder_enabled: bool,
-    pub preferred_scene_path: Option<String>,
+    pub preferred_recipe_path: Option<String>,
 }
 
 #[derive(Debug, Resource, Clone, PartialEq)]
@@ -443,32 +443,26 @@ pub fn asset_foundation_class(kind: ProceduralAssetKind) -> AssetFoundationClass
     }
 }
 
-pub fn preferred_scene_path(kind: ProceduralAssetKind) -> Option<&'static str> {
+pub fn preferred_recipe_path(kind: ProceduralAssetKind) -> Option<&'static str> {
     match kind {
-        ProceduralAssetKind::VillageHouse => Some("art/foundation/village/house.glb#Scene0"),
-        ProceduralAssetKind::VillageWell => Some("art/foundation/village/well.glb#Scene0"),
-        ProceduralAssetKind::SheepPenRail => Some("art/foundation/village/sheep_pen.glb#Scene0"),
-        ProceduralAssetKind::MarketStall => Some("art/foundation/village/market_stall.glb#Scene0"),
-        ProceduralAssetKind::VillageShore => Some("art/foundation/village/shoreline.glb#Scene0"),
-        ProceduralAssetKind::PathStone => Some("art/foundation/village/path_cluster.glb#Scene0"),
-        ProceduralAssetKind::Sheep => Some("art/foundation/characters/sheep.glb#Scene0"),
-        ProceduralAssetKind::Shepherd => Some("art/foundation/characters/shepherd.glb#Scene0"),
-        ProceduralAssetKind::Merchant => Some("art/foundation/characters/merchant.glb#Scene0"),
-        ProceduralAssetKind::Bird => Some("art/foundation/characters/bird_flock.glb#Scene0"),
-        ProceduralAssetKind::Fish => Some("art/foundation/characters/fish_school.glb#Scene0"),
-        ProceduralAssetKind::FortuneTeller => {
-            Some("art/foundation/characters/fortune_teller.glb#Scene0")
-        }
-        ProceduralAssetKind::DesertPyramid => Some("art/foundation/landmarks/pyramid.glb#Scene0"),
-        ProceduralAssetKind::DesertOasis => Some("art/foundation/landmarks/oasis.glb#Scene0"),
-        ProceduralAssetKind::PyramidRuinWall => {
-            Some("art/foundation/landmarks/ruin_wall.glb#Scene0")
-        }
-        ProceduralAssetKind::DesertRelic => Some("art/foundation/landmarks/relic.glb#Scene0"),
-        ProceduralAssetKind::MistRiver => Some("art/foundation/boundaries/mist_river.glb#Scene0"),
-        ProceduralAssetKind::HeadlandMarker => {
-            Some("art/foundation/boundaries/headland_marker.glb#Scene0")
-        }
+        ProceduralAssetKind::VillageHouse => Some("procedural://village/house/hero"),
+        ProceduralAssetKind::VillageWell => Some("procedural://village/well/memory"),
+        ProceduralAssetKind::SheepPenRail => Some("procedural://village/sheep-pen/structural"),
+        ProceduralAssetKind::MarketStall => Some("procedural://village/market-stall/trade"),
+        ProceduralAssetKind::VillageShore => Some("procedural://village/shoreline/sea-wind"),
+        ProceduralAssetKind::PathStone => Some("procedural://village/path-stone/departure"),
+        ProceduralAssetKind::Sheep => Some("procedural://characters/sheep/flock"),
+        ProceduralAssetKind::Shepherd => Some("procedural://characters/shepherd/keeper"),
+        ProceduralAssetKind::Merchant => Some("procedural://characters/merchant/rumor"),
+        ProceduralAssetKind::Bird => Some("procedural://characters/bird/omen"),
+        ProceduralAssetKind::Fish => Some("procedural://characters/fish/water"),
+        ProceduralAssetKind::FortuneTeller => Some("procedural://characters/fortune-teller/dream"),
+        ProceduralAssetKind::DesertPyramid => Some("procedural://landmarks/pyramid/hero"),
+        ProceduralAssetKind::DesertOasis => Some("procedural://landmarks/oasis/relief"),
+        ProceduralAssetKind::PyramidRuinWall => Some("procedural://landmarks/ruin-wall/memory"),
+        ProceduralAssetKind::DesertRelic => Some("procedural://landmarks/relic/dream"),
+        ProceduralAssetKind::MistRiver => Some("procedural://boundaries/mist-river/gate"),
+        ProceduralAssetKind::HeadlandMarker => Some("procedural://boundaries/headland/memory"),
     }
 }
 
@@ -493,7 +487,7 @@ fn asset_presentation_anchor(
         kind,
         class: asset_foundation_class(kind),
         placeholder_enabled,
-        preferred_scene_path: preferred_scene_path(kind).map(str::to_string),
+        preferred_recipe_path: preferred_recipe_path(kind).map(str::to_string),
     }
 }
 

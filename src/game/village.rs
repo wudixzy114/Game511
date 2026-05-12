@@ -6,8 +6,10 @@ use crate::game::{
         ProceduralAssetMaterials, ProceduralSpawnRequest, spawn_procedural_asset,
         spawn_procedural_asset_entity,
     },
+    environment::{EnvironmentSnapshot, WeatherKind, WindField},
     flow::{AppScreen, InGameState},
     intent::{IntentState, apply_village_dialogue_intent},
+    journey::{DreamPhase, JourneyState},
     notebook::{
         NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
         record_notebook_entry,
@@ -27,10 +29,12 @@ type VillageInitAssets<'w> = (ResMut<'w, Assets<Mesh>>, Res<'w, ProceduralAssetM
 
 impl Plugin for VillagePlugin {
     fn build(&self, app: &mut App) {
+        app.insert_resource(VillageAtmosphere::default());
         app.add_systems(
             Update,
             (
                 initialize_village_session,
+                update_village_atmosphere,
                 update_village_actor_behavior,
                 animate_village_asset_parts,
                 update_village_interaction,
@@ -164,6 +168,54 @@ pub struct VillageLayoutConfig {
     pub radius: f32,
 }
 
+#[derive(Debug, Resource, Clone, Copy, PartialEq)]
+pub struct VillageAtmosphere {
+    pub day_phase: VillageDayPhase,
+    pub wind_strength: f32,
+    pub wind_dir: Vec2,
+    pub canopy_sway: f32,
+    pub smoke_rise: f32,
+    pub sea_mist: f32,
+    pub shoreline_wash: f32,
+    pub unease: f32,
+    pub life_density: f32,
+}
+
+impl Default for VillageAtmosphere {
+    fn default() -> Self {
+        Self {
+            day_phase: VillageDayPhase::Dawn,
+            wind_strength: 0.0,
+            wind_dir: Vec2::ZERO,
+            canopy_sway: 0.0,
+            smoke_rise: 0.0,
+            sea_mist: 0.0,
+            shoreline_wash: 0.0,
+            unease: 0.0,
+            life_density: 0.45,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum VillageDayPhase {
+    Dawn,
+    Day,
+    Dusk,
+    Night,
+}
+
+impl VillageDayPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dawn => "dawn",
+            Self::Day => "day",
+            Self::Dusk => "dusk",
+            Self::Night => "night",
+        }
+    }
+}
+
 impl Default for VillageLayoutConfig {
     fn default() -> Self {
         Self {
@@ -243,6 +295,72 @@ fn initialize_village_session(
 
 fn cleanup_village_session(mut commands: Commands) {
     commands.remove_resource::<VillageState>();
+    commands.insert_resource(VillageAtmosphere::default());
+}
+
+fn update_village_atmosphere(
+    environment: Res<EnvironmentSnapshot>,
+    wind_field: Res<WindField>,
+    journey: Option<Res<JourneyState>>,
+    mut atmosphere: ResMut<VillageAtmosphere>,
+) {
+    let dream_afterglow = journey
+        .as_deref()
+        .filter(|journey| journey.dream.phase == DreamPhase::Afterglow)
+        .map(|journey| journey.dream.echo_strength)
+        .unwrap_or(0.0);
+    let response = journey
+        .as_deref()
+        .map(|journey| journey.response.intensity)
+        .unwrap_or(0.0);
+    let day_phase = village_day_phase(environment.daylight);
+    let weather_life_bias = match environment.weather {
+        WeatherKind::Storm => -0.26,
+        WeatherKind::Sandstorm => -0.34,
+        WeatherKind::Snow => -0.18,
+        WeatherKind::Rain => -0.14,
+        WeatherKind::Mist => -0.06,
+        WeatherKind::Clear => 0.06,
+    };
+
+    let next = VillageAtmosphere {
+        day_phase,
+        wind_strength: wind_field.speed,
+        wind_dir: wind_field.direction,
+        canopy_sway: (wind_field.gust * 0.75 + environment.sea_mist * 0.12).clamp(0.0, 1.0),
+        smoke_rise: (0.28 + environment.ambient_energy * 0.18 - wind_field.speed * 0.16)
+            .clamp(0.08, 0.68),
+        sea_mist: environment.sea_mist,
+        shoreline_wash: (environment.humidity * 0.42
+            + wind_field.gust * 0.32
+            + environment.storm_weight * 0.24)
+            .clamp(0.0, 1.0),
+        unease: (dream_afterglow * 0.58 + response * 0.26 + wind_field.omen_bias * 0.18)
+            .clamp(0.0, 1.0),
+        life_density: (0.56 + weather_life_bias + environment.daylight * 0.12
+            - dream_afterglow * 0.18
+            - environment.storm_weight * 0.12)
+            .clamp(0.18, 0.9),
+    };
+    let changed = atmosphere.day_phase != next.day_phase
+        || (atmosphere.unease - next.unease).abs() > 0.12
+        || (atmosphere.wind_strength - next.wind_strength).abs() > 0.12
+        || (atmosphere.sea_mist - next.sea_mist).abs() > 0.12;
+    if changed {
+        tracing::info!(
+            target: "dao_game::village::atmosphere",
+            day_phase = next.day_phase.label(),
+            wind_strength = next.wind_strength,
+            canopy_sway = next.canopy_sway,
+            smoke_rise = next.smoke_rise,
+            sea_mist = next.sea_mist,
+            shoreline_wash = next.shoreline_wash,
+            unease = next.unease,
+            life_density = next.life_density,
+            "village atmosphere updated"
+        );
+    }
+    *atmosphere = next;
 }
 
 fn bootstrap_player_to_village(
@@ -814,6 +932,7 @@ fn update_village_actor_behavior(
 fn animate_village_asset_parts(
     time: Res<Time>,
     config: Res<crate::core::config::AppConfig>,
+    atmosphere: Res<VillageAtmosphere>,
     actor_query: Query<&VillageActor>,
     mut part_query: Query<(&VillageAnimatedPart, &mut Transform)>,
 ) {
@@ -836,7 +955,8 @@ fn animate_village_asset_parts(
             ProceduralAnimationRole::SheepHead => {
                 let grazing = actor.is_some_and(|actor| actor.kind == VillageActorKind::Sheep);
                 let nod = if grazing {
-                    (phase * 1.7).sin().max(0.0) * 0.32
+                    (phase * (1.5 + atmosphere.unease * 1.6)).sin().max(0.0)
+                        * (0.24 + atmosphere.unease * 0.16)
                 } else {
                     0.04 * (phase * 0.8).sin()
                 };
@@ -858,33 +978,57 @@ fn animate_village_asset_parts(
                     part.base_rotation * Quat::from_rotation_y((phase * 0.7).sin() * 0.12);
             }
             ProceduralAnimationRole::NpcHandLeft => {
-                transform.translation.y += (phase * 1.4).sin() * 0.035;
+                transform.translation.y +=
+                    (phase * 1.4).sin() * (0.025 + atmosphere.life_density * 0.018);
             }
             ProceduralAnimationRole::NpcHandRight => {
-                transform.translation.y += (phase * 1.2 + 0.6).sin() * 0.05;
+                transform.translation.y +=
+                    (phase * 1.2 + 0.6).sin() * (0.032 + atmosphere.life_density * 0.028);
             }
             ProceduralAnimationRole::ClothCanopy => {
-                let flutter = (phase * 1.8).sin() * 0.06;
+                let flutter = (phase * (1.3 + atmosphere.wind_strength * 2.8)).sin()
+                    * (0.03 + atmosphere.canopy_sway * 0.12);
                 transform.rotation = part.base_rotation * Quat::from_rotation_x(flutter);
-                transform.translation.y += flutter.abs() * 0.08;
+                let lateral = atmosphere.wind_dir * atmosphere.canopy_sway * 0.08;
+                transform.translation += Vec3::new(lateral.x, flutter.abs() * 0.08, lateral.y);
             }
             ProceduralAnimationRole::Smoke => {
-                let drift = Vec3::new((phase * 0.7).sin() * 0.08, (phase * 0.33).sin() * 0.04, 0.0);
+                let lateral = atmosphere.wind_dir * (0.08 + atmosphere.wind_strength * 0.26);
+                let drift = Vec3::new(
+                    lateral.x + (phase * 0.7).sin() * 0.04,
+                    atmosphere.smoke_rise + (phase * 0.33).sin() * 0.04,
+                    lateral.y,
+                );
                 transform.translation = part.base_translation + drift;
-                transform.scale = part.base_scale * (1.0 + (phase * 0.9).sin().abs() * 0.18);
+                transform.scale = part.base_scale
+                    * (1.0 + (phase * 0.9).sin().abs() * (0.08 + atmosphere.smoke_rise * 0.18));
             }
             ProceduralAnimationRole::WaterRipple => {
-                let pulse = 1.0 + (phase * 1.15).sin() * 0.025;
+                let pulse = 1.0
+                    + (phase * (0.9 + atmosphere.shoreline_wash * 1.2)).sin()
+                        * (0.015 + atmosphere.shoreline_wash * 0.05);
                 transform.scale = Vec3::new(
                     part.base_scale.x * pulse,
                     part.base_scale.y,
-                    part.base_scale.z,
+                    part.base_scale.z * (1.0 + atmosphere.sea_mist * 0.06),
                 );
             }
             ProceduralAnimationRole::BirdLeftWing
             | ProceduralAnimationRole::BirdRightWing
             | ProceduralAnimationRole::FishTail => {}
         }
+    }
+}
+
+fn village_day_phase(daylight: f32) -> VillageDayPhase {
+    if daylight < 0.16 {
+        VillageDayPhase::Night
+    } else if daylight < 0.4 {
+        VillageDayPhase::Dawn
+    } else if daylight < 0.78 {
+        VillageDayPhase::Day
+    } else {
+        VillageDayPhase::Dusk
     }
 }
 
@@ -1099,7 +1243,10 @@ fn stable_actor_id(index: u64, kind: VillageActorKind) -> u64 {
 mod tests {
     use std::path::PathBuf;
 
-    use bevy::prelude::Vec3;
+    use bevy::{
+        ecs::system::RunSystemOnce,
+        prelude::{Vec2, Vec3},
+    };
 
     use crate::{
         core::config::{
@@ -1107,13 +1254,17 @@ mod tests {
             PlayerConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
         },
         game::{
+            environment::{EnvironmentSnapshot, WeatherKind, WindField},
+            journey::{DreamPhase, DreamState, JourneyResponseState, JourneyState, StoryArcStage},
             village::{
-                ShepherdSchedulePhase, VillageActorKind, VillageAreaKind, VillageLayoutConfig,
-                actor_target_position, build_village_layout, shepherd_schedule_position,
+                ShepherdSchedulePhase, VillageActorKind, VillageAreaKind, VillageAtmosphere,
+                VillageDayPhase, VillageLayoutConfig, actor_target_position, build_village_layout,
+                shepherd_schedule_position, update_village_atmosphere, village_day_phase,
             },
             world::WorldMap,
         },
     };
+    use bevy::prelude::{Res, ResMut};
 
     #[test]
     fn village_layout_contains_required_areas_and_actors() {
@@ -1198,6 +1349,73 @@ mod tests {
         assert!(tending.target.distance(home) < 9.0);
         assert_eq!(resting.phase, ShepherdSchedulePhase::RestingVillage);
         assert!(resting.target.distance(home) > 15.0);
+    }
+
+    #[test]
+    fn village_day_phase_maps_daylight_bands() {
+        assert_eq!(village_day_phase(0.08), VillageDayPhase::Night);
+        assert_eq!(village_day_phase(0.24), VillageDayPhase::Dawn);
+        assert_eq!(village_day_phase(0.62), VillageDayPhase::Day);
+        assert_eq!(village_day_phase(0.88), VillageDayPhase::Dusk);
+    }
+
+    #[test]
+    fn village_atmosphere_reflects_afterglow_and_wind() {
+        let mut app = bevy::prelude::App::new();
+        app.insert_resource(EnvironmentSnapshot {
+            weather: WeatherKind::Mist,
+            daylight: 0.32,
+            visibility: 92.0,
+            humidity: 0.84,
+            fog_density: 0.52,
+            cloud_cover: 0.56,
+            ambient_energy: 0.78,
+            sea_mist: 0.74,
+            storm_weight: 0.0,
+            sandstorm_weight: 0.0,
+            snow_weight: 0.0,
+        });
+        app.insert_resource(WindField {
+            direction: Vec2::new(0.9, -0.2).normalize(),
+            raw_speed: 2.2,
+            speed: 0.62,
+            gust: 0.7,
+            swirl: 0.28,
+            omen_bias: 0.48,
+        });
+        app.insert_resource(JourneyState {
+            story_stage: StoryArcStage::DreamAfterglow,
+            dream: DreamState {
+                phase: DreamPhase::Afterglow,
+                phase_elapsed: 0.0,
+                seen_pyramid: true,
+                echo_strength: 0.86,
+            },
+            response: JourneyResponseState {
+                active: true,
+                elapsed_seconds: 0.6,
+                duration_seconds: 7.5,
+                intensity: 0.52,
+                place_id: None,
+                place_kind: None,
+            },
+            ..Default::default()
+        });
+        app.insert_resource(VillageAtmosphere::default());
+        let _ = app.world_mut().run_system_once(
+            |environment: Res<EnvironmentSnapshot>,
+             wind_field: Res<WindField>,
+             journey: Option<Res<JourneyState>>,
+             atmosphere: ResMut<VillageAtmosphere>| {
+                update_village_atmosphere(environment, wind_field, journey, atmosphere);
+            },
+        );
+
+        let atmosphere = app.world().resource::<VillageAtmosphere>();
+        assert_eq!(atmosphere.day_phase, VillageDayPhase::Dawn);
+        assert!(atmosphere.canopy_sway > 0.4);
+        assert!(atmosphere.sea_mist > 0.6);
+        assert!(atmosphere.unease > 0.5);
     }
 
     fn test_config() -> AppConfig {
