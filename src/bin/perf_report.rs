@@ -286,6 +286,13 @@ struct PhaseStats {
     samples: u64,
 }
 
+#[derive(Debug, Clone)]
+struct BottleneckFinding {
+    level: &'static str,
+    title: String,
+    detail: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct PerfLogLine {
     target: String,
@@ -591,6 +598,13 @@ fn print_single_text_report(path: &str, report: &PerfReport) {
     if report.ignored_lines > 0 {
         println!("ignored_lines: {}", report.ignored_lines);
     }
+    println!("bottlenecks:");
+    for finding in bottleneck_findings(report) {
+        println!(
+            "  [{}] {}: {}",
+            finding.level, finding.title, finding.detail
+        );
+    }
     println!("top_phases:");
     for phase in phase_stats(report) {
         println!(
@@ -685,6 +699,14 @@ fn print_comparison_text_report(
             right.stddev,
             right.stddev - left.stddev,
             percent_delta(left.stddev, right.stddev)
+        );
+    }
+
+    println!("candidate_bottlenecks:");
+    for finding in bottleneck_findings(candidate) {
+        println!(
+            "  [{}] {}: {}",
+            finding.level, finding.title, finding.detail
         );
     }
 
@@ -784,6 +806,130 @@ fn frame_detail_summary(report: &PerfReport) -> Option<FrameDetailSummary> {
         latest_moving_average_ms,
         max_budget_delta_ms,
     })
+}
+
+fn bottleneck_findings(report: &PerfReport) -> Vec<BottleneckFinding> {
+    let mut findings = Vec::new();
+    let frame_stats = frame_stats(report);
+    let phase_stats = phase_stats(report);
+    let budget_ms = report.budget_ms;
+
+    if report.frame_samples.is_empty() {
+        findings.push(BottleneckFinding {
+            level: "warn",
+            title: "missing frame detail".to_string(),
+            detail: "no frame_detail samples; only coarse session or slow-frame logs are available"
+                .to_string(),
+        });
+    }
+
+    if let (Some(stats), Some(budget_ms)) = (frame_stats, budget_ms) {
+        let over_budget_ratio = if report.frames > 0 {
+            report.over_budget_frames as f32 / report.frames as f32
+        } else {
+            0.0
+        };
+        if stats.p95 > budget_ms {
+            findings.push(BottleneckFinding {
+                level: "critical",
+                title: "frame budget exceeded".to_string(),
+                detail: format!(
+                    "p95 frame time {:.2} ms is above {:.2} ms budget; {:.1}% frames are over budget",
+                    stats.p95,
+                    budget_ms,
+                    over_budget_ratio * 100.0
+                ),
+            });
+        } else if stats.p95 > budget_ms * 0.85 {
+            findings.push(BottleneckFinding {
+                level: "warn",
+                title: "frame budget is tight".to_string(),
+                detail: format!(
+                    "p95 frame time {:.2} ms is within 15% of {:.2} ms budget",
+                    stats.p95, budget_ms
+                ),
+            });
+        }
+
+        if stats.p99 - stats.p50 > budget_ms * 0.5 {
+            findings.push(BottleneckFinding {
+                level: "warn",
+                title: "frame spikes detected".to_string(),
+                detail: format!(
+                    "p99-p50 gap is {:.2} ms; inspect spike-heavy phases before average-only tuning",
+                    stats.p99 - stats.p50
+                ),
+            });
+        }
+    }
+
+    if let Some(top_average) = phase_stats.first() {
+        let total_profiled_average = phase_stats
+            .iter()
+            .map(|phase| phase.average_ms.max(0.0))
+            .sum::<f32>();
+        let share = if total_profiled_average > f32::EPSILON {
+            top_average.average_ms / total_profiled_average
+        } else {
+            0.0
+        };
+        findings.push(BottleneckFinding {
+            level: if share >= 0.45 { "critical" } else { "info" },
+            title: format!("primary average hotspot: {}", top_average.phase),
+            detail: format!(
+                "avg {:.2} ms, p95 {:.2} ms, max {:.2} ms; {:.1}% of profiled phase time",
+                top_average.average_ms,
+                top_average.p95_ms,
+                top_average.max_ms,
+                share * 100.0
+            ),
+        });
+    }
+
+    if let Some(top_spike) = phase_stats
+        .iter()
+        .max_by(|left, right| left.p99_ms.total_cmp(&right.p99_ms))
+        && top_spike.p99_ms > top_spike.average_ms * 2.0
+        && top_spike.p99_ms > 1.0
+    {
+        findings.push(BottleneckFinding {
+            level: "warn",
+            title: format!("spiky phase: {}", top_spike.phase),
+            detail: format!(
+                "p99 {:.2} ms is much higher than avg {:.2} ms; look for intermittent work or cache misses",
+                top_spike.p99_ms, top_spike.average_ms
+            ),
+        });
+    }
+
+    if let (Some(detail), Some(stats)) = (frame_detail_summary(report), frame_stats) {
+        let coverage = if stats.average > f32::EPSILON {
+            detail.average_profiled_phase_ms / stats.average
+        } else {
+            0.0
+        };
+        if coverage < 0.35 {
+            findings.push(BottleneckFinding {
+                level: "warn",
+                title: "low instrumentation coverage".to_string(),
+                detail: format!(
+                    "profiled phases explain {:.1}% of average frame time; add phase markers around render prep, asset work, or startup systems",
+                    coverage * 100.0
+                ),
+            });
+        }
+    }
+
+    if findings.is_empty() {
+        findings.push(BottleneckFinding {
+            level: "info",
+            title: "no obvious bottleneck".to_string(),
+            detail: "frame distribution and profiled phases are inside current thresholds"
+                .to_string(),
+        });
+    }
+
+    findings
 }
 
 fn phase_stats(report: &PerfReport) -> Vec<PhaseStats> {
@@ -943,6 +1089,15 @@ fn single_report_json(path: &str, report: &PerfReport) -> String {
         );
     }
     root.insert(
+        "bottlenecks".to_string(),
+        Value::Array(
+            bottleneck_findings(report)
+                .into_iter()
+                .map(bottleneck_finding_json)
+                .collect(),
+        ),
+    );
+    root.insert(
         "phases".to_string(),
         Value::Array(
             phase_stats(report)
@@ -1000,6 +1155,15 @@ fn comparison_report_json(
                 .collect(),
         ),
     );
+    root.insert(
+        "candidate_bottlenecks".to_string(),
+        Value::Array(
+            bottleneck_findings(candidate)
+                .into_iter()
+                .map(bottleneck_finding_json)
+                .collect(),
+        ),
+    );
     Value::Object(root).to_string()
 }
 
@@ -1042,6 +1206,17 @@ fn phase_stats_json(stats: PhaseStats) -> Value {
     insert_number(&mut object, "p99_ms", stats.p99_ms as f64);
     insert_number(&mut object, "max_ms", stats.max_ms as f64);
     insert_number(&mut object, "samples", stats.samples as f64);
+    Value::Object(object)
+}
+
+fn bottleneck_finding_json(finding: BottleneckFinding) -> Value {
+    let mut object = Map::new();
+    object.insert(
+        "level".to_string(),
+        Value::String(finding.level.to_string()),
+    );
+    object.insert("title".to_string(), Value::String(finding.title));
+    object.insert("detail".to_string(), Value::String(finding.detail));
     Value::Object(object)
 }
 
@@ -1164,6 +1339,15 @@ fn render_html_report(
         (Some(left), Some(right)) => right.p95 - left.p95,
         _ => 0.0,
     };
+    let finding_panel = render_bottleneck_panel(
+        "Bottleneck Diagnosis",
+        &bottleneck_findings(
+            candidate
+                .as_ref()
+                .map(|(_, report)| *report)
+                .unwrap_or(baseline),
+        ),
+    );
 
     Ok(format!(
         r#"<!doctype html>
@@ -1238,6 +1422,32 @@ fn render_html_report(
     }}
     .delta-good {{ color: var(--accent); }}
     .delta-bad {{ color: var(--accent-2); }}
+    .findings {{
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }}
+    .finding {{
+      border: 1px solid var(--line);
+      border-left-width: 4px;
+      border-radius: 6px;
+      padding: 10px 12px;
+      background: #fbfcfd;
+    }}
+    .finding.critical {{ border-left-color: var(--accent-2); }}
+    .finding.warn {{ border-left-color: #b57918; }}
+    .finding.info {{ border-left-color: var(--accent-3); }}
+    .finding-title {{
+      font-weight: 650;
+      margin-bottom: 4px;
+    }}
+    .finding-detail {{
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }}
     section {{
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1292,6 +1502,8 @@ fn render_html_report(
       <div class="metric"><div class="label">Candidate P95 Delta</div><div class="value {p95_delta_class}">{p95_delta:+.2} ms</div></div>
       <div class="metric"><div class="label">Over Budget</div><div class="value">{baseline_over_budget} / {candidate_over_budget}</div></div>
     </div>
+
+    {finding_panel}
 
     <section>
       <h2>Frame Time Trend</h2>
@@ -1412,6 +1624,7 @@ fn render_html_report(
             .unwrap_or(0),
         avg_delta_class = delta_class(average_delta),
         p95_delta_class = delta_class(p95_delta),
+        finding_panel = finding_panel,
         baseline_series = number_array_json(&baseline_series)?,
         candidate_series = number_array_json(&candidate_series)?,
         phase_labels = string_array_json(&all_phase_labels)?,
@@ -1509,6 +1722,23 @@ fn render_phase_table(baseline: &PerfReport, candidate: Option<&PerfReport>) -> 
     )
 }
 
+fn render_bottleneck_panel(title: &str, findings: &[BottleneckFinding]) -> String {
+    let mut rows = String::new();
+    for finding in findings {
+        rows.push_str(&format!(
+            "<li class=\"finding {}\"><div class=\"finding-title\">[{}] {}</div><div class=\"finding-detail\">{}</div></li>",
+            html_escape(finding.level),
+            html_escape(finding.level),
+            html_escape(&finding.title),
+            html_escape(&finding.detail)
+        ));
+    }
+    format!(
+        "<section><h2>{}</h2><ul class=\"findings\">{rows}</ul></section>",
+        html_escape(title)
+    )
+}
+
 fn delta_class(delta: f32) -> &'static str {
     if delta > 0.0 {
         "delta-bad"
@@ -1558,7 +1788,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{Command, load_report, metric_stats, render_html_report};
+    use super::{Command, bottleneck_findings, load_report, metric_stats, render_html_report};
 
     #[test]
     fn load_report_uses_latest_session_and_accepts_string_or_numeric_session_ids() {
@@ -1700,8 +1930,40 @@ mod tests {
         let html = render_html_report("baseline", &report, None).unwrap();
 
         assert!(html.contains("Frame Time Trend"));
+        assert!(html.contains("Bottleneck Diagnosis"));
         assert!(html.contains("baselineSeries"));
         assert!(html.contains("world_streaming"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bottleneck_findings_call_out_budget_and_hot_phase() {
+        let path = unique_temp_path("perf-report-bottleneck");
+        fs::write(
+            &path,
+            concat!(
+                "{\"target\":\"dao_game::performance::session_start\",\"fields\":{\"session_id\":\"91\",\"budget_ms\":16.6}}\n",
+                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"91\",\"frame\":1,\"frame_ms\":17.0,\"average_ms\":17.0,\"budget_ms\":16.6,\"budget_delta_ms\":0.4,\"profiled_phase_ms\":10.0,\"world_streaming_ms\":9.0,\"ui_ms\":1.0}}\n",
+                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"91\",\"frame\":2,\"frame_ms\":22.0,\"average_ms\":17.5,\"budget_ms\":16.6,\"budget_delta_ms\":5.4,\"profiled_phase_ms\":13.0,\"world_streaming_ms\":12.0,\"ui_ms\":1.0}}\n",
+                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"91\",\"frame\":3,\"frame_ms\":30.0,\"average_ms\":18.7,\"budget_ms\":16.6,\"budget_delta_ms\":13.4,\"profiled_phase_ms\":21.0,\"world_streaming_ms\":20.0,\"ui_ms\":1.0}}\n"
+            ),
+        )
+        .unwrap();
+        let report = load_report(&path).unwrap();
+
+        let findings = bottleneck_findings(&report);
+
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.title.contains("frame budget exceeded"))
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.title.contains("world_streaming"))
+        );
 
         let _ = fs::remove_file(path);
     }
