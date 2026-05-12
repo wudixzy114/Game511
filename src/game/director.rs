@@ -1,4 +1,7 @@
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, futures_lite::future},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -24,7 +27,9 @@ impl Plugin for DirectorPlugin {
         app.add_systems(OnEnter(AppScreen::InGame), initialize_director);
         app.add_systems(
             Update,
-            update_director.run_if(in_state(InGameState::Running)),
+            (poll_director_task, submit_director_task)
+                .chain()
+                .run_if(in_state(InGameState::Running)),
         );
         app.add_systems(OnExit(AppScreen::InGame), cleanup_director);
     }
@@ -36,6 +41,9 @@ pub struct DirectorState {
     pub last_input: Option<DirectorInput>,
     pub last_output: Option<DirectorOutput>,
     pub last_validation: Option<DirectorValidation>,
+    pub request_status: DirectorRequestStatus,
+    pub last_request_id: Option<u64>,
+    pub last_completed_request_id: Option<u64>,
     elapsed_since_last_run: f32,
 }
 
@@ -46,9 +54,34 @@ impl Default for DirectorState {
             last_input: None,
             last_output: None,
             last_validation: None,
+            request_status: DirectorRequestStatus::Idle,
+            last_request_id: None,
+            last_completed_request_id: None,
             elapsed_since_last_run: 0.0,
         }
     }
+}
+
+#[derive(Debug, Resource, Default)]
+struct DirectorTaskState {
+    next_request_id: u64,
+    in_flight: Option<InFlightDirectorRequest>,
+}
+
+#[derive(Debug)]
+struct InFlightDirectorRequest {
+    request_id: u64,
+    input: DirectorInput,
+    elapsed_seconds: f32,
+    task: Task<DirectorOutput>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum DirectorRequestStatus {
+    Idle,
+    InFlight,
+    Completed,
+    TimedOut,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -125,6 +158,7 @@ pub enum DirectorRejectionReason {
 }
 
 const DIRECTOR_INTERVAL_SECONDS: f32 = 2.0;
+const DIRECTOR_REQUEST_TIMEOUT_SECONDS: f32 = 1.2;
 
 type DirectorInputResources<'w> = (
     Option<Res<'w, JourneyState>>,
@@ -134,6 +168,12 @@ type DirectorInputResources<'w> = (
     Option<Res<'w, NotebookState>>,
     Option<Res<'w, LandmarkState>>,
     Option<Res<'w, EcologyState>>,
+);
+
+type DirectorValidationResources<'w> = (
+    Option<Res<'w, JourneyState>>,
+    Option<Res<'w, RegionGraphState>>,
+    Option<Res<'w, MeaningfulPlaces>>,
 );
 
 pub trait JourneyDirector {
@@ -151,15 +191,72 @@ impl JourneyDirector for HardcodedJourneyDirector {
 
 fn initialize_director(mut commands: Commands) {
     commands.insert_resource(DirectorState::default());
+    commands.insert_resource(DirectorTaskState::default());
 }
 
 fn cleanup_director(mut commands: Commands) {
     commands.remove_resource::<DirectorState>();
+    commands.remove_resource::<DirectorTaskState>();
 }
 
-fn update_director(
+fn poll_director_task(
     time: Res<Time>,
     director: Option<ResMut<DirectorState>>,
+    task_state: Option<ResMut<DirectorTaskState>>,
+    resources: DirectorValidationResources<'_>,
+    mut performance: ResMut<FramePerformance>,
+) {
+    let started_at = std::time::Instant::now();
+    let Some(mut director) = director else {
+        return;
+    };
+    let Some(mut task_state) = task_state else {
+        return;
+    };
+    let Some(request) = task_state.in_flight.as_mut() else {
+        return;
+    };
+
+    request.elapsed_seconds += time.delta_secs();
+    let result = if request.elapsed_seconds >= DIRECTOR_REQUEST_TIMEOUT_SECONDS {
+        let output = HardcodedJourneyDirector.evaluate(&request.input);
+        Some((output, DirectorRequestStatus::TimedOut))
+    } else {
+        future::block_on(future::poll_once(&mut request.task))
+            .map(|output| (output, DirectorRequestStatus::Completed))
+    };
+
+    let Some((output, status)) = result else {
+        performance.record_phase_duration(PerformancePhase::Director, started_at.elapsed());
+        return;
+    };
+
+    let request = task_state
+        .in_flight
+        .take()
+        .expect("in-flight request should exist after poll result");
+    let (journey, regions, places) = resources;
+    let validation = validate_director_output(
+        &output,
+        journey.as_deref(),
+        regions.as_deref(),
+        places.as_deref(),
+    );
+    complete_director_request(
+        &mut director,
+        request.request_id,
+        request.input,
+        output,
+        validation,
+        status,
+    );
+    performance.record_phase_duration(PerformancePhase::Director, started_at.elapsed());
+}
+
+fn submit_director_task(
+    time: Res<Time>,
+    director: Option<ResMut<DirectorState>>,
+    task_state: Option<ResMut<DirectorTaskState>>,
     resources: DirectorInputResources<'_>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut performance: ResMut<FramePerformance>,
@@ -168,6 +265,13 @@ fn update_director(
     let Some(mut director) = director else {
         return;
     };
+    let Some(mut task_state) = task_state else {
+        return;
+    };
+    if task_state.in_flight.is_some() {
+        performance.record_phase_duration(PerformancePhase::Director, started_at.elapsed());
+        return;
+    }
     director.elapsed_since_last_run += time.delta_secs();
     if director.elapsed_since_last_run < DIRECTOR_INTERVAL_SECONDS {
         return;
@@ -188,18 +292,44 @@ fn update_director(
         landmarks.as_deref(),
         ecology.as_deref(),
     );
-    let hardcoded = HardcodedJourneyDirector;
-    let output = hardcoded.evaluate(&input);
-    let validation = validate_director_output(
-        &output,
-        journey.as_deref(),
-        regions.as_deref(),
-        places.as_deref(),
-    );
 
+    let request_id = task_state.next_request_id;
+    task_state.next_request_id = task_state.next_request_id.wrapping_add(1).max(1);
+    let task_input = input.clone();
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let hardcoded = HardcodedJourneyDirector;
+        hardcoded.evaluate(&task_input)
+    });
+    director.request_status = DirectorRequestStatus::InFlight;
+    director.last_request_id = Some(request_id);
+    task_state.in_flight = Some(InFlightDirectorRequest {
+        request_id,
+        input,
+        elapsed_seconds: 0.0,
+        task,
+    });
     tracing::info!(
         target: "dao_game::director",
+        request_id,
         mode = ?director.mode,
+        "journey director request submitted"
+    );
+    performance.record_phase_duration(PerformancePhase::Director, started_at.elapsed());
+}
+
+fn complete_director_request(
+    director: &mut DirectorState,
+    request_id: u64,
+    input: DirectorInput,
+    output: DirectorOutput,
+    validation: DirectorValidation,
+    status: DirectorRequestStatus,
+) {
+    tracing::info!(
+        target: "dao_game::director",
+        request_id,
+        mode = ?director.mode,
+        status = ?status,
         input_region = input.current_region.as_deref(),
         input_intent = input.dominant_intent.as_deref(),
         suggestions = output.suggestions.len(),
@@ -211,7 +341,8 @@ fn update_director(
     director.last_input = Some(input);
     director.last_output = Some(output);
     director.last_validation = Some(validation);
-    performance.record_phase_duration(PerformancePhase::Director, started_at.elapsed());
+    director.request_status = status;
+    director.last_completed_request_id = Some(request_id);
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -42,6 +42,16 @@ pub enum NotebookEntryKind {
 }
 
 impl NotebookEntryKind {
+    pub const ALL: [Self; 7] = [
+        Self::Dream,
+        Self::Person,
+        Self::Place,
+        Self::Sign,
+        Self::JourneyEcho,
+        Self::Observation,
+        Self::PlayerNote,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Dream => "梦境",

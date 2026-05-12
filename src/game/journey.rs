@@ -3,8 +3,12 @@ use std::time::Instant;
 use bevy::prelude::*;
 
 use crate::game::{
+    director::{DirectorState, DirectorSuggestionKind, place_from_director_tags},
     flow::{AppScreen, InGameState},
-    notebook::{NotebookState, dream_record, record_notebook_entry},
+    notebook::{
+        NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
+        dream_record, record_notebook_entry,
+    },
     places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance},
     signs::{OmenKind, SignState},
     village::{VillageAreaKind, VillageState},
@@ -351,6 +355,7 @@ fn cleanup_journey_session(mut commands: Commands) {
 fn select_journey_target(
     journey: Option<ResMut<JourneyState>>,
     places: Option<Res<MeaningfulPlaces>>,
+    director: Option<Res<DirectorState>>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
 ) {
     let Some(mut journey) = journey else {
@@ -368,7 +373,9 @@ fn select_journey_target(
     };
 
     let started_at = Instant::now();
-    match choose_primary_place(&places, transform.translation).map(JourneyTarget::from_place) {
+    match choose_journey_place(&places, transform.translation, director.as_deref())
+        .map(JourneyTarget::from_place)
+    {
         Some(target) => {
             let distance = planar_distance(transform.translation, target.position);
             journey.target = Some(target);
@@ -381,6 +388,7 @@ fn select_journey_target(
                 distance,
                 place_kind = target.kind.label(),
                 biome = ?target.biome,
+                director_request_id = director.as_deref().and_then(|director| director.last_completed_request_id),
                 selection_ms = started_at.elapsed().as_secs_f32() * 1000.0,
                 "journey target selected"
             );
@@ -445,19 +453,50 @@ fn advance_journey_session(
 
     for event in &events {
         log_journey_event(event);
-        if matches!(
-            event,
-            JourneyEvent::DreamChanged {
-                to: DreamPhase::Afterglow,
-                ..
-            }
-        ) {
-            let _ = record_notebook_entry(
-                notebook.as_deref_mut(),
-                dream_record(journey.session_elapsed),
-            );
+        if let Some(record) = notebook_record_for_event(event) {
+            let _ = record_notebook_entry(notebook.as_deref_mut(), record);
         }
     }
+}
+
+fn choose_journey_place<'a>(
+    places: &'a MeaningfulPlaces,
+    player_position: Vec3,
+    director: Option<&DirectorState>,
+) -> Option<&'a MeaningfulPlace> {
+    let directed_kind = director
+        .and_then(|director| director.last_validation.as_ref())
+        .and_then(|validation| {
+            validation
+                .accepted
+                .iter()
+                .filter(|suggestion| suggestion.kind == DirectorSuggestionKind::Place)
+                .max_by(|left, right| left.strength.total_cmp(&right.strength))
+        })
+        .and_then(|suggestion| place_from_director_tags(&suggestion.semantic_tags));
+
+    if let Some(kind) = directed_kind
+        && let Some(place) = nearest_place_of_kind(places, player_position, kind)
+    {
+        return Some(place);
+    }
+
+    choose_primary_place(places, player_position)
+}
+
+fn nearest_place_of_kind(
+    places: &MeaningfulPlaces,
+    player_position: Vec3,
+    kind: PlaceKind,
+) -> Option<&MeaningfulPlace> {
+    places
+        .places
+        .iter()
+        .filter(|place| place.kind == kind)
+        .min_by(|left, right| {
+            planar_distance(player_position, left.position)
+                .total_cmp(&planar_distance(player_position, right.position))
+        })
 }
 
 pub fn advance_journey_state(
@@ -811,6 +850,93 @@ fn memory_text(
     }
 }
 
+fn notebook_record_for_event(event: &JourneyEvent) -> Option<NotebookRecord> {
+    match event {
+        JourneyEvent::DreamChanged {
+            to: DreamPhase::Afterglow,
+            at_seconds,
+            ..
+        } => Some(dream_record(*at_seconds)),
+        JourneyEvent::OmenRecorded(memory) => Some(NotebookRecord {
+            kind: NotebookEntryKind::Sign,
+            at_seconds: memory.at_seconds,
+            location: Some("途中".to_string()),
+            source: NotebookSource::Sign,
+            title: format!("{}曾经显现", omen_memory_label(memory.omen)),
+            body: format!(
+                "{}在光、风或水面里短暂出现，随后又回到世界本来的声音中。",
+                omen_memory_label(memory.omen)
+            ),
+            tags: vec![NotebookTag::Omen, NotebookTag::Memory],
+        }),
+        JourneyEvent::MemoryRecorded(memory) => Some(notebook_record_for_journey_memory(memory)),
+        _ => None,
+    }
+}
+
+fn notebook_record_for_journey_memory(memory: &JourneyMemory) -> NotebookRecord {
+    let place = memory
+        .place_kind
+        .map(JourneyPlaceKind::label)
+        .unwrap_or("未名之地");
+    let (kind, source, title) = match memory.kind {
+        JourneyMemoryKind::Arrival => (
+            NotebookEntryKind::Place,
+            NotebookSource::PlaceArrival,
+            format!("抵达{place}"),
+        ),
+        JourneyMemoryKind::Response => (
+            NotebookEntryKind::JourneyEcho,
+            NotebookSource::Journey,
+            format!("{place}的回应"),
+        ),
+        JourneyMemoryKind::Echo => (
+            NotebookEntryKind::JourneyEcho,
+            NotebookSource::Journey,
+            format!("{place}的回响"),
+        ),
+        JourneyMemoryKind::Dream => (
+            NotebookEntryKind::Dream,
+            NotebookSource::Dream,
+            "沙暴中的金字塔".to_string(),
+        ),
+    };
+    NotebookRecord {
+        kind,
+        at_seconds: memory.at_seconds,
+        location: Some(place.to_string()),
+        source,
+        title,
+        body: memory.text.clone(),
+        tags: notebook_tags_for_memory(memory),
+    }
+}
+
+fn notebook_tags_for_memory(memory: &JourneyMemory) -> Vec<NotebookTag> {
+    let mut tags = vec![NotebookTag::Memory];
+    if let Some(omen) = memory.omen {
+        tags.push(NotebookTag::Omen);
+        if omen == OmenKind::DawnLight {
+            tags.push(NotebookTag::Dream);
+        }
+    }
+    match memory.place_kind {
+        Some(PlaceKind::SpringEye | PlaceKind::QuietBay) => tags.push(NotebookTag::Sea),
+        Some(PlaceKind::StoneRing) => tags.push(NotebookTag::Dream),
+        _ => {}
+    }
+    tags
+}
+
+fn omen_memory_label(omen: OmenKind) -> &'static str {
+    match omen {
+        OmenKind::DawnLight => "曙光",
+        OmenKind::GroveWhisper => "林语",
+        OmenKind::SummitCall => "山鸣",
+        OmenKind::StillWater => "止水",
+    }
+}
+
 pub fn format_journey_memory_line(memory: &JourneyMemory) -> String {
     let total_seconds = memory.at_seconds.max(0.0).floor() as u32;
     let minutes = total_seconds / 60;
@@ -953,12 +1079,16 @@ mod tests {
     };
 
     use crate::game::{
+        director::{DirectorState, DirectorSuggestion, DirectorSuggestionKind, DirectorValidation},
         flow::{AppScreen, InGameState},
         journey::{
             DreamPhase, JourneyAdvanceContext, JourneyEvent, JourneyInteractionKind,
-            JourneyMemoryKind, JourneyPlaceKind, JourneyPlugin, JourneyStage, JourneyState,
-            JourneyTarget, StoryArcStage, advance_journey_state, format_journey_memory_line,
+            JourneyMemoryKind, JourneyOmenMemory, JourneyPlaceKind, JourneyPlugin, JourneyStage,
+            JourneyState, JourneyTarget, StoryArcStage, advance_journey_state,
+            choose_journey_place, format_journey_memory_line, notebook_record_for_event,
         },
+        notebook::{NotebookEntryKind, NotebookSource},
+        places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, PlaceTag},
         signs::OmenKind,
         world::{BiomeKind, WorldGridCoord},
     };
@@ -1177,6 +1307,91 @@ mod tests {
             format_journey_memory_line(&memory),
             "01:15 石阵因你的停留回应。"
         );
+    }
+
+    #[test]
+    fn journey_memory_events_sync_to_notebook_records() {
+        let event = JourneyEvent::MemoryRecorded(super::JourneyMemory {
+            kind: JourneyMemoryKind::Arrival,
+            stage: JourneyStage::PlaceReached,
+            at_seconds: 31.0,
+            position: Vec3::new(1.0, 0.0, 2.0),
+            place_kind: Some(JourneyPlaceKind::QuietBay),
+            omen: Some(OmenKind::StillWater),
+            interaction: None,
+            text: "你抵达了静水湾。".to_string(),
+        });
+
+        let record = notebook_record_for_event(&event).expect("notebook record");
+
+        assert_eq!(record.kind, NotebookEntryKind::Place);
+        assert_eq!(record.source, NotebookSource::PlaceArrival);
+        assert_eq!(record.title, "抵达静水湾");
+        assert!(!record.body.contains("任务"));
+    }
+
+    #[test]
+    fn omen_events_sync_to_sign_notebook_records() {
+        let event = JourneyEvent::OmenRecorded(JourneyOmenMemory {
+            omen: OmenKind::SummitCall,
+            at_seconds: 8.0,
+            position: Vec3::ZERO,
+        });
+
+        let record = notebook_record_for_event(&event).expect("notebook record");
+
+        assert_eq!(record.kind, NotebookEntryKind::Sign);
+        assert_eq!(record.source, NotebookSource::Sign);
+        assert!(record.title.contains("山鸣"));
+    }
+
+    #[test]
+    fn director_place_suggestion_can_shape_journey_target_selection() {
+        let places = MeaningfulPlaces {
+            places: vec![
+                MeaningfulPlace {
+                    id: 1,
+                    kind: PlaceKind::QuietBay,
+                    grid: WorldGridCoord { x: 1, z: 1 },
+                    position: Vec3::new(4.0, 0.0, 0.0),
+                    biome: BiomeKind::Water,
+                    tags: vec![PlaceTag::Water],
+                    score: 0.9,
+                    arrival_radius: 12.0,
+                    interaction_radius: 6.0,
+                },
+                MeaningfulPlace {
+                    id: 2,
+                    kind: PlaceKind::StoneRing,
+                    grid: WorldGridCoord { x: 10, z: 1 },
+                    position: Vec3::new(80.0, 0.0, 0.0),
+                    biome: BiomeKind::Meadow,
+                    tags: vec![PlaceTag::Memory],
+                    score: 0.7,
+                    arrival_radius: 12.0,
+                    interaction_radius: 6.0,
+                },
+            ],
+            active_place_id: None,
+            nearest_place_id: None,
+            nearest_distance: None,
+        };
+        let mut director = DirectorState::default();
+        director.last_validation = Some(DirectorValidation {
+            accepted: vec![DirectorSuggestion {
+                kind: DirectorSuggestionKind::Place,
+                semantic_tags: vec!["memory".to_string()],
+                strength: 0.9,
+                duration_seconds: 4.0,
+                precondition: crate::game::director::DirectorPrecondition::None,
+                text: "记忆可以停在石阵附近。".to_string(),
+            }],
+            rejected: Vec::new(),
+        });
+
+        let place = choose_journey_place(&places, Vec3::ZERO, Some(&director)).expect("place");
+
+        assert_eq!(place.kind, PlaceKind::StoneRing);
     }
 
     #[test]

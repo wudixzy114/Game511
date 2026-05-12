@@ -12,7 +12,7 @@ use crate::game::{
     intent::{IntentState, PerceptionState, intent_debug_line, perception_label},
     journey::{JourneyStage, JourneyState, format_journey_memory_line},
     landmarks::LandmarkState,
-    notebook::{NotebookState, format_notebook_entry_line},
+    notebook::{NotebookEntry, NotebookEntryKind, NotebookState, format_notebook_entry_line},
     places::PlaceKind,
     player::{CameraMode, FirstPersonState},
     regions::RegionGraphState,
@@ -26,14 +26,16 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiFontHandle>();
+        app.init_resource::<UiModeState>();
         app.add_systems(Startup, spawn_ui_camera);
         app.add_systems(OnEnter(AppScreen::MainMenu), spawn_main_menu);
-        app.add_systems(OnEnter(AppScreen::InGame), spawn_hud);
+        app.add_systems(OnEnter(AppScreen::InGame), (reset_ui_mode, spawn_hud));
         app.add_systems(OnEnter(InGameState::Paused), spawn_pause_menu);
         app.add_systems(
             Update,
             (
                 process_pending_session_launch.run_if(in_state(AppScreen::MainMenu)),
+                handle_ui_mode_input.run_if(in_state(AppScreen::InGame)),
                 update_button_interactions,
                 handle_button_actions,
                 toggle_pause_with_escape.run_if(in_state(AppScreen::InGame)),
@@ -42,6 +44,7 @@ impl Plugin for UiPlugin {
                     update_hud_stats_text,
                     update_hud_omen_text,
                     update_hud_context_text,
+                    update_notebook_overlay,
                 )
                     .run_if(in_state(AppScreen::InGame)),
                 update_crosshair_visibility.run_if(in_state(AppScreen::InGame)),
@@ -96,6 +99,51 @@ struct HudNotebookText;
 
 #[derive(Component)]
 struct Crosshair;
+
+#[derive(Debug, Resource, Clone, Copy, PartialEq, Eq)]
+pub struct UiModeState {
+    pub hud_mode: HudMode,
+    pub notebook_open: bool,
+    pub notebook_category: NotebookEntryKind,
+}
+
+impl Default for UiModeState {
+    fn default() -> Self {
+        Self {
+            hud_mode: HudMode::Formal,
+            notebook_open: false,
+            notebook_category: NotebookEntryKind::Dream,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HudMode {
+    Formal,
+    Development,
+}
+
+impl HudMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Formal => "正式 HUD",
+            Self::Development => "开发 HUD",
+        }
+    }
+}
+
+fn reset_ui_mode(mut ui_mode: ResMut<UiModeState>) {
+    *ui_mode = UiModeState::default();
+}
+
+#[derive(Component)]
+struct NotebookOverlay;
+
+#[derive(Component)]
+struct NotebookTitleText;
+
+#[derive(Component)]
+struct NotebookBodyText;
 
 #[derive(Resource)]
 struct UiFontHandle(Handle<Font>);
@@ -541,6 +589,39 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                     )]
                 )],
             ));
+
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: px(600),
+                    max_width: percent(88),
+                    max_height: percent(78),
+                    padding: UiRect::all(px(24)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(8)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(14),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.88)),
+                BorderColor::all(Color::srgba(0.46, 0.39, 0.27, 0.9)),
+                Visibility::Hidden,
+                NotebookOverlay,
+                children![
+                    (
+                        Text::new("记事本"),
+                        ui_text_font(&font, 26.0),
+                        TextColor(TEXT_ACCENT),
+                        NotebookTitleText,
+                    ),
+                    (
+                        Text::new(""),
+                        ui_text_font(&font, 16.0),
+                        TextColor(TEXT_PRIMARY),
+                        NotebookBodyText,
+                    )
+                ],
+            ));
         });
 }
 
@@ -797,12 +878,50 @@ fn handle_button_actions(
     }
 }
 
+fn handle_ui_mode_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ui_mode: ResMut<UiModeState>,
+    mut notebook: Option<ResMut<NotebookState>>,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        ui_mode.hud_mode = match ui_mode.hud_mode {
+            HudMode::Formal => HudMode::Development,
+            HudMode::Development => HudMode::Formal,
+        };
+    }
+
+    if keys.just_pressed(KeyCode::KeyN) {
+        ui_mode.notebook_open = !ui_mode.notebook_open;
+        if ui_mode.notebook_open
+            && let Some(notebook) = notebook.as_deref_mut()
+        {
+            notebook.mark_all_read();
+        }
+    }
+
+    if !ui_mode.notebook_open {
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Tab) || keys.just_pressed(KeyCode::ArrowRight) {
+        ui_mode.notebook_category = shift_notebook_category(ui_mode.notebook_category, 1);
+    } else if keys.just_pressed(KeyCode::ArrowLeft) {
+        ui_mode.notebook_category = shift_notebook_category(ui_mode.notebook_category, -1);
+    }
+}
+
 fn toggle_pause_with_escape(
     keys: Res<ButtonInput<KeyCode>>,
     current_state: Res<State<InGameState>>,
+    mut ui_mode: ResMut<UiModeState>,
     mut next_state: ResMut<NextState<InGameState>>,
 ) {
     if !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+
+    if ui_mode.notebook_open {
+        ui_mode.notebook_open = false;
         return;
     }
 
@@ -815,7 +934,7 @@ fn toggle_pause_with_escape(
 fn update_hud_control_text(
     mut performance: ResMut<FramePerformance>,
     session_mode: Res<SessionMode>,
-    keys: Res<ButtonInput<KeyCode>>,
+    ui_mode: Res<UiModeState>,
     mut controls_query: Query<&mut Text, With<HudControlText>>,
     mut panel_query: Query<&mut Visibility, With<HudControlPanel>>,
 ) {
@@ -824,12 +943,12 @@ fn update_hud_control_text(
         return;
     };
     controls_text.0 = format!(
-        "{}\n{}",
+        "{}\nF 交谈/观察  E 感知  N 记事本  Tab 分类  G 通过边界  F3 {}",
         control_hint(*session_mode),
-        "F 交谈/观察  E 感知  V 切换视角  G 通过边界  F3 开发 HUD"
+        ui_mode.hud_mode.label()
     );
     for mut visibility in &mut panel_query {
-        *visibility = if keys.pressed(KeyCode::F3) {
+        *visibility = if ui_mode.hud_mode == HudMode::Development {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -840,7 +959,7 @@ fn update_hud_control_text(
 
 fn update_hud_stats_text(
     mut performance: ResMut<FramePerformance>,
-    keys: Res<ButtonInput<KeyCode>>,
+    ui_mode: Res<UiModeState>,
     resources: HudResources<'_>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     mut stats_query: Query<&mut Text, With<HudStatsText>>,
@@ -862,7 +981,7 @@ fn update_hud_stats_text(
         director,
     ) = resources;
     for mut visibility in &mut panel_query {
-        *visibility = if keys.pressed(KeyCode::F3) {
+        *visibility = if ui_mode.hud_mode == HudMode::Development {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -901,6 +1020,17 @@ fn update_hud_stats_text(
             )
         })
         .unwrap_or_else(|| "共鸣：--  平静：--  征兆：未感知".to_string());
+    let sign_detail_line = signs
+        .as_deref()
+        .map(|signs| {
+            format!(
+                "征兆拆分：基础 {:.0}%  感知 {:.0}%  衰退 {:.0}%",
+                signs.base_omen_intensity * 100.0,
+                signs.perception_omen_intensity * 100.0,
+                signs.omen_decay * 100.0,
+            )
+        })
+        .unwrap_or_else(|| "征兆拆分：--".to_string());
     let journey_line = journey
         .as_deref()
         .map(|journey| {
@@ -975,7 +1105,8 @@ fn update_hud_stats_text(
         .and_then(|director| {
             director.last_validation.as_ref().map(|validation| {
                 format!(
-                    "导演建议：采纳 {} 拒绝 {}",
+                    "导演建议：{:?}  采纳 {} 拒绝 {}",
+                    director.request_status,
                     validation.accepted.len(),
                     validation.rejected.len()
                 )
@@ -987,7 +1118,7 @@ fn update_hud_stats_text(
         return;
     };
     stats_text.0 = format!(
-        "{status_line}\n{resonance_line}\n{journey_line}\n{intent_line}\n{camera_line}\n{region_line}\n{pyramid_line}\n{ecology_line}\n{director_line}"
+        "{status_line}\n{resonance_line}\n{sign_detail_line}\n{journey_line}\n{intent_line}\n{camera_line}\n{region_line}\n{pyramid_line}\n{ecology_line}\n{director_line}"
     );
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
@@ -1030,6 +1161,7 @@ fn update_hud_context_text(
     village: Option<Res<VillageState>>,
     notebook: Option<Res<NotebookState>>,
     perception: Option<Res<PerceptionState>>,
+    ui_mode: Res<UiModeState>,
     regions: Option<Res<RegionGraphState>>,
     mut interaction_query: Query<&mut Text, With<HudInteractionText>>,
     mut notebook_query: Query<&mut Text, (With<HudNotebookText>, Without<HudInteractionText>)>,
@@ -1063,6 +1195,10 @@ fn update_hud_context_text(
     }
 
     if let Some(mut notebook_text) = notebook_query.iter_mut().next() {
+        if ui_mode.notebook_open {
+            notebook_text.0 = format!("记事本已打开 [{}]", ui_mode.notebook_category.label());
+            return;
+        }
         notebook_text.0 = notebook
             .as_deref()
             .and_then(|notebook| {
@@ -1081,11 +1217,13 @@ fn update_hud_context_text(
 fn update_crosshair_visibility(
     session_mode: Res<SessionMode>,
     in_game_state: Res<State<InGameState>>,
+    ui_mode: Res<UiModeState>,
     camera_state: Option<Res<FirstPersonState>>,
     mut query: Query<&mut Visibility, With<Crosshair>>,
 ) {
     let visible = *session_mode == SessionMode::Exploration
         && *in_game_state.get() == InGameState::Running
+        && !ui_mode.notebook_open
         && camera_state
             .as_deref()
             .is_none_or(|state| state.camera_mode == CameraMode::FirstPerson);
@@ -1096,6 +1234,34 @@ fn update_crosshair_visibility(
             Visibility::Hidden
         };
     }
+}
+
+fn update_notebook_overlay(
+    ui_mode: Res<UiModeState>,
+    notebook: Option<Res<NotebookState>>,
+    mut overlay_query: Query<&mut Visibility, With<NotebookOverlay>>,
+    mut title_query: Query<&mut Text, (With<NotebookTitleText>, Without<NotebookBodyText>)>,
+    mut body_query: Query<&mut Text, (With<NotebookBodyText>, Without<NotebookTitleText>)>,
+) {
+    let Some(mut overlay_visibility) = overlay_query.iter_mut().next() else {
+        return;
+    };
+    let Some(mut title_text) = title_query.iter_mut().next() else {
+        return;
+    };
+    let Some(mut body_text) = body_query.iter_mut().next() else {
+        return;
+    };
+
+    if !ui_mode.notebook_open {
+        *overlay_visibility = Visibility::Hidden;
+        body_text.0.clear();
+        return;
+    }
+
+    *overlay_visibility = Visibility::Visible;
+    title_text.0 = format!("记事本 / {}", ui_mode.notebook_category.label());
+    body_text.0 = notebook_overlay_text(notebook.as_deref(), ui_mode.notebook_category);
 }
 
 fn button_color(tone: ButtonTone, visual: ButtonVisualState) -> Color {
@@ -1261,6 +1427,50 @@ fn notebook_pause_text(notebook: Option<&NotebookState>) -> String {
     }
 }
 
+fn shift_notebook_category(current: NotebookEntryKind, delta: i32) -> NotebookEntryKind {
+    let categories = NotebookEntryKind::ALL;
+    let index = categories
+        .iter()
+        .position(|kind| *kind == current)
+        .unwrap_or(0) as i32;
+    let next = (index + delta).rem_euclid(categories.len() as i32) as usize;
+    categories[next]
+}
+
+fn notebook_overlay_text(notebook: Option<&NotebookState>, category: NotebookEntryKind) -> String {
+    let Some(notebook) = notebook else {
+        return "记事本还没有记录。".to_string();
+    };
+    let entries: Vec<&NotebookEntry> = notebook
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == category)
+        .rev()
+        .take(6)
+        .collect();
+    if entries.is_empty() {
+        return format!("这一页还没有{}记录。", category.label());
+    }
+
+    entries
+        .into_iter()
+        .rev()
+        .map(|entry| {
+            format!(
+                "{}\n{}\n{}",
+                format_notebook_entry_line(entry),
+                entry.body,
+                entry
+                    .location
+                    .as_deref()
+                    .map(|location| format!("地点：{location}"))
+                    .unwrap_or_else(|| "地点：未注明".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::{
@@ -1270,12 +1480,14 @@ mod tests {
 
     use crate::game::{
         flow::{AppScreen, PendingSessionLaunch, SessionMode},
+        notebook::{NotebookEntryKind, NotebookSource, NotebookState},
         signs::OmenKind,
         world::BiomeKind,
     };
 
     use super::{
-        biome_label, control_hint, omen_label, process_pending_session_launch, time_of_day_label,
+        biome_label, control_hint, notebook_overlay_text, omen_label,
+        process_pending_session_launch, shift_notebook_category, time_of_day_label,
     };
 
     #[test]
@@ -1319,5 +1531,47 @@ mod tests {
             SessionMode::Presentation
         );
         assert_eq!(app.world().resource::<PendingSessionLaunch>().0, None);
+    }
+
+    #[test]
+    fn notebook_category_shift_wraps_cleanly() {
+        assert_eq!(
+            shift_notebook_category(NotebookEntryKind::Dream, -1),
+            NotebookEntryKind::PlayerNote
+        );
+        assert_eq!(
+            shift_notebook_category(NotebookEntryKind::PlayerNote, 1),
+            NotebookEntryKind::Dream
+        );
+    }
+
+    #[test]
+    fn notebook_overlay_filters_by_category() {
+        let mut notebook = NotebookState::default();
+        let _ = notebook.record(crate::game::notebook::NotebookRecord {
+            kind: NotebookEntryKind::Place,
+            at_seconds: 1.0,
+            location: Some("海边".to_string()),
+            source: NotebookSource::PlaceArrival,
+            title: "抵达静水湾".to_string(),
+            body: "你抵达了静水湾。".to_string(),
+            tags: Vec::new(),
+        });
+        let _ = notebook.record(crate::game::notebook::NotebookRecord {
+            kind: NotebookEntryKind::Sign,
+            at_seconds: 2.0,
+            location: Some("途中".to_string()),
+            source: NotebookSource::Sign,
+            title: "山鸣曾经显现".to_string(),
+            body: "山风忽然朝一个方向收紧。".to_string(),
+            tags: Vec::new(),
+        });
+
+        let place_text = notebook_overlay_text(Some(&notebook), NotebookEntryKind::Place);
+        let sign_text = notebook_overlay_text(Some(&notebook), NotebookEntryKind::Sign);
+
+        assert!(place_text.contains("抵达静水湾"));
+        assert!(!place_text.contains("山鸣"));
+        assert!(sign_text.contains("山鸣曾经显现"));
     }
 }

@@ -44,6 +44,9 @@ pub struct SignState {
     pub omen_triggered: bool,
     pub current_omen: Option<OmenKind>,
     pub omen_intensity: f32,
+    pub base_omen_intensity: f32,
+    pub perception_omen_intensity: f32,
+    pub omen_decay: f32,
     pub omen_direction: Vec3,
     pub target_place_id: Option<u64>,
     pub target_place_kind: Option<PlaceKind>,
@@ -62,6 +65,9 @@ impl Default for SignState {
             omen_triggered: false,
             current_omen: None,
             omen_intensity: 0.0,
+            base_omen_intensity: 0.0,
+            perception_omen_intensity: 0.0,
+            omen_decay: 0.0,
             omen_direction: Vec3::ZERO,
             target_place_id: None,
             target_place_kind: None,
@@ -260,6 +266,9 @@ fn update_resonance(resources: SignUpdateResources<'_>, mut signs: ResMut<SignSt
             target_place_id = ?update.state.target_place_id,
             target_place_kind = update.state.target_place_kind.map(PlaceKind::label),
             target_distance = ?update.state.target_distance,
+            base_intensity = update.state.base_omen_intensity,
+            perception_intensity = update.state.perception_omen_intensity,
+            omen_decay = update.state.omen_decay,
             biome = ?context.biome,
             cooldown_seconds = update.state.cooldown_seconds,
             "world omen guidance updated"
@@ -370,9 +379,12 @@ fn advance_sign_state(
         state.current_omen = None;
     }
 
-    state.omen_intensity = (omen_intensity(state, guidance, threshold)
-        + guidance.perception_boost * 0.34
-        + guidance.dream_echo * 0.16)
+    state.omen_decay = update_omen_decay(state.omen_decay, guidance, context.delta_seconds);
+    state.base_omen_intensity =
+        (omen_intensity(state, guidance, threshold) + guidance.dream_echo * 0.16).clamp(0.0, 1.0);
+    state.perception_omen_intensity = (guidance.perception_boost * 0.34).clamp(0.0, 1.0);
+    state.omen_intensity = (state.base_omen_intensity * (1.0 - state.omen_decay.clamp(0.0, 0.85))
+        + state.perception_omen_intensity)
         .clamp(0.0, 1.0);
     state.omen_direction = guidance.direction_to_target;
     state.target_place_id = guidance.target_place_id;
@@ -459,6 +471,7 @@ fn sign_guidance_changed(previous: SignState, current: SignState) -> bool {
         || previous.guidance_phase != current.guidance_phase
         || previous.current_omen != current.current_omen
         || (previous.omen_intensity - current.omen_intensity).abs() > 0.35
+        || (previous.omen_decay - current.omen_decay).abs() > 0.2
         || (previous.response_intensity <= 0.02 && current.response_intensity > 0.02)
 }
 
@@ -493,6 +506,31 @@ fn omen_intensity(
         + phase * 0.2
         + guidance.response_intensity * 0.28)
         .clamp(0.0, 1.0)
+}
+
+fn update_omen_decay(current: f32, guidance: OmenGuidanceContext, delta_seconds: f32) -> f32 {
+    let recovering = guidance.perception_boost > 0.02
+        || guidance.intent_affinity > 0.02
+        || matches!(
+            guidance.phase,
+            OmenGuidancePhase::DrawingNear
+                | OmenGuidancePhase::Arrived
+                | OmenGuidancePhase::Responding
+        ) && guidance.proximity > 0.55;
+    let fading_dream = guidance.dream_echo > 0.0 && guidance.dream_echo < 0.38 && !recovering;
+    let remote_unanswered =
+        guidance.target_place_id.is_some() && guidance.proximity < 0.18 && !recovering;
+    let target = if recovering {
+        0.0
+    } else if fading_dream {
+        0.46
+    } else if remote_unanswered {
+        0.18
+    } else {
+        0.0
+    };
+    let rate = if target > current { 0.12 } else { 0.32 };
+    (current + (target - current) * (1.0 - (-rate * delta_seconds.max(0.0)).exp())).clamp(0.0, 0.85)
 }
 
 fn omen_beacon_position(
@@ -612,7 +650,7 @@ mod tests {
 
     use super::{
         BiomeKind, OmenGuidanceContext, OmenGuidancePhase, OmenKind, ResonanceContext, SignState,
-        advance_sign_state,
+        advance_sign_state, update_omen_decay,
     };
     use crate::core::config::SignConfig;
     use crate::game::places::PlaceKind;
@@ -662,6 +700,9 @@ mod tests {
         assert_eq!(state.calm, 1.0);
         assert!(!state.omen_triggered);
         assert_eq!(state.current_omen, None);
+        assert_eq!(state.base_omen_intensity, 0.0);
+        assert_eq!(state.perception_omen_intensity, 0.0);
+        assert_eq!(state.omen_decay, 0.0);
     }
 
     #[test]
@@ -837,5 +878,22 @@ mod tests {
         );
 
         assert!(boosted.state.omen_intensity > base.state.omen_intensity);
+        assert!(boosted.state.perception_omen_intensity > base.state.perception_omen_intensity);
+    }
+
+    #[test]
+    fn unanswered_dream_echo_can_decay_and_later_recover() {
+        let mut fading_guidance = guidance(PlaceKind::StoneRing, 180.0, OmenGuidancePhase::Far);
+        fading_guidance.dream_echo = 0.24;
+        fading_guidance.proximity = 0.04;
+
+        let decayed = update_omen_decay(0.0, fading_guidance, 5.0);
+
+        let mut recovering_guidance = fading_guidance;
+        recovering_guidance.perception_boost = 0.8;
+        let recovered = update_omen_decay(decayed, recovering_guidance, 5.0);
+
+        assert!(decayed > 0.0);
+        assert!(recovered < decayed);
     }
 }
