@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub log_directory: PathBuf,
     pub performance_log_name: String,
     pub frame_log_interval: u32,
+    pub performance_detail_interval: u32,
     pub presentation: PresentationConfig,
     pub world: WorldConfig,
     pub environment: EnvironmentConfig,
@@ -137,6 +138,7 @@ window_title = "Test Title"
 log_directory = "logs"
 performance_log_name = "performance.log"
 frame_log_interval = 30
+performance_detail_interval = 1
 
 [world]
 seed = 7

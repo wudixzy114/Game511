@@ -2,6 +2,7 @@ window_title = "Dao: Emergent Journey"
 log_directory = "logs"
 performance_log_name = "performance.log"
 frame_log_interval = 120
+performance_detail_interval = 1
 
 [presentation]
 enabled = false

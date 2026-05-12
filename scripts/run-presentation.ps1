@@ -7,4 +7,4 @@ if (-not (Test-Path ".\\logs")) {
 $env:DAO_PRESENTATION_MODE = "1"
 
 Write-Host "Starting Dao presentation scene..."
-cargo run
+cargo run --bin dao_game

@@ -42,6 +42,18 @@ pub enum PerformancePhase {
 }
 
 impl PerformancePhase {
+    pub const ALL: [Self; 9] = [
+        Self::Environment,
+        Self::Presentation,
+        Self::Player,
+        Self::Signs,
+        Self::Ui,
+        Self::WorldCollision,
+        Self::WorldImpostor,
+        Self::WorldStreaming,
+        Self::WorldVisibility,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Environment => "environment",
@@ -235,10 +247,47 @@ pub fn track_frame_timing(
         report.phase_totals.insert(*phase, *aggregate);
     }
 
-    if snapshot
-        .frame_count
-        .is_multiple_of(u64::from(config.frame_log_interval))
-    {
+    if should_log_frame(snapshot.frame_count, config.performance_detail_interval) {
+        let environment_ms = performance.previous_frame_phase_ms(PerformancePhase::Environment);
+        let presentation_ms = performance.previous_frame_phase_ms(PerformancePhase::Presentation);
+        let player_ms = performance.previous_frame_phase_ms(PerformancePhase::Player);
+        let signs_ms = performance.previous_frame_phase_ms(PerformancePhase::Signs);
+        let ui_ms = performance.previous_frame_phase_ms(PerformancePhase::Ui);
+        let world_collision_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::WorldCollision);
+        let world_impostor_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::WorldImpostor);
+        let world_streaming_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::WorldStreaming);
+        let world_visibility_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::WorldVisibility);
+        let profiled_phase_ms = PerformancePhase::ALL
+            .iter()
+            .map(|phase| performance.previous_frame_phase_ms(*phase))
+            .sum::<f32>();
+        tracing::trace!(
+            target: "dao_game::performance::frame_detail",
+            session_id = session_id.0,
+            frame = snapshot.frame_count,
+            frame_ms = snapshot.frame_ms,
+            average_ms = snapshot.moving_average_ms,
+            budget_ms = config.quality.frame_time_budget_ms,
+            budget_delta_ms = snapshot.frame_ms - config.quality.frame_time_budget_ms,
+            profiled_phase_ms = profiled_phase_ms,
+            environment_ms = environment_ms,
+            presentation_ms = presentation_ms,
+            player_ms = player_ms,
+            signs_ms = signs_ms,
+            ui_ms = ui_ms,
+            world_collision_ms = world_collision_ms,
+            world_impostor_ms = world_impostor_ms,
+            world_streaming_ms = world_streaming_ms,
+            world_visibility_ms = world_visibility_ms,
+            "frame detail sample"
+        );
+    }
+
+    if should_log_frame(snapshot.frame_count, config.frame_log_interval) {
         let slowest_phase = snapshot.phase_breakdown.first().copied();
         tracing::info!(
             target: "dao_game::performance::frame",
@@ -282,6 +331,10 @@ pub fn track_frame_timing(
             budget_ms: config.quality.frame_time_budget_ms,
         });
     }
+}
+
+fn should_log_frame(frame_count: u64, interval: u32) -> bool {
+    interval > 0 && frame_count.is_multiple_of(u64::from(interval))
 }
 
 pub fn report_performance_session_summary(
@@ -380,7 +433,7 @@ fn top_phase_summary(
 mod tests {
     use std::time::Duration;
 
-    use super::{FramePerformance, PerformancePhase, top_phase_breakdown};
+    use super::{FramePerformance, PerformancePhase, should_log_frame, top_phase_breakdown};
 
     #[test]
     fn moving_average_updates_with_new_frame() {
@@ -422,5 +475,12 @@ mod tests {
             phases.first().map(|phase| phase.phase),
             Some(PerformancePhase::WorldCollision)
         );
+    }
+
+    #[test]
+    fn frame_logging_interval_zero_disables_samples() {
+        assert!(!should_log_frame(10, 0));
+        assert!(should_log_frame(10, 5));
+        assert!(!should_log_frame(11, 5));
     }
 }

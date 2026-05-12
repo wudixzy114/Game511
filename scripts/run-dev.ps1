@@ -5,4 +5,4 @@ if (-not (Test-Path ".\\logs")) {
 }
 
 Write-Host "Starting Dao prototype..."
-cargo run
+cargo run --bin dao_game

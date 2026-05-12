@@ -129,6 +129,7 @@ mod tests {
             log_directory: PathBuf::from("logs"),
             performance_log_name: "performance.log".to_string(),
             frame_log_interval: 60,
+            performance_detail_interval: 1,
             presentation: PresentationConfig {
                 enabled: true,
                 scene_duration_seconds: 7.0,

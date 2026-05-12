@@ -42,10 +42,15 @@ pub fn in_session_mode(mode: SessionMode) -> impl Fn(Res<SessionMode>) -> bool +
 }
 
 pub fn auto_start_session_mode_internal(
-    env_value: Option<&str>,
+    auto_start_value: Option<&str>,
+    presentation_value: Option<&str>,
     config: Option<&AppConfig>,
 ) -> Option<SessionMode> {
-    match env_value {
+    if let Some(raw) = auto_start_value {
+        return parse_auto_start_mode(raw);
+    }
+
+    match presentation_value {
         Some(raw) => {
             if matches!(raw.to_ascii_lowercase().as_str(), "0" | "false" | "off") {
                 None
@@ -59,6 +64,23 @@ pub fn auto_start_session_mode_internal(
     }
 }
 
+fn parse_auto_start_mode(raw: &str) -> Option<SessionMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "none" | "menu" => None,
+        "1" | "true" | "on" | "explore" | "exploration" | "game" | "world" => {
+            Some(SessionMode::Exploration)
+        }
+        "presentation" | "present" | "showcase" | "demo" => Some(SessionMode::Presentation),
+        unknown => {
+            tracing::warn!(
+                value = unknown,
+                "unknown DAO_AUTO_START_MODE, falling back to presentation"
+            );
+            Some(SessionMode::Presentation)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -68,7 +90,7 @@ mod tests {
         WorldConfig,
     };
 
-    use super::{SessionMode, auto_start_session_mode_internal};
+    use super::{SessionMode, auto_start_session_mode_internal, parse_auto_start_mode};
 
     fn test_config(enabled: bool) -> AppConfig {
         AppConfig {
@@ -76,6 +98,7 @@ mod tests {
             log_directory: PathBuf::from("logs"),
             performance_log_name: "performance.log".to_string(),
             frame_log_interval: 60,
+            performance_detail_interval: 1,
             presentation: PresentationConfig {
                 enabled,
                 scene_duration_seconds: 7.0,
@@ -150,24 +173,45 @@ mod tests {
     #[test]
     fn auto_start_uses_config_when_env_missing() {
         assert_eq!(
-            auto_start_session_mode_internal(None, Some(&test_config(true))),
+            auto_start_session_mode_internal(None, None, Some(&test_config(true))),
             Some(SessionMode::Presentation)
         );
         assert_eq!(
-            auto_start_session_mode_internal(None, Some(&test_config(false))),
+            auto_start_session_mode_internal(None, None, Some(&test_config(false))),
             None
         );
     }
 
     #[test]
-    fn auto_start_env_can_disable_or_enable_presentation() {
+    fn legacy_presentation_env_can_disable_or_enable_presentation() {
         assert_eq!(
-            auto_start_session_mode_internal(Some("false"), Some(&test_config(true))),
+            auto_start_session_mode_internal(None, Some("false"), Some(&test_config(true))),
             None
         );
         assert_eq!(
-            auto_start_session_mode_internal(Some("1"), Some(&test_config(false))),
+            auto_start_session_mode_internal(None, Some("1"), Some(&test_config(false))),
             Some(SessionMode::Presentation)
+        );
+    }
+
+    #[test]
+    fn auto_start_mode_env_selects_exploration_or_presentation() {
+        assert_eq!(
+            parse_auto_start_mode("exploration"),
+            Some(SessionMode::Exploration)
+        );
+        assert_eq!(
+            parse_auto_start_mode("presentation"),
+            Some(SessionMode::Presentation)
+        );
+        assert_eq!(parse_auto_start_mode("menu"), None);
+        assert_eq!(
+            auto_start_session_mode_internal(
+                Some("exploration"),
+                Some("presentation"),
+                Some(&test_config(true))
+            ),
+            Some(SessionMode::Exploration)
         );
     }
 }

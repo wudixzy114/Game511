@@ -20,9 +20,11 @@ pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        let env_value = env::var("DAO_PRESENTATION_MODE").ok();
+        let auto_start_value = env::var("DAO_AUTO_START_MODE").ok();
+        let presentation_value = env::var("DAO_PRESENTATION_MODE").ok();
         let auto_start_mode = auto_start_session_mode_internal(
-            env_value.as_deref(),
+            auto_start_value.as_deref(),
+            presentation_value.as_deref(),
             app.world().get_resource::<AppConfig>(),
         );
 
