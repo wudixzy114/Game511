@@ -58,6 +58,7 @@ pub struct FirstPersonState {
     pub cursor_locked: bool,
     pub camera_mode: CameraMode,
     pub third_person_distance: f32,
+    pub animation_state: PlayerAnimationState,
 }
 
 impl Default for FirstPersonState {
@@ -70,6 +71,7 @@ impl Default for FirstPersonState {
             cursor_locked: true,
             camera_mode: CameraMode::FirstPerson,
             third_person_distance: THIRD_PERSON_DEFAULT_DISTANCE,
+            animation_state: PlayerAnimationState::Idle,
         }
     }
 }
@@ -85,6 +87,25 @@ impl CameraMode {
         match self {
             Self::FirstPerson => "第一人称",
             Self::ThirdPerson => "第三人称",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum PlayerAnimationState {
+    Idle,
+    Walk,
+    Run,
+    Jump,
+}
+
+impl PlayerAnimationState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "站立",
+            Self::Walk => "行走",
+            Self::Run => "奔跑",
+            Self::Jump => "跳跃",
         }
     }
 }
@@ -105,16 +126,21 @@ const CAPSULE_SUPPORT_DIRECTIONS: [Vec2; 8] = [
     Vec2::new(-0.70710677, -0.70710677),
 ];
 const THIRD_PERSON_DEFAULT_DISTANCE: f32 = 6.2;
-const THIRD_PERSON_MIN_DISTANCE: f32 = 3.2;
-const THIRD_PERSON_MAX_DISTANCE: f32 = 9.5;
-const THIRD_PERSON_HEIGHT: f32 = 2.25;
-const THIRD_PERSON_SIDE_OFFSET: f32 = 0.42;
 
 type PlayerMoveResources<'w> = (
     Res<'w, Time>,
     Res<'w, ButtonInput<KeyCode>>,
     Res<'w, AppConfig>,
     Res<'w, WorldMap>,
+    ResMut<'w, TerrainCollisionProxy>,
+);
+
+type CameraSyncResources<'w> = (
+    Res<'w, Time>,
+    Res<'w, AppConfig>,
+    Option<Res<'w, FirstPersonState>>,
+    Option<Res<'w, FirstPersonBootstrap>>,
+    Option<Res<'w, WorldMap>>,
     ResMut<'w, TerrainCollisionProxy>,
 );
 
@@ -208,7 +234,8 @@ fn initialize_first_person_state(
     state.grounded = true;
     state.cursor_locked = true;
     state.camera_mode = CameraMode::FirstPerson;
-    state.third_person_distance = THIRD_PERSON_DEFAULT_DISTANCE;
+    state.third_person_distance = config.camera.third_person_default_distance;
+    state.animation_state = PlayerAnimationState::Idle;
 
     player_transform.rotation = Quat::IDENTITY;
     camera_transform.translation =
@@ -223,6 +250,7 @@ fn start_player_session(mut commands: Commands) {
 }
 
 fn handle_camera_mode_toggle(
+    config: Res<AppConfig>,
     keys: Res<ButtonInput<KeyCode>>,
     scroll: Res<AccumulatedMouseScroll>,
     state: Option<ResMut<FirstPersonState>>,
@@ -243,8 +271,10 @@ fn handle_camera_mode_toggle(
     }
 
     if state.camera_mode == CameraMode::ThirdPerson && scroll.delta.y.abs() > f32::EPSILON {
-        state.third_person_distance = (state.third_person_distance - scroll.delta.y * 0.32)
-            .clamp(THIRD_PERSON_MIN_DISTANCE, THIRD_PERSON_MAX_DISTANCE);
+        state.third_person_distance = (state.third_person_distance - scroll.delta.y * 0.32).clamp(
+            config.camera.third_person_min_distance,
+            config.camera.third_person_max_distance,
+        );
     }
 }
 
@@ -411,6 +441,8 @@ fn move_player_body(
     transform.translation.y = vertical_contact.y;
     state.vertical_velocity = vertical_contact.vertical_velocity;
     state.grounded = vertical_contact.grounded;
+    state.animation_state =
+        animation_state_for_movement(movement.length_squared(), sprint_multiplier, state.grounded);
 
     transform.rotation = Quat::from_rotation_y(state.yaw);
     performance.record_phase_duration(PerformancePhase::Player, started_at.elapsed());
@@ -571,14 +603,11 @@ fn resolve_vertical_contact(
 }
 
 fn sync_camera_to_player(
-    config: Res<AppConfig>,
-    state: Option<Res<FirstPersonState>>,
-    bootstrap: Option<Res<FirstPersonBootstrap>>,
-    world_map: Option<Res<WorldMap>>,
-    mut collision_proxy: ResMut<TerrainCollisionProxy>,
+    resources: CameraSyncResources<'_>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut camera_query: Query<&mut Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 ) {
+    let (time, config, state, bootstrap, world_map, mut collision_proxy) = resources;
     let Some(bootstrap) = bootstrap else {
         return;
     };
@@ -608,13 +637,16 @@ fn sync_camera_to_player(
                 state.yaw,
                 state.pitch,
                 state.third_person_distance,
+                &config,
             );
             let adjusted = if let Some(world_map) = world_map.as_deref() {
-                avoid_terrain_for_camera(desired, &mut collision_proxy, world_map)
+                avoid_terrain_for_camera(desired, &mut collision_proxy, world_map, &config)
             } else {
                 desired
             };
-            camera_transform.translation = camera_transform.translation.lerp(adjusted, 0.22);
+            let blend =
+                1.0 - (-config.camera.third_person_smoothness.max(0.1) * time.delta_secs()).exp();
+            camera_transform.translation = camera_transform.translation.lerp(adjusted, blend);
             camera_transform.look_at(
                 player_transform.translation + Vec3::Y * (config.player.eye_height * 0.82),
                 Vec3::Y,
@@ -644,26 +676,32 @@ pub fn third_person_camera_position(
     yaw: f32,
     pitch: f32,
     distance: f32,
+    config: &AppConfig,
 ) -> Vec3 {
     let yaw_rotation = Quat::from_rotation_y(yaw);
     let backward = yaw_rotation * Vec3::Z;
     let right = yaw_rotation * Vec3::X;
     let pitch_lift = (-pitch).clamp(-0.45, 0.65) * 1.2;
     player_position
-        + Vec3::Y * (THIRD_PERSON_HEIGHT + pitch_lift)
-        + backward * distance.clamp(THIRD_PERSON_MIN_DISTANCE, THIRD_PERSON_MAX_DISTANCE)
-        + right * THIRD_PERSON_SIDE_OFFSET
+        + Vec3::Y * (config.camera.third_person_height + pitch_lift)
+        + backward
+            * distance.clamp(
+                config.camera.third_person_min_distance,
+                config.camera.third_person_max_distance,
+            )
+        + right * config.camera.third_person_side_offset
 }
 
 fn avoid_terrain_for_camera(
     desired: Vec3,
     collision_proxy: &mut TerrainCollisionProxy,
     world_map: &WorldMap,
+    config: &AppConfig,
 ) -> Vec3 {
     let Some(ground) = collision_proxy.sample_height(world_map, desired.x, desired.z) else {
         return desired;
     };
-    let min_y = ground + 0.55;
+    let min_y = ground + config.camera.third_person_ground_clearance.max(0.1);
     if desired.y < min_y {
         Vec3::new(desired.x, min_y, desired.z)
     } else {
@@ -671,15 +709,40 @@ fn avoid_terrain_for_camera(
     }
 }
 
+fn animation_state_for_movement(
+    movement_len_sq: f32,
+    sprint_multiplier: f32,
+    grounded: bool,
+) -> PlayerAnimationState {
+    if !grounded {
+        PlayerAnimationState::Jump
+    } else if movement_len_sq <= f32::EPSILON {
+        PlayerAnimationState::Idle
+    } else if sprint_multiplier > 1.05 {
+        PlayerAnimationState::Run
+    } else {
+        PlayerAnimationState::Walk
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use bevy::prelude::{Vec2, Vec3};
 
-    use crate::game::world::TerrainCollisionSample;
+    use crate::{
+        core::config::{
+            AppConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig, PlayerConfig,
+            PresentationConfig, QualityConfig, SignConfig, WorldConfig,
+        },
+        game::world::TerrainCollisionSample,
+    };
 
     use super::{
-        CameraMode, FirstPersonState, TerrainSupport, TerrainWalkerConfig, VerticalContactInput,
-        resolve_horizontal_contact, resolve_vertical_contact, third_person_camera_position,
+        CameraMode, FirstPersonState, PlayerAnimationState, TerrainSupport, TerrainWalkerConfig,
+        VerticalContactInput, animation_state_for_movement, resolve_horizontal_contact,
+        resolve_vertical_contact, third_person_camera_position,
     };
 
     #[test]
@@ -797,9 +860,134 @@ mod tests {
     #[test]
     fn third_person_camera_sits_behind_player() {
         let player = Vec3::new(0.0, 1.2, 0.0);
-        let camera = third_person_camera_position(player, 0.0, 0.0, 6.0);
+        let config = test_config();
+        let camera = third_person_camera_position(player, 0.0, 0.0, 6.0, &config);
 
         assert!(camera.z > player.z);
         assert!(camera.y > player.y);
+    }
+
+    #[test]
+    fn animation_state_tracks_ground_and_speed() {
+        assert_eq!(
+            animation_state_for_movement(0.0, 1.0, true),
+            PlayerAnimationState::Idle
+        );
+        assert_eq!(
+            animation_state_for_movement(1.0, 1.0, true),
+            PlayerAnimationState::Walk
+        );
+        assert_eq!(
+            animation_state_for_movement(1.0, 1.7, true),
+            PlayerAnimationState::Run
+        );
+        assert_eq!(
+            animation_state_for_movement(1.0, 1.0, false),
+            PlayerAnimationState::Jump
+        );
+    }
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            window_title: "Dao".to_string(),
+            log_directory: PathBuf::from("logs"),
+            performance_log_name: "performance.log".to_string(),
+            frame_log_interval: 60,
+            performance_detail_interval: 1,
+            presentation: PresentationConfig {
+                enabled: false,
+                scene_duration_seconds: 7.0,
+                camera_blend_speed: 2.0,
+            },
+            world: WorldConfig {
+                seed: 42,
+                world_radius: 64,
+                chunk_radius: 4,
+                cell_size: 3.2,
+                terrain_subdivisions: 6,
+                terrain_scale: 18.0,
+                height_variation: 6.0,
+                water_level: -0.2,
+                noise_octaves: 5,
+                ridge_sharpness: 2.1,
+                shoreline_blend: 0.2,
+                river_frequency: 0.19,
+                river_depth: 0.72,
+                erosion_strength: 0.52,
+                sediment_bias: 0.28,
+                visible_chunk_radius: 2,
+                high_detail_chunk_radius: 1,
+                low_detail_chunk_radius: 2,
+                preload_chunk_radius: 3,
+                impostor_chunk_radius: 6,
+                impostor_radial_bands: 3,
+                impostor_angular_segments: 32,
+                showcase_search_radius: 24,
+                streaming_chunk_budget: 1,
+                background_generation_budget: 2,
+                streaming_cache_capacity: 32,
+                collision_proxy_radius: 1,
+                collision_subdivisions: 8,
+                collision_chunk_budget: 1,
+                collision_cache_capacity: 16,
+                material_texture_resolution: 64,
+            },
+            environment: EnvironmentConfig {
+                day_length_seconds: 180.0,
+                wander_radius: 4.5,
+                wander_speed: 0.7,
+            },
+            player: PlayerConfig {
+                walk_speed: 7.0,
+                sprint_multiplier: 1.6,
+                mouse_sensitivity: 0.002,
+                eye_height: 1.65,
+                body_height: 1.2,
+                capsule_radius: 0.4,
+                max_slope_degrees: 45.0,
+                step_height: 0.6,
+                ground_snap_distance: 1.0,
+                contact_substeps: 4,
+                jump_velocity: 6.0,
+                gravity: 18.0,
+            },
+            camera: CameraConfig {
+                third_person_default_distance: 6.2,
+                third_person_min_distance: 3.2,
+                third_person_max_distance: 9.5,
+                third_person_height: 2.25,
+                third_person_side_offset: 0.42,
+                third_person_smoothness: 12.0,
+                third_person_ground_clearance: 0.55,
+            },
+            ecology: EcologyConfig {
+                bird_count: 18,
+                fish_count: 10,
+                state_update_interval_seconds: 0.2,
+                visual_update_interval_seconds: 0.066,
+                max_visible_bird_distance: 240.0,
+            },
+            desert: DesertConfig {
+                dune_height: 3.2,
+                dune_frequency: 0.22,
+                gobi_flatness: 0.48,
+                oasis_radius: 38.0,
+                oasis_moisture: 0.86,
+                sandstorm_visibility: 46.0,
+                sandstorm_particle_strength: 1.0,
+                sandstorm_wind_speed: 4.2,
+            },
+            signs: SignConfig {
+                resonance_threshold: 0.7,
+                resonance_smoothing: 0.12,
+                calm_recovery: 0.01,
+                calm_threshold: 0.35,
+                omen_beacon_height: 3.0,
+            },
+            quality: QualityConfig {
+                target_fps: 60.0,
+                frame_time_budget_ms: 16.6,
+            },
+        }
     }
 }

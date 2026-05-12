@@ -105,6 +105,7 @@ impl Default for PyramidSignal {
 struct LandmarkVisual {
     landmark_id: u64,
     near_detail: bool,
+    feature_kind: LandmarkFeatureKind,
 }
 
 #[derive(Debug, Resource, Clone)]
@@ -112,6 +113,16 @@ struct LandmarkMaterials {
     pyramid: Handle<StandardMaterial>,
     oasis_water: Handle<StandardMaterial>,
     old_stone: Handle<StandardMaterial>,
+    relic: Handle<StandardMaterial>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+enum LandmarkFeatureKind {
+    Silhouette,
+    Ruin,
+    Oasis,
+    Relic,
+    Boundary,
 }
 
 fn initialize_landmarks(
@@ -237,7 +248,14 @@ fn update_landmark_visibility(
             perception_boost,
             omen_intensity,
         );
-        let visible = reveal > 0.05 && (!visual.near_detail || distance < landmark.scale * 2.8);
+        let feature_reveal = match visual.feature_kind {
+            LandmarkFeatureKind::Oasis => (reveal + 0.22).clamp(0.0, 1.0),
+            LandmarkFeatureKind::Relic => (reveal + perception_boost * 0.2).clamp(0.0, 1.0),
+            LandmarkFeatureKind::Ruin => reveal,
+            LandmarkFeatureKind::Silhouette | LandmarkFeatureKind::Boundary => reveal,
+        };
+        let visible =
+            feature_reveal > 0.05 && (!visual.near_detail || distance < landmark.scale * 3.1);
         *visibility = if visible {
             Visibility::Visible
         } else {
@@ -245,7 +263,8 @@ fn update_landmark_visibility(
         };
         if landmark.kind == RegionLandmarkKind::DesertPyramid {
             let sandstorm = sandstorm_strength_for_pyramid(distance, perception_boost, dream_echo);
-            let silhouette = (reveal + perception_boost * 0.34 + dream_echo * 0.18).clamp(0.0, 1.0);
+            let silhouette =
+                (feature_reveal + perception_boost * 0.34 + dream_echo * 0.18).clamp(0.0, 1.0);
             pyramid_signal = PyramidSignal {
                 visible,
                 distance: Some(distance),
@@ -302,6 +321,46 @@ fn spawn_landmark_visual(
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: false,
+                    feature_kind: LandmarkFeatureKind::Silhouette,
+                },
+            ));
+            commands.spawn((
+                Name::new("DesertOasis"),
+                DespawnOnExit(AppScreen::InGame),
+                Mesh3d(meshes.add(Mesh::from(bevy::math::primitives::Cylinder::new(
+                    landmark.scale * 0.18,
+                    0.08,
+                )))),
+                MeshMaterial3d(materials.oasis_water.clone()),
+                Transform::from_translation(
+                    landmark.position
+                        + Vec3::new(-landmark.scale * 0.74, 0.08, landmark.scale * 0.36),
+                )
+                .with_scale(Vec3::new(1.8, 1.0, 0.72)),
+                Visibility::Hidden,
+                LandmarkVisual {
+                    landmark_id: landmark.id,
+                    near_detail: true,
+                    feature_kind: LandmarkFeatureKind::Oasis,
+                },
+            ));
+            commands.spawn((
+                Name::new("DesertRelicPlaceholder"),
+                DespawnOnExit(AppScreen::InGame),
+                Mesh3d(meshes.add(Mesh::from(bevy::math::primitives::Cuboid::new(
+                    1.2, 2.2, 1.2,
+                )))),
+                MeshMaterial3d(materials.relic.clone()),
+                Transform::from_translation(
+                    landmark.position
+                        + Vec3::new(landmark.scale * 0.48, 1.1, -landmark.scale * 0.62),
+                )
+                .with_rotation(Quat::from_rotation_y(0.7)),
+                Visibility::Hidden,
+                LandmarkVisual {
+                    landmark_id: landmark.id,
+                    near_detail: true,
+                    feature_kind: LandmarkFeatureKind::Relic,
                 },
             ));
             for offset in [
@@ -324,6 +383,7 @@ fn spawn_landmark_visual(
                     LandmarkVisual {
                         landmark_id: landmark.id,
                         near_detail: true,
+                        feature_kind: LandmarkFeatureKind::Ruin,
                     },
                 ));
             }
@@ -343,6 +403,7 @@ fn spawn_landmark_visual(
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: false,
+                    feature_kind: LandmarkFeatureKind::Silhouette,
                 },
             ));
         }
@@ -361,6 +422,7 @@ fn spawn_landmark_visual(
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: false,
+                    feature_kind: LandmarkFeatureKind::Boundary,
                 },
             ));
         }
@@ -378,6 +440,7 @@ fn spawn_landmark_visual(
                 LandmarkVisual {
                     landmark_id: landmark.id,
                     near_detail: false,
+                    feature_kind: LandmarkFeatureKind::Boundary,
                 },
             ));
         }
@@ -491,6 +554,12 @@ impl LandmarkMaterials {
             old_stone: materials.add(StandardMaterial {
                 base_color: Color::srgb(0.48, 0.43, 0.35),
                 perceptual_roughness: 0.98,
+                ..Default::default()
+            }),
+            relic: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.72, 0.64, 0.46),
+                emissive: bevy::color::LinearRgba::rgb(0.18, 0.12, 0.04),
+                perceptual_roughness: 0.88,
                 ..Default::default()
             }),
         }

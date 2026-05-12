@@ -19,6 +19,9 @@ pub struct AppConfig {
     pub world: WorldConfig,
     pub environment: EnvironmentConfig,
     pub player: PlayerConfig,
+    pub camera: CameraConfig,
+    pub ecology: EcologyConfig,
+    pub desert: DesertConfig,
     pub signs: SignConfig,
     pub quality: QualityConfig,
 }
@@ -86,6 +89,38 @@ pub struct PlayerConfig {
     pub contact_substeps: u32,
     pub jump_velocity: f32,
     pub gravity: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CameraConfig {
+    pub third_person_default_distance: f32,
+    pub third_person_min_distance: f32,
+    pub third_person_max_distance: f32,
+    pub third_person_height: f32,
+    pub third_person_side_offset: f32,
+    pub third_person_smoothness: f32,
+    pub third_person_ground_clearance: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct EcologyConfig {
+    pub bird_count: u32,
+    pub fish_count: u32,
+    pub state_update_interval_seconds: f32,
+    pub visual_update_interval_seconds: f32,
+    pub max_visible_bird_distance: f32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DesertConfig {
+    pub dune_height: f32,
+    pub dune_frequency: f32,
+    pub gobi_flatness: f32,
+    pub oasis_radius: f32,
+    pub oasis_moisture: f32,
+    pub sandstorm_visibility: f32,
+    pub sandstorm_particle_strength: f32,
+    pub sandstorm_wind_speed: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -197,6 +232,32 @@ contact_substeps = 4
 jump_velocity = 6.2
 gravity = 18.0
 
+[camera]
+third_person_default_distance = 6.2
+third_person_min_distance = 3.2
+third_person_max_distance = 9.5
+third_person_height = 2.25
+third_person_side_offset = 0.42
+third_person_smoothness = 12.0
+third_person_ground_clearance = 0.55
+
+[ecology]
+bird_count = 18
+fish_count = 10
+state_update_interval_seconds = 0.2
+visual_update_interval_seconds = 0.066
+max_visible_bird_distance = 240.0
+
+[desert]
+dune_height = 3.2
+dune_frequency = 0.22
+gobi_flatness = 0.48
+oasis_radius = 38.0
+oasis_moisture = 0.86
+sandstorm_visibility = 46.0
+sandstorm_particle_strength = 1.0
+sandstorm_wind_speed = 4.2
+
 [signs]
 resonance_threshold = 0.5
 resonance_smoothing = 0.12
@@ -246,6 +307,9 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.player.step_height, 0.7);
         assert_eq!(config.player.ground_snap_distance, 1.1);
         assert_eq!(config.player.contact_substeps, 4);
+        assert_eq!(config.camera.third_person_default_distance, 6.2);
+        assert_eq!(config.ecology.bird_count, 18);
+        assert_eq!(config.desert.dune_height, 3.2);
         assert_eq!(config.environment.day_length_seconds, 180.0);
         assert_eq!(config.environment.wander_radius, 4.5);
         assert_eq!(config.quality.target_fps, 144.0);

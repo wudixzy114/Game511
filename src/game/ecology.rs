@@ -5,7 +5,10 @@ use bevy::{
 };
 
 use crate::{
-    core::performance::{FramePerformance, PerformancePhase},
+    core::{
+        config::AppConfig,
+        performance::{FramePerformance, PerformancePhase},
+    },
     game::{
         flow::{AppScreen, InGameState},
         intent::{IntentKind, IntentState, PerceptionState},
@@ -47,6 +50,8 @@ pub struct EcologyState {
     pub npcs: Vec<NpcScheduleState>,
     pub latest_signal: Option<EcologySignal>,
     pub fortune_teller_recorded: bool,
+    pub state_accumulator: f32,
+    pub visual_accumulator: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,8 +144,6 @@ struct EcologyMaterials {
     npc: Handle<StandardMaterial>,
 }
 
-const BIRD_COUNT: u32 = 18;
-const FISH_COUNT: u32 = 10;
 const ECOLOGY_INTERACTION_RADIUS: f32 = 4.8;
 
 type EcologyStateResources<'w> = (
@@ -152,15 +155,21 @@ type EcologyStateResources<'w> = (
     Option<Res<'w, RegionGraphState>>,
 );
 
+type EcologyInitResources<'w> = (
+    Option<Res<'w, WorldMap>>,
+    Option<Res<'w, VillageState>>,
+    Option<Res<'w, RegionGraphState>>,
+    Option<Res<'w, EcologyState>>,
+    Res<'w, AppConfig>,
+);
+
 fn initialize_ecology(
     mut commands: Commands,
-    world_map: Option<Res<WorldMap>>,
-    village: Option<Res<VillageState>>,
-    regions: Option<Res<RegionGraphState>>,
-    existing: Option<Res<EcologyState>>,
+    resources: EcologyInitResources<'_>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let (world_map, village, regions, existing, config) = resources;
     if existing.is_some() {
         return;
     }
@@ -175,6 +184,7 @@ fn initialize_ecology(
         &ecology_materials,
         &ecology,
         &world_map,
+        &config,
     );
 
     tracing::info!(
@@ -267,11 +277,14 @@ pub fn build_ecology_state(
         ],
         latest_signal: None,
         fortune_teller_recorded: false,
+        state_accumulator: 0.0,
+        visual_accumulator: 0.0,
     }
 }
 
 fn update_ecology_state(
     time: Res<Time>,
+    config: Res<AppConfig>,
     resources: EcologyStateResources<'_>,
     ecology: Option<ResMut<EcologyState>>,
     mut performance: ResMut<FramePerformance>,
@@ -280,6 +293,14 @@ fn update_ecology_state(
     let Some(mut ecology) = ecology else {
         return;
     };
+    ecology.state_accumulator += time.delta_secs();
+    let update_interval = config.ecology.state_update_interval_seconds.max(0.01);
+    if ecology.state_accumulator < update_interval {
+        performance.record_phase_duration(PerformancePhase::Ecology, started_at.elapsed());
+        return;
+    }
+    let delta_seconds = ecology.state_accumulator.min(update_interval * 3.0);
+    ecology.state_accumulator = 0.0;
     let (cycle, journey, intent, signs, perception, regions) = resources;
     let daylight = cycle.as_deref().map_or(0.8, |cycle| cycle.daylight);
     let dream_afterglow = journey
@@ -304,7 +325,7 @@ fn update_ecology_state(
     let mut latest_signal = None;
     for flock in &mut ecology.flocks {
         let context = FlockContext {
-            delta_seconds: time.delta_secs(),
+            delta_seconds,
             elapsed_seconds: time.elapsed_secs(),
             daylight,
             dream_afterglow,
@@ -422,7 +443,8 @@ pub fn advance_flock_state(
 
 fn animate_ecology_entities(
     time: Res<Time>,
-    ecology: Option<Res<EcologyState>>,
+    config: Res<AppConfig>,
+    ecology: Option<ResMut<EcologyState>>,
     world_map: Option<Res<WorldMap>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut actor_query: Query<
@@ -430,9 +452,15 @@ fn animate_ecology_entities(
         Without<WandererPrototype>,
     >,
 ) {
-    let (Some(ecology), Some(world_map)) = (ecology, world_map) else {
+    let (Some(mut ecology), Some(world_map)) = (ecology, world_map) else {
         return;
     };
+    ecology.visual_accumulator += time.delta_secs();
+    let visual_interval = config.ecology.visual_update_interval_seconds.max(0.01);
+    if ecology.visual_accumulator < visual_interval {
+        return;
+    }
+    ecology.visual_accumulator = 0.0;
     let player_position = player_query
         .iter()
         .next()
@@ -461,7 +489,9 @@ fn animate_ecology_entities(
                     look_from + Vec3::new(phase.cos(), 0.1, phase.sin()),
                     Vec3::Y,
                 );
-                *visibility = if planar_distance(player_position, transform.translation) < 240.0 {
+                *visibility = if planar_distance(player_position, transform.translation)
+                    < config.ecology.max_visible_bird_distance
+                {
                     Visibility::Visible
                 } else {
                     Visibility::Hidden
@@ -561,9 +591,10 @@ fn spawn_ecology_visuals(
     materials: &EcologyMaterials,
     ecology: &EcologyState,
     world_map: &WorldMap,
+    config: &AppConfig,
 ) {
     let bird_mesh = meshes.add(Mesh::from(Capsule3d::new(0.12, 0.42)));
-    for index in 0..BIRD_COUNT {
+    for index in 0..config.ecology.bird_count {
         commands.spawn((
             Name::new("BirdFlockMember"),
             DespawnOnExit(AppScreen::InGame),
@@ -580,7 +611,7 @@ fn spawn_ecology_visuals(
     }
 
     let fish_mesh = meshes.add(Sphere::new(0.22).mesh().uv(12, 8));
-    for index in 0..FISH_COUNT {
+    for index in 0..config.ecology.fish_count {
         commands.spawn((
             Name::new("ShoreFish"),
             DespawnOnExit(AppScreen::InGame),

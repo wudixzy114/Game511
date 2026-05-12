@@ -18,13 +18,14 @@ use bevy::{
 };
 
 use crate::core::{
-    config::{AppConfig, WorldConfig},
+    config::{AppConfig, DesertConfig, WorldConfig},
     performance::{FramePerformance, PerformancePhase},
 };
 use crate::game::{
     environment::WeatherKind,
     flow::{AppScreen, InGameState, SessionMode, in_session_mode},
     player::FirstPersonState,
+    regions::RegionGraphState,
 };
 
 pub struct WorldPlugin;
@@ -53,6 +54,7 @@ impl Plugin for WorldPlugin {
             (
                 advance_world_cycle,
                 (
+                    apply_region_streaming_rebuild,
                     update_visible_chunks,
                     stream_terrain_chunks,
                     update_terrain_impostor,
@@ -147,7 +149,12 @@ pub enum BiomeKind {
     Grove,
     Steppe,
     Ridge,
+    DesertSand,
+    Gobi,
+    Oasis,
 }
+
+const BIOME_KIND_COUNT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldGridCoord {
@@ -187,6 +194,7 @@ pub struct WorldMap {
     extent: f32,
     water_level: f32,
     terrain: WorldConfig,
+    desert: DesertConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -233,7 +241,7 @@ pub struct WorldChunk {
     pub coord: WorldChunkCoord,
     pub min: Vec2,
     pub max: Vec2,
-    pub biome_counts: [u32; 5],
+    pub biome_counts: [u32; BIOME_KIND_COUNT],
     pub average_height: f32,
     pub average_river: f32,
     pub average_erosion: f32,
@@ -702,6 +710,28 @@ type TerrainImpostorResources<'w> = (
     ResMut<'w, TerrainImpostorState>,
 );
 
+type RegionRebuildResources<'w> = (
+    Option<Res<'w, RegionGraphState>>,
+    Option<ResMut<'w, WorldRegionStreamAnchor>>,
+    Res<'w, WorldMap>,
+    Res<'w, TerrainLodConfig>,
+    ResMut<'w, ChunkVisibilityState>,
+    ResMut<'w, TerrainStreamingQueue>,
+    ResMut<'w, TerrainChunkCache>,
+    ResMut<'w, TerrainCollisionProxy>,
+    ResMut<'w, TerrainGenerationScheduler>,
+    ResMut<'w, TerrainCollisionScheduler>,
+    ResMut<'w, TerrainImpostorState>,
+    ResMut<'w, Assets<Mesh>>,
+);
+
+type RegionRebuildQueries<'w, 's> = (
+    Query<'w, 's, (Entity, &'static TerrainChunkEntity)>,
+    Query<'w, 's, (Entity, &'static TerrainDetailEntity)>,
+    Query<'w, 's, Entity, With<TerrainImpostorEntity>>,
+    Query<'w, 's, &'static Transform, With<WandererPrototype>>,
+);
+
 #[derive(Debug, Component, Clone, Copy, PartialEq, Eq)]
 struct TerrainChunkEntity {
     key: TerrainChunkKey,
@@ -732,6 +762,7 @@ impl WorldMap {
             extent,
             water_level: config.world.water_level,
             terrain: config.world.clone(),
+            desert: config.desert.clone(),
         }
     }
 
@@ -800,7 +831,7 @@ impl WorldMap {
         let (tile_x_min, tile_x_max, tile_z_min, tile_z_max) =
             self.chunk_mesh_tile_bounds(coord)?;
 
-        let mut biome_counts = [0_u32; 5];
+        let mut biome_counts = [0_u32; BIOME_KIND_COUNT];
         let mut height_sum = 0.0_f32;
         let mut river_sum = 0.0_f32;
         let mut erosion_sum = 0.0_f32;
@@ -952,7 +983,7 @@ impl WorldMap {
                 if !self.within_world_bounds(world_x, world_z) {
                     return None;
                 }
-                let sample = sample_terrain(world_x, world_z, self.seed, &self.terrain);
+                let sample = self.sample_terrain_for_world(world_x, world_z);
                 heights.push(sample.height);
                 raw_samples.push(sample);
             }
@@ -1049,6 +1080,53 @@ impl WorldMap {
         Some(mesh)
     }
 
+    fn sample_terrain_for_world(&self, world_x: f32, world_z: f32) -> TerrainSample {
+        let base = sample_terrain(world_x, world_z, self.seed, &self.terrain);
+        self.apply_desert_profile(world_x, world_z, base)
+    }
+
+    fn apply_desert_profile(
+        &self,
+        world_x: f32,
+        world_z: f32,
+        base: TerrainSample,
+    ) -> TerrainSample {
+        let profile = desert_profile_at(world_x, world_z, self.seed, &self.desert);
+        if profile.influence <= 0.0 {
+            return base;
+        }
+
+        let dune_phase = world_x * profile.dune_frequency
+            + (world_z * profile.dune_frequency * 0.37).sin() * 1.8
+            + (self.seed % 997) as f32 * 0.013;
+        let cross_phase = world_z * profile.dune_frequency * 0.72
+            + (world_x * profile.dune_frequency * 0.18).cos();
+        let dune_wave = (dune_phase.sin() * 0.72 + cross_phase.cos() * 0.28).max(-0.55);
+        let soft_dune = dune_wave * profile.dune_height * profile.influence;
+        let flatten = 1.0 - profile.gobi_flatness * profile.gobi * profile.influence;
+        let oasis_relief = profile.oasis * profile.influence;
+
+        TerrainSample {
+            height: base.height * flatten + soft_dune - oasis_relief * 0.38
+                + profile.influence * 0.72,
+            moisture: (base.moisture * (1.0 - profile.influence * 0.76)
+                + 0.1 * profile.influence
+                + profile.oasis_moisture * oasis_relief)
+                .clamp(0.0, 1.0),
+            temperature: (base.temperature + profile.influence * 0.52).clamp(0.0, 1.0),
+            erosion: (base.erosion * (1.0 - profile.influence * 0.28)
+                + profile.gobi * profile.influence * 0.44)
+                .clamp(0.0, 1.0),
+            river: (base.river * (1.0 - profile.influence * 0.88)
+                + profile.oasis * profile.influence * 0.42)
+                .clamp(0.0, 1.0),
+            sediment: (base.sediment
+                + profile.influence * (0.26 + profile.gobi * 0.18)
+                + profile.oasis * 0.12)
+                .clamp(0.0, 1.0),
+        }
+    }
+
     fn chunk_mesh_tile_bounds(&self, coord: WorldChunkCoord) -> Option<(i32, i32, i32, i32)> {
         let raw_x_min = coord.x * self.chunk_radius;
         let raw_z_min = coord.z * self.chunk_radius;
@@ -1111,7 +1189,7 @@ impl WorldMap {
             return None;
         }
 
-        let sample = sample_terrain(world_x, world_z, self.seed, &self.terrain);
+        let sample = self.sample_terrain_for_world(world_x, world_z);
         let slope = self.compute_slope_at(world_x, world_z, sample.height);
         let biome = determine_biome(
             sample,
@@ -1137,7 +1215,7 @@ impl WorldMap {
     fn sample_height_clamped(&self, world_x: f32, world_z: f32) -> f32 {
         let clamped_x = world_x.clamp(-self.extent, self.extent);
         let clamped_z = world_z.clamp(-self.extent, self.extent);
-        sample_terrain(clamped_x, clamped_z, self.seed, &self.terrain).height
+        self.sample_terrain_for_world(clamped_x, clamped_z).height
     }
 
     fn compute_slope_at(&self, world_x: f32, world_z: f32, center: f32) -> f32 {
@@ -1184,6 +1262,11 @@ impl Default for WorldPresentationControl {
             wander_speed_multiplier: 1.0,
         }
     }
+}
+
+#[derive(Debug, Resource, Clone, Copy, PartialEq, Eq)]
+struct WorldRegionStreamAnchor {
+    region: Option<crate::game::regions::RegionId>,
 }
 
 #[derive(Debug, Resource, Clone, Copy)]
@@ -1339,6 +1422,7 @@ fn create_terrain_material_texture(
     commands.insert_resource(TerrainCollisionProxy::default());
     commands.insert_resource(create_generation_scheduler());
     commands.insert_resource(create_collision_scheduler());
+    commands.insert_resource(WorldRegionStreamAnchor { region: None });
 }
 
 fn create_generation_scheduler() -> TerrainGenerationScheduler {
@@ -1631,6 +1715,94 @@ fn spawn_world(
         initial_collision_chunk_count = initial_collision_coords.len(),
         generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
         "lod streaming terrain bootstrapped"
+    );
+}
+
+fn apply_region_streaming_rebuild(
+    mut commands: Commands,
+    resources: RegionRebuildResources<'_>,
+    queries: RegionRebuildQueries<'_, '_>,
+) {
+    let (
+        regions,
+        anchor,
+        world_map,
+        lod_config,
+        mut visibility_state,
+        mut queue,
+        mut chunk_cache,
+        mut collision_proxy,
+        mut generation_scheduler,
+        mut collision_scheduler,
+        mut impostor_state,
+        mut meshes,
+    ) = resources;
+    let (chunks, details, impostors, player_query) = queries;
+    let (Some(regions), Some(anchor)) = (regions, anchor) else {
+        return;
+    };
+    let mut anchor = anchor;
+    let current_region = Some(regions.current_region);
+    if anchor.region.is_none() {
+        anchor.region = current_region;
+        return;
+    }
+    if anchor.region == current_region {
+        return;
+    }
+
+    for (entity, _) in &chunks {
+        commands.entity(entity).despawn();
+    }
+    for (entity, _) in &details {
+        commands.entity(entity).despawn();
+    }
+    for entity in &impostors {
+        commands.entity(entity).despawn();
+    }
+
+    let Some(player_position) = player_query
+        .iter()
+        .next()
+        .map(|transform| transform.translation)
+    else {
+        anchor.region = current_region;
+        return;
+    };
+    let Some(center) = world_map.chunk_coord_at(player_position.x, player_position.z) else {
+        anchor.region = current_region;
+        return;
+    };
+    let targets = chunk_targets_for_center(&world_map, center, *lod_config);
+    queue.pending.clear();
+    queue.enqueue_missing(targets.iter().copied(), &HashSet::new());
+    visibility_state.center = Some(center);
+    visibility_state.active = targets;
+    let evicted_chunks = chunk_cache.evict_inactive(0, &HashSet::new(), &mut meshes);
+
+    collision_proxy.anchor = None;
+    collision_proxy.active.clear();
+    collision_proxy.pending.clear();
+    collision_proxy.chunks.clear();
+    collision_scheduler.in_flight.clear();
+    generation_scheduler.in_flight.clear();
+    impostor_state.anchor = None;
+    if let Some(mesh) = impostor_state.mesh.take() {
+        meshes.remove(mesh.id());
+    }
+    impostor_state.entity = None;
+    anchor.region = current_region;
+
+    tracing::info!(
+        target: "dao_game::world::streaming",
+        region = regions
+            .region(regions.current_region)
+            .map(|region| region.kind.label()),
+        center_x = center.x,
+        center_z = center.z,
+        queued_targets = queue.len(),
+        evicted_chunks,
+        "region streaming caches rebuilt"
     );
 }
 
@@ -2200,6 +2372,64 @@ fn sample_terrain(world_x: f32, world_z: f32, seed: u64, config: &WorldConfig) -
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DesertProfile {
+    influence: f32,
+    dune_height: f32,
+    dune_frequency: f32,
+    gobi_flatness: f32,
+    gobi: f32,
+    oasis: f32,
+    oasis_moisture: f32,
+}
+
+fn desert_profile_at(
+    world_x: f32,
+    world_z: f32,
+    seed: u64,
+    config: &DesertConfig,
+) -> DesertProfile {
+    let seed_offset = Vec2::new(
+        ((seed % 37) as f32 - 18.0) * 7.0,
+        ((seed % 53) as f32 - 26.0) * 6.0,
+    );
+    let desert_center = Vec2::new(250.0, -330.0) + seed_offset;
+    let position = Vec2::new(world_x, world_z);
+    let distance = position.distance(desert_center);
+    let influence = smoothstep_edges(420.0, 120.0, distance);
+    let oasis_center = desert_center + Vec2::new(-64.0, 76.0);
+    let oasis =
+        1.0 - (position.distance(oasis_center) / config.oasis_radius.max(1.0)).clamp(0.0, 1.0);
+    let oasis = smoothstep_unit(oasis);
+    let gobi = (1.0
+        - ((world_x * 0.019 + world_z * 0.011 + seed as f32 * 0.0007).sin() * 0.5 + 0.5))
+        .clamp(0.0, 1.0);
+
+    DesertProfile {
+        influence,
+        dune_height: config.dune_height.max(0.0),
+        dune_frequency: config.dune_frequency.max(0.001),
+        gobi_flatness: config.gobi_flatness.clamp(0.0, 0.95),
+        gobi,
+        oasis,
+        oasis_moisture: config.oasis_moisture.clamp(0.0, 1.0),
+    }
+}
+
+fn smoothstep_unit(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn smoothstep_edges(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let width = (edge1 - edge0).abs().max(0.0001);
+    if edge0 <= edge1 {
+        smoothstep_unit((value - edge0) / width)
+    } else {
+        smoothstep_unit((edge0 - value) / width)
+    }
+}
+
 fn determine_biome(
     sample: TerrainSample,
     slope: f32,
@@ -2208,6 +2438,12 @@ fn determine_biome(
 ) -> BiomeKind {
     if sample.height <= water_level + shoreline_blend {
         BiomeKind::Water
+    } else if sample.moisture > 0.72 && sample.temperature > 0.58 && sample.sediment > 0.24 {
+        BiomeKind::Oasis
+    } else if sample.moisture < 0.3 && sample.sediment > 0.22 && slope < 0.42 {
+        BiomeKind::DesertSand
+    } else if sample.moisture < 0.38 && sample.sediment > 0.18 {
+        BiomeKind::Gobi
     } else if sample.river > 0.38 && sample.moisture > 0.5 && slope < 0.95 {
         BiomeKind::Grove
     } else if slope > 0.92 || sample.height > water_level + 4.6 {
@@ -2260,8 +2496,7 @@ fn build_collision_chunk(
             if !world_map.within_world_bounds(world_x, world_z) {
                 return None;
             }
-            heights
-                .push(sample_terrain(world_x, world_z, world_map.seed, &world_map.terrain).height);
+            heights.push(world_map.sample_terrain_for_world(world_x, world_z).height);
         }
     }
 
@@ -2392,6 +2627,9 @@ fn vertex_color(sample: &TerrainVertexSample, water_level: f32) -> Color {
         BiomeKind::Grove => Color::srgb(0.18, 0.36, 0.19),
         BiomeKind::Steppe => Color::srgb(0.58, 0.46, 0.28),
         BiomeKind::Ridge => Color::srgb(0.45, 0.43, 0.42),
+        BiomeKind::DesertSand => Color::srgb(0.74, 0.62, 0.38),
+        BiomeKind::Gobi => Color::srgb(0.52, 0.44, 0.33),
+        BiomeKind::Oasis => Color::srgb(0.26, 0.42, 0.28),
     };
 
     let dryness = (1.0 - sample.moisture).clamp(0.0, 1.0);
@@ -2465,6 +2703,9 @@ fn collect_scatter_placements_for_key(
                 BiomeKind::Grove => detail_factor > 0.18,
                 BiomeKind::Steppe => detail_factor > (0.52 + tile.erosion() * 0.08),
                 BiomeKind::Ridge => detail_factor > (0.4 - tile.erosion() * 0.06),
+                BiomeKind::DesertSand => detail_factor > 0.82,
+                BiomeKind::Gobi => detail_factor > 0.56,
+                BiomeKind::Oasis => detail_factor > 0.24,
                 BiomeKind::Water => false,
             };
             if !should_spawn {
@@ -2547,8 +2788,9 @@ fn build_scatter_meshes_for_key(
         let blueprint = match biome {
             BiomeKind::Meadow => &blueprints.meadow,
             BiomeKind::Grove => &blueprints.grove,
-            BiomeKind::Steppe => &blueprints.steppe,
+            BiomeKind::Steppe | BiomeKind::DesertSand | BiomeKind::Gobi => &blueprints.steppe,
             BiomeKind::Ridge => &blueprints.ridge,
+            BiomeKind::Oasis => &blueprints.meadow,
             BiomeKind::Water => continue,
         };
         if let Some(mesh) = build_scatter_mesh_batch(blueprint, &placements) {
@@ -2731,6 +2973,9 @@ fn biome_index(biome: BiomeKind) -> usize {
         BiomeKind::Grove => 2,
         BiomeKind::Steppe => 3,
         BiomeKind::Ridge => 4,
+        BiomeKind::DesertSand => 5,
+        BiomeKind::Gobi => 6,
+        BiomeKind::Oasis => 7,
     }
 }
 
@@ -2740,6 +2985,10 @@ fn biome_from_index(index: usize) -> BiomeKind {
         1 => BiomeKind::Meadow,
         2 => BiomeKind::Grove,
         3 => BiomeKind::Steppe,
+        4 => BiomeKind::Ridge,
+        5 => BiomeKind::DesertSand,
+        6 => BiomeKind::Gobi,
+        7 => BiomeKind::Oasis,
         _ => BiomeKind::Ridge,
     }
 }
@@ -2914,6 +3163,9 @@ fn detail_visuals_for_biome(
         BiomeKind::Meadow => ("MeadowTuftBatch", materials.meadow.clone()),
         BiomeKind::Grove => ("GroveTreeBatch", materials.grove.clone()),
         BiomeKind::Steppe => ("SteppeStoneBatch", materials.steppe.clone()),
+        BiomeKind::DesertSand => ("DesertGrassBatch", materials.steppe.clone()),
+        BiomeKind::Gobi => ("GobiStoneBatch", materials.steppe.clone()),
+        BiomeKind::Oasis => ("OasisTuftBatch", materials.meadow.clone()),
         BiomeKind::Ridge => ("RidgeSpireBatch", materials.ridge.clone()),
         BiomeKind::Water => ("WaterDetailBatch", materials.meadow.clone()),
     }
@@ -2979,6 +3231,9 @@ fn find_showcase_spot(world_map: &WorldMap, biome: BiomeKind) -> Option<Showcase
                 BiomeKind::Grove => tile.moisture() + tile.height() * 0.05,
                 BiomeKind::Steppe => (1.0 - tile.moisture()) + tile.height() * 0.04,
                 BiomeKind::Ridge => tile.height() + tile.slope() * 0.65,
+                BiomeKind::DesertSand => (1.0 - tile.moisture()) + tile.height() * 0.03,
+                BiomeKind::Gobi => tile.erosion() + (1.0 - tile.moisture()) * 0.5,
+                BiomeKind::Oasis => tile.moisture() * 1.2 - tile.slope() * 0.2,
             };
             match best {
                 None => best = Some((spot, score)),
@@ -3026,6 +3281,7 @@ fn cleanup_world_session(mut commands: Commands, mut cycle: ResMut<WorldCycle>) 
     commands.remove_resource::<TerrainChunkCache>();
     commands.remove_resource::<DetailMaterials>();
     commands.remove_resource::<DetailMeshBlueprints>();
+    commands.remove_resource::<WorldRegionStreamAnchor>();
 }
 
 fn scatter_offset(seed: u64, x: i32, z: i32, radius: f32) -> Vec2 {
@@ -3060,8 +3316,8 @@ mod tests {
     };
 
     use crate::core::config::{
-        AppConfig, EnvironmentConfig, PlayerConfig, PresentationConfig, QualityConfig, SignConfig,
-        WorldConfig,
+        AppConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig, PlayerConfig,
+        PresentationConfig, QualityConfig, SignConfig, WorldConfig,
     };
 
     use super::{
@@ -3138,6 +3394,32 @@ mod tests {
                 jump_velocity: 6.0,
                 gravity: 18.0,
             },
+            camera: CameraConfig {
+                third_person_default_distance: 6.2,
+                third_person_min_distance: 3.2,
+                third_person_max_distance: 9.5,
+                third_person_height: 2.25,
+                third_person_side_offset: 0.42,
+                third_person_smoothness: 12.0,
+                third_person_ground_clearance: 0.55,
+            },
+            ecology: EcologyConfig {
+                bird_count: 18,
+                fish_count: 10,
+                state_update_interval_seconds: 0.2,
+                visual_update_interval_seconds: 0.066,
+                max_visible_bird_distance: 240.0,
+            },
+            desert: DesertConfig {
+                dune_height: 3.2,
+                dune_frequency: 0.22,
+                gobi_flatness: 0.48,
+                oasis_radius: 38.0,
+                oasis_moisture: 0.86,
+                sandstorm_visibility: 46.0,
+                sandstorm_particle_strength: 1.0,
+                sandstorm_wind_speed: 4.2,
+            },
             signs: SignConfig {
                 resonance_threshold: 0.7,
                 resonance_smoothing: 0.12,
@@ -3192,6 +3474,27 @@ mod tests {
 
         assert_eq!(water, BiomeKind::Water);
         assert_eq!(ridge, BiomeKind::Ridge);
+    }
+
+    #[test]
+    fn desert_profile_creates_dunes_gobi_and_oasis_biomes() {
+        let mut config = test_config();
+        config.world.world_radius = 180;
+        config.desert.oasis_radius = 48.0;
+        let world_map = WorldMap::new(42, &config);
+        let desert = world_map
+            .sample_world_position(Vec3::new(250.0, 0.0, -330.0))
+            .expect("desert sample should exist");
+        let oasis = world_map
+            .sample_world_position(Vec3::new(95.0, 0.0, -158.0))
+            .expect("oasis sample should exist");
+
+        assert!(matches!(
+            desert.biome(),
+            BiomeKind::DesertSand | BiomeKind::Gobi
+        ));
+        assert_eq!(oasis.biome(), BiomeKind::Oasis);
+        assert!(oasis.moisture() > desert.moisture());
     }
 
     #[test]

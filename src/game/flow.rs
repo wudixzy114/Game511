@@ -86,8 +86,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::core::config::{
-        AppConfig, EnvironmentConfig, PlayerConfig, PresentationConfig, QualityConfig, SignConfig,
-        WorldConfig,
+        AppConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig, PlayerConfig,
+        PresentationConfig, QualityConfig, SignConfig, WorldConfig,
     };
 
     use super::{SessionMode, auto_start_session_mode_internal, parse_auto_start_mode};
@@ -155,6 +155,32 @@ mod tests {
                 contact_substeps: 4,
                 jump_velocity: 6.0,
                 gravity: 18.0,
+            },
+            camera: CameraConfig {
+                third_person_default_distance: 6.2,
+                third_person_min_distance: 3.2,
+                third_person_max_distance: 9.5,
+                third_person_height: 2.25,
+                third_person_side_offset: 0.42,
+                third_person_smoothness: 12.0,
+                third_person_ground_clearance: 0.55,
+            },
+            ecology: EcologyConfig {
+                bird_count: 18,
+                fish_count: 10,
+                state_update_interval_seconds: 0.2,
+                visual_update_interval_seconds: 0.066,
+                max_visible_bird_distance: 240.0,
+            },
+            desert: DesertConfig {
+                dune_height: 3.2,
+                dune_frequency: 0.22,
+                gobi_flatness: 0.48,
+                oasis_radius: 38.0,
+                oasis_moisture: 0.86,
+                sandstorm_visibility: 46.0,
+                sandstorm_particle_strength: 1.0,
+                sandstorm_wind_speed: 4.2,
             },
             signs: SignConfig {
                 resonance_threshold: 0.5,

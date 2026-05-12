@@ -99,6 +99,9 @@ struct HudInteractionText;
 struct HudNotebookText;
 
 #[derive(Component)]
+struct HudReturnPathText;
+
+#[derive(Component)]
 struct HudCompassPanel;
 
 #[derive(Component)]
@@ -113,6 +116,7 @@ pub struct UiModeState {
     pub notebook_open: bool,
     pub notebook_category: NotebookEntryKind,
     pub compass_open: bool,
+    pub return_paths_open: bool,
 }
 
 impl Default for UiModeState {
@@ -122,6 +126,7 @@ impl Default for UiModeState {
             notebook_open: false,
             notebook_category: NotebookEntryKind::Dream,
             compass_open: true,
+            return_paths_open: false,
         }
     }
 }
@@ -203,6 +208,29 @@ type CompassResources<'w> = (
     Option<Res<'w, MeaningfulPlaces>>,
     Option<Res<'w, RegionGraphState>>,
     Option<Res<'w, FirstPersonState>>,
+);
+
+type HudContextResources<'w> = (
+    Option<Res<'w, VillageState>>,
+    Option<Res<'w, NotebookState>>,
+    Option<Res<'w, PerceptionState>>,
+    Res<'w, UiModeState>,
+    Option<Res<'w, RegionGraphState>>,
+);
+
+type HudContextQueries<'w, 's> = (
+    Query<'w, 's, &'static mut Text, With<HudInteractionText>>,
+    Query<'w, 's, &'static mut Text, (With<HudNotebookText>, Without<HudInteractionText>)>,
+    Query<
+        'w,
+        's,
+        &'static mut Text,
+        (
+            With<HudReturnPathText>,
+            Without<HudInteractionText>,
+            Without<HudNotebookText>,
+        ),
+    >,
 );
 
 const TEXT_PRIMARY: Color = Color::srgb(0.92, 0.9, 0.85);
@@ -581,6 +609,12 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                         ui_text_font(&font, 14.0),
                         TextColor(TEXT_MUTED),
                         HudNotebookText,
+                    ),
+                    (
+                        Text::new(""),
+                        ui_text_font(&font, 14.0),
+                        TextColor(TEXT_ACCENT),
+                        HudReturnPathText,
                     )
                 ],
             ));
@@ -934,6 +968,10 @@ fn handle_ui_mode_input(
         ui_mode.compass_open = !ui_mode.compass_open;
     }
 
+    if keys.just_pressed(KeyCode::KeyR) {
+        ui_mode.return_paths_open = !ui_mode.return_paths_open;
+    }
+
     if keys.just_pressed(KeyCode::KeyN) {
         ui_mode.notebook_open = !ui_mode.notebook_open;
         if ui_mode.notebook_open
@@ -1217,15 +1255,9 @@ fn update_hud_omen_text(
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
-fn update_hud_context_text(
-    village: Option<Res<VillageState>>,
-    notebook: Option<Res<NotebookState>>,
-    perception: Option<Res<PerceptionState>>,
-    ui_mode: Res<UiModeState>,
-    regions: Option<Res<RegionGraphState>>,
-    mut interaction_query: Query<&mut Text, With<HudInteractionText>>,
-    mut notebook_query: Query<&mut Text, (With<HudNotebookText>, Without<HudInteractionText>)>,
-) {
+fn update_hud_context_text(resources: HudContextResources<'_>, queries: HudContextQueries<'_, '_>) {
+    let (village, notebook, perception, ui_mode, regions) = resources;
+    let (mut interaction_query, mut notebook_query, mut return_path_query) = queries;
     if let Some(mut interaction_text) = interaction_query.iter_mut().next() {
         let interaction = village
             .as_deref()
@@ -1271,6 +1303,10 @@ fn update_hud_context_text(
                 })
             })
             .unwrap_or_default();
+    }
+
+    if let Some(mut return_path_text) = return_path_query.iter_mut().next() {
+        return_path_text.0 = return_path_hint(notebook.as_deref(), &ui_mode);
     }
 }
 
@@ -1399,6 +1435,9 @@ fn biome_label(biome: BiomeKind) -> &'static str {
         BiomeKind::Grove => "林地",
         BiomeKind::Steppe => "旷野",
         BiomeKind::Ridge => "山脊",
+        BiomeKind::DesertSand => "沙丘",
+        BiomeKind::Gobi => "戈壁",
+        BiomeKind::Oasis => "绿洲",
     }
 }
 
@@ -1658,6 +1697,36 @@ fn notebook_overlay_text(notebook: Option<&NotebookState>, category: NotebookEnt
         .join("\n\n")
 }
 
+fn return_path_hint(notebook: Option<&NotebookState>, ui_mode: &UiModeState) -> String {
+    if ui_mode.notebook_open {
+        return String::new();
+    }
+    let Some(notebook) = notebook else {
+        return "归路  R".to_string();
+    };
+    let mut places = notebook
+        .entries
+        .iter()
+        .rev()
+        .filter(|entry| entry.kind == NotebookEntryKind::Place)
+        .take(3)
+        .map(|entry| entry.title.as_str())
+        .collect::<Vec<_>>();
+    places.dedup();
+    if !ui_mode.return_paths_open {
+        return if places.is_empty() {
+            "归路  R".to_string()
+        } else {
+            format!("归路  R  {}", places[0])
+        };
+    }
+    if places.is_empty() {
+        "归路仍在记忆之外".to_string()
+    } else {
+        format!("熟悉的归路：{}", places.join(" / "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::{
@@ -1674,8 +1743,8 @@ mod tests {
 
     use super::{
         biome_label, compass_text_for_context, control_hint, distance_band, facing_label_from_yaw,
-        notebook_overlay_text, omen_label, process_pending_session_launch, shift_notebook_category,
-        time_of_day_label,
+        notebook_overlay_text, omen_label, process_pending_session_launch, return_path_hint,
+        shift_notebook_category, time_of_day_label,
     };
 
     #[test]
@@ -1761,6 +1830,29 @@ mod tests {
         assert!(place_text.contains("抵达静水湾"));
         assert!(!place_text.contains("山鸣"));
         assert!(sign_text.contains("山鸣曾经显现"));
+    }
+
+    #[test]
+    fn return_path_hint_uses_recorded_places_without_task_language() {
+        let mut notebook = NotebookState::default();
+        let _ = notebook.record(crate::game::notebook::NotebookRecord {
+            kind: NotebookEntryKind::Place,
+            at_seconds: 1.0,
+            location: Some("海边".to_string()),
+            source: NotebookSource::PlaceArrival,
+            title: "静水湾".to_string(),
+            body: "你记得潮声。".to_string(),
+            tags: Vec::new(),
+        });
+        let ui_mode = crate::game::ui::UiModeState {
+            return_paths_open: true,
+            ..Default::default()
+        };
+        let text = return_path_hint(Some(&notebook), &ui_mode);
+
+        assert!(text.contains("静水湾"));
+        assert!(!text.contains("任务"));
+        assert!(!text.contains("前往"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::{
         performance::{FramePerformance, PerformancePhase},
     },
     game::{
+        director::{DirectorState, DirectorSuggestionKind, omen_from_director_tags},
         flow::{AppScreen, InGameState},
         intent::{IntentState, PerceptionState, sign_affinity_for_intent},
         journey::{DreamPhase, JourneyState, StoryArcStage},
@@ -129,6 +130,8 @@ struct OmenGuidanceContext {
     intent_affinity: f32,
     perception_boost: f32,
     dream_echo: f32,
+    director_omen: Option<OmenKind>,
+    director_strength: f32,
 }
 
 impl Default for OmenGuidanceContext {
@@ -145,6 +148,8 @@ impl Default for OmenGuidanceContext {
             intent_affinity: 0.0,
             perception_boost: 0.0,
             dream_echo: 0.0,
+            director_omen: None,
+            director_strength: 0.0,
         }
     }
 }
@@ -167,6 +172,7 @@ type SignUpdateResources<'w> = (
     Option<Res<'w, JourneyState>>,
     Option<Res<'w, IntentState>>,
     Option<Res<'w, PerceptionState>>,
+    Option<Res<'w, DirectorState>>,
     Res<'w, WandererPresence>,
     ResMut<'w, FramePerformance>,
 );
@@ -222,6 +228,7 @@ fn update_resonance(resources: SignUpdateResources<'_>, mut signs: ResMut<SignSt
         journey,
         intent,
         perception,
+        director,
         presence,
         mut performance,
     ) = resources;
@@ -244,6 +251,7 @@ fn update_resonance(resources: SignUpdateResources<'_>, mut signs: ResMut<SignSt
         journey.as_deref(),
         intent.as_deref(),
         perception.as_deref(),
+        director.as_deref(),
         presence.position,
     );
     let previous = *signs;
@@ -327,6 +335,7 @@ fn advance_sign_state(
         + guidance.response_intensity * 0.42
         + guidance.intent_affinity
         + guidance.perception_boost * 0.3
+        + guidance.director_strength * 0.12
         + guidance.dream_echo * 0.16
         + target_bias(guidance);
     let target_resonance = (biome_affinity(context.biome) * 0.48
@@ -403,6 +412,7 @@ fn build_guidance_context(
     journey: Option<&JourneyState>,
     intent: Option<&IntentState>,
     perception: Option<&PerceptionState>,
+    director: Option<&DirectorState>,
     player_position: Vec3,
 ) -> OmenGuidanceContext {
     let mut context = OmenGuidanceContext::default();
@@ -463,7 +473,32 @@ fn build_guidance_context(
         })
         .map(|journey| journey.dream.echo_strength)
         .unwrap_or(0.0);
+    if let Some((omen, strength)) = director_omen_hint(director) {
+        context.director_omen = Some(omen);
+        context.director_strength = strength;
+    }
     context
+}
+
+fn director_omen_hint(director: Option<&DirectorState>) -> Option<(OmenKind, f32)> {
+    director
+        .and_then(|director| director.last_validation.as_ref())
+        .and_then(|validation| {
+            validation
+                .accepted
+                .iter()
+                .filter(|suggestion| {
+                    matches!(
+                        suggestion.kind,
+                        DirectorSuggestionKind::Omen | DirectorSuggestionKind::EnvironmentResponse
+                    )
+                })
+                .filter_map(|suggestion| {
+                    omen_from_director_tags(&suggestion.semantic_tags)
+                        .map(|omen| (omen, suggestion.strength))
+                })
+                .max_by(|left, right| left.1.total_cmp(&right.1))
+        })
 }
 
 fn sign_guidance_changed(previous: SignState, current: SignState) -> bool {
@@ -574,6 +609,9 @@ fn biome_affinity(biome: BiomeKind) -> f32 {
         BiomeKind::Grove => 0.76,
         BiomeKind::Steppe => 0.48,
         BiomeKind::Ridge => 0.7,
+        BiomeKind::DesertSand => 0.5,
+        BiomeKind::Gobi => 0.52,
+        BiomeKind::Oasis => 0.72,
     }
 }
 
@@ -602,6 +640,9 @@ fn choose_omen(
             Some(PlaceKind::StoneRing) => Some(OmenKind::DawnLight),
             None => None,
         };
+    }
+    if guidance.director_strength > 0.35 && guidance.director_omen.is_some() {
+        return guidance.director_omen;
     }
 
     if matches!(
@@ -690,6 +731,8 @@ mod tests {
             intent_affinity: 0.0,
             perception_boost: 0.0,
             dream_echo: 0.0,
+            director_omen: None,
+            director_strength: 0.0,
         }
     }
 

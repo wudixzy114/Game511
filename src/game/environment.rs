@@ -8,7 +8,10 @@ use bevy::{
     prelude::*,
 };
 
-use crate::core::performance::{FramePerformance, PerformancePhase};
+use crate::core::{
+    config::AppConfig,
+    performance::{FramePerformance, PerformancePhase},
+};
 use crate::game::{
     flow::{AppScreen, InGameState},
     journey::JourneyState,
@@ -421,9 +424,11 @@ fn sync_environment_anchors(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn update_atmosphere_and_fog(
     environment_state: (
         Res<Time>,
+        Res<AppConfig>,
         Res<WorldCycle>,
         Res<WeatherState>,
         Res<WeatherTransition>,
@@ -433,12 +438,12 @@ fn update_atmosphere_and_fog(
     mut ambient_light: ResMut<GlobalAmbientLight>,
     mut fog_query: Query<&mut DistanceFog, With<WorldCamera>>,
 ) {
-    let (time, cycle, weather_state, transition) = environment_state;
+    let (time, config, cycle, weather_state, transition) = environment_state;
     let Some(mut fog) = fog_query.iter_mut().next() else {
         return;
     };
 
-    let environment = build_environment_frame(&time, &cycle, &weather_state, &transition);
+    let environment = build_environment_frame(&time, &config, &cycle, &weather_state, &transition);
     let profile = environment.profile;
     let frame = environment.celestial;
     let flash = environment.flash;
@@ -500,6 +505,7 @@ fn update_atmosphere_and_fog(
 fn update_celestial_visuals(
     environment_state: (
         Res<Time>,
+        Res<AppConfig>,
         Res<WorldCycle>,
         Res<WeatherState>,
         Res<WeatherTransition>,
@@ -595,8 +601,8 @@ fn update_celestial_visuals(
         return;
     };
     let camera_translation = camera_transform.translation;
-    let (time, cycle, weather_state, transition) = environment_state;
-    let environment = build_environment_frame(&time, &cycle, &weather_state, &transition);
+    let (time, config, cycle, weather_state, transition) = environment_state;
+    let environment = build_environment_frame(&time, &config, &cycle, &weather_state, &transition);
     let profile = environment.profile;
     let dominant_kind = environment.dominant_kind;
     let frame = environment.celestial;
@@ -713,13 +719,14 @@ fn update_celestial_visuals(
 
 fn build_environment_frame(
     time: &Time,
+    config: &AppConfig,
     cycle: &WorldCycle,
     weather_state: &WeatherState,
     transition: &WeatherTransition,
 ) -> EnvironmentFrame {
     let profile = blended_profile(
-        weather_profile(weather_state.previous),
-        weather_profile(weather_state.current),
+        weather_profile(weather_state.previous, config),
+        weather_profile(weather_state.current, config),
         smoothstep_unit(transition.blend),
     );
     let dominant_kind = dominant_weather_kind(weather_state, transition);
@@ -751,6 +758,7 @@ fn dominant_weather_kind(
 
 fn animate_weather_particles(
     time: Res<Time>,
+    config: Res<AppConfig>,
     weather_state: Res<WeatherState>,
     transition: Res<WeatherTransition>,
     mut query: Query<(&WeatherParticle, &mut Transform, &mut Visibility)>,
@@ -760,7 +768,7 @@ fn animate_weather_particles(
     } else {
         weather_state.current
     };
-    let profile = weather_profile(dominant_kind);
+    let profile = weather_profile(dominant_kind, &config);
     let particle_mode = particle_mode_for_weather(dominant_kind);
     let active_count = (PARTICLE_COUNT as f32 * profile.precipitation_strength).round() as u32;
 
@@ -847,7 +855,7 @@ fn weather_for_elapsed(elapsed: f32) -> WeatherKind {
     WEATHER_SEQUENCE[index]
 }
 
-fn weather_profile(kind: WeatherKind) -> WeatherProfile {
+fn weather_profile(kind: WeatherKind, config: &AppConfig) -> WeatherProfile {
     match kind {
         WeatherKind::Clear => WeatherProfile {
             sky_day: Vec3::new(0.42, 0.66, 0.92),
@@ -946,17 +954,17 @@ fn weather_profile(kind: WeatherKind) -> WeatherProfile {
             inscatter_day: Vec3::new(0.98, 0.72, 0.38),
             inscatter_night: Vec3::new(0.42, 0.24, 0.12),
             ambient_color: Vec3::new(0.68, 0.48, 0.28),
-            visibility: 46.0,
+            visibility: config.desert.sandstorm_visibility.max(24.0),
             ambient_brightness: 230.0,
             sun_scale: 0.34,
             moon_scale: 0.18,
             star_scale: 0.04,
             cloud_cover: 0.9,
-            precipitation_strength: 1.0,
-            particle_speed: 3.2,
+            precipitation_strength: config.desert.sandstorm_particle_strength.clamp(0.0, 1.0),
+            particle_speed: config.desert.sandstorm_wind_speed.max(0.1) * 0.76,
             particle_sway: 1.8,
             particle_alpha: 0.42,
-            wind: Vec2::new(4.2, -1.2),
+            wind: Vec2::new(config.desert.sandstorm_wind_speed.max(0.1), -1.2),
             lightning_strength: 0.0,
         },
         WeatherKind::Snow => WeatherProfile {
@@ -1101,6 +1109,13 @@ fn cleanup_environment_session(mut commands: Commands) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use crate::core::config::{
+        AppConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig, PlayerConfig,
+        PresentationConfig, QualityConfig, SignConfig, WorldConfig,
+    };
+
     use super::{
         CelestialFrame, WeatherKind, blended_profile, celestial_frame, storm_flash,
         weather_for_elapsed, weather_profile,
@@ -1128,8 +1143,9 @@ mod tests {
 
     #[test]
     fn blended_profile_matches_input_at_full_blend() {
-        let clear = weather_profile(WeatherKind::Clear);
-        let snow = weather_profile(WeatherKind::Snow);
+        let config = test_config();
+        let clear = weather_profile(WeatherKind::Clear, &config);
+        let snow = weather_profile(WeatherKind::Snow, &config);
         let blended = blended_profile(clear, snow, 1.0);
 
         assert_eq!(blended.sky_day, snow.sky_day);
@@ -1137,10 +1153,125 @@ mod tests {
     }
 
     #[test]
+    fn sandstorm_profile_uses_desert_config() {
+        let mut config = test_config();
+        config.desert.sandstorm_visibility = 61.0;
+        config.desert.sandstorm_particle_strength = 0.55;
+        let profile = weather_profile(WeatherKind::Sandstorm, &config);
+
+        assert_eq!(profile.visibility, 61.0);
+        assert_eq!(profile.precipitation_strength, 0.55);
+    }
+
+    #[test]
     fn storm_flash_stays_in_expected_range() {
         for sample in [0.0, 0.25, 0.5, 1.0, 3.4, 8.7] {
             let flash = storm_flash(sample);
             assert!((0.0..=1.0).contains(&flash));
+        }
+    }
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            window_title: "Dao".to_string(),
+            log_directory: PathBuf::from("logs"),
+            performance_log_name: "performance.log".to_string(),
+            frame_log_interval: 60,
+            performance_detail_interval: 1,
+            presentation: PresentationConfig {
+                enabled: false,
+                scene_duration_seconds: 7.0,
+                camera_blend_speed: 2.0,
+            },
+            world: WorldConfig {
+                seed: 42,
+                world_radius: 64,
+                chunk_radius: 4,
+                cell_size: 3.2,
+                terrain_subdivisions: 6,
+                terrain_scale: 18.0,
+                height_variation: 6.0,
+                water_level: -0.2,
+                noise_octaves: 5,
+                ridge_sharpness: 2.1,
+                shoreline_blend: 0.2,
+                river_frequency: 0.19,
+                river_depth: 0.72,
+                erosion_strength: 0.52,
+                sediment_bias: 0.28,
+                visible_chunk_radius: 2,
+                high_detail_chunk_radius: 1,
+                low_detail_chunk_radius: 2,
+                preload_chunk_radius: 3,
+                impostor_chunk_radius: 6,
+                impostor_radial_bands: 3,
+                impostor_angular_segments: 32,
+                showcase_search_radius: 24,
+                streaming_chunk_budget: 1,
+                background_generation_budget: 2,
+                streaming_cache_capacity: 32,
+                collision_proxy_radius: 1,
+                collision_subdivisions: 8,
+                collision_chunk_budget: 1,
+                collision_cache_capacity: 16,
+                material_texture_resolution: 64,
+            },
+            environment: EnvironmentConfig {
+                day_length_seconds: 180.0,
+                wander_radius: 4.5,
+                wander_speed: 0.7,
+            },
+            player: PlayerConfig {
+                walk_speed: 7.0,
+                sprint_multiplier: 1.6,
+                mouse_sensitivity: 0.002,
+                eye_height: 1.65,
+                body_height: 1.2,
+                capsule_radius: 0.4,
+                max_slope_degrees: 45.0,
+                step_height: 0.6,
+                ground_snap_distance: 1.0,
+                contact_substeps: 4,
+                jump_velocity: 6.0,
+                gravity: 18.0,
+            },
+            camera: CameraConfig {
+                third_person_default_distance: 6.2,
+                third_person_min_distance: 3.2,
+                third_person_max_distance: 9.5,
+                third_person_height: 2.25,
+                third_person_side_offset: 0.42,
+                third_person_smoothness: 12.0,
+                third_person_ground_clearance: 0.55,
+            },
+            ecology: EcologyConfig {
+                bird_count: 18,
+                fish_count: 10,
+                state_update_interval_seconds: 0.2,
+                visual_update_interval_seconds: 0.066,
+                max_visible_bird_distance: 240.0,
+            },
+            desert: DesertConfig {
+                dune_height: 3.2,
+                dune_frequency: 0.22,
+                gobi_flatness: 0.48,
+                oasis_radius: 38.0,
+                oasis_moisture: 0.86,
+                sandstorm_visibility: 46.0,
+                sandstorm_particle_strength: 1.0,
+                sandstorm_wind_speed: 4.2,
+            },
+            signs: SignConfig {
+                resonance_threshold: 0.7,
+                resonance_smoothing: 0.12,
+                calm_recovery: 0.01,
+                calm_threshold: 0.35,
+                omen_beacon_height: 3.0,
+            },
+            quality: QualityConfig {
+                target_fps: 60.0,
+                frame_time_budget_ms: 16.6,
+            },
         }
     }
 }
