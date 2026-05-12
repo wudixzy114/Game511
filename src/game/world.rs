@@ -10,7 +10,7 @@ use std::{
 
 use bevy::{
     asset::RenderAssetUsages,
-    math::primitives::{Capsule3d, Cylinder},
+    math::primitives::{Capsule3d, Cone, Cuboid, Cylinder},
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::MeshMaterial3d,
     prelude::*,
@@ -265,6 +265,9 @@ struct DetailMaterials {
     meadow: Handle<StandardMaterial>,
     steppe: Handle<StandardMaterial>,
     ridge: Handle<StandardMaterial>,
+    sand: Handle<StandardMaterial>,
+    oasis: Handle<StandardMaterial>,
+    wetland: Handle<StandardMaterial>,
 }
 
 #[derive(Debug, Resource, Clone)]
@@ -273,6 +276,8 @@ struct DetailMeshBlueprints {
     meadow: DetailMeshBlueprint,
     steppe: DetailMeshBlueprint,
     ridge: DetailMeshBlueprint,
+    sand: DetailMeshBlueprint,
+    oasis: DetailMeshBlueprint,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +287,11 @@ struct DetailMeshBlueprint {
     uvs: Option<Vec<[f32; 2]>>,
     indices: Vec<u32>,
     vertical_offset: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerrainDetailConfig {
+    density: f32,
 }
 
 #[derive(Debug, Resource, Clone, Copy)]
@@ -686,6 +696,7 @@ type TerrainStreamState<'w> = (
 );
 
 type WorldSpawnResources<'w> = (
+    Res<'w, AppConfig>,
     Res<'w, WorldMap>,
     Res<'w, WorldSeed>,
     Res<'w, WorldShowcaseSpots>,
@@ -1294,6 +1305,7 @@ struct TerrainChunkSpawnContext<'a> {
 struct TerrainChunkBuildContext<'a> {
     world_map: &'a WorldMap,
     seed: u64,
+    detail: TerrainDetailConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -1308,6 +1320,7 @@ struct TerrainGenerationRequest {
     key: TerrainChunkKey,
     world_map: WorldMap,
     detail_mesh_blueprints: DetailMeshBlueprints,
+    detail_config: TerrainDetailConfig,
 }
 
 #[derive(Resource)]
@@ -1434,6 +1447,7 @@ fn create_generation_scheduler() -> TerrainGenerationScheduler {
             let build_context = TerrainChunkBuildContext {
                 world_map: &request.world_map,
                 seed: request.world_map.seed,
+                detail: request.detail_config,
             };
             let Some(mesh) = build_chunk_mesh_for_lod(&build_context, request.key) else {
                 continue;
@@ -1547,7 +1561,7 @@ fn spawn_world(
         collision_config,
     ) = runtime_resources;
     let started_at = Instant::now();
-    let (world_map, seed, spots, terrain_material, lod_config) = resources;
+    let (config, world_map, seed, spots, terrain_material, lod_config) = resources;
     let water_material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.12, 0.29, 0.42, 0.75),
         alpha_mode: AlphaMode::Blend,
@@ -1576,12 +1590,34 @@ fn spawn_world(
             perceptual_roughness: 0.99,
             ..Default::default()
         }),
+        sand: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.74, 0.62, 0.38),
+            perceptual_roughness: 1.0,
+            reflectance: 0.05,
+            ..Default::default()
+        }),
+        oasis: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.22, 0.43, 0.29),
+            perceptual_roughness: 0.92,
+            ..Default::default()
+        }),
+        wetland: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.25, 0.34, 0.25),
+            perceptual_roughness: 0.72,
+            reflectance: 0.16,
+            ..Default::default()
+        }),
     };
     let detail_mesh_blueprints = DetailMeshBlueprints {
         meadow: detail_mesh_blueprint(Mesh::from(Capsule3d::new(0.09, 0.6)), 0.35),
         grove: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.18, 1.8)), 0.92),
         steppe: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.28, 0.42)), 0.18),
         ridge: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.16, 2.4)), 1.15),
+        sand: detail_mesh_blueprint(Mesh::from(Cuboid::new(1.25, 0.035, 0.16)), 0.035),
+        oasis: detail_mesh_blueprint(Mesh::from(Cone::new(0.42, 1.4)), 0.68),
+    };
+    let detail_config = TerrainDetailConfig {
+        density: config.world.detail_density.clamp(0.0, 2.0),
     };
     let initial_center = world_map.chunk_coord_at(spots.meadow.position.x, spots.meadow.position.z);
     let initial_targets = chunk_targets_for_camera(&world_map, spots.meadow.position, *lod_config);
@@ -1597,6 +1633,7 @@ fn spawn_world(
         build_context: TerrainChunkBuildContext {
             world_map: &world_map,
             seed: seed.0,
+            detail: detail_config,
         },
     };
     let mut chunk_cache = TerrainChunkCache::default();
@@ -1893,12 +1930,16 @@ fn stream_terrain_chunks(
     ) = resources;
     let mut existing_set: HashSet<TerrainChunkKey> =
         existing_chunks.iter().map(|(_, chunk)| chunk.key).collect();
+    let detail_config = TerrainDetailConfig {
+        density: config.world.detail_density.clamp(0.0, 2.0),
+    };
     let spawn_context = TerrainChunkSpawnContext {
         material: &terrain_material.handle,
         detail_materials: &detail_materials,
         build_context: TerrainChunkBuildContext {
             world_map: &world_map,
             seed: world_map.seed,
+            detail: detail_config,
         },
     };
     let started_at = Instant::now();
@@ -1991,6 +2032,7 @@ fn stream_terrain_chunks(
                 key: target.key,
                 world_map: world_map.clone(),
                 detail_mesh_blueprints: detail_mesh_blueprints.clone(),
+                detail_config,
             })
             .is_ok()
         {
@@ -2676,7 +2718,8 @@ fn collect_scatter_placements_for_key(
     context: &TerrainChunkBuildContext<'_>,
     key: TerrainChunkKey,
 ) -> Vec<ScatterPlacement> {
-    if !key.lod.scatter_enabled() {
+    let density = context.detail.density.clamp(0.0, 2.0);
+    if !key.lod.scatter_enabled() || density <= 0.0 {
         return Vec::new();
     }
     let Some((tile_x_min, tile_x_mesh_max, tile_z_min, tile_z_mesh_max)) =
@@ -2698,15 +2741,19 @@ fn collect_scatter_placements_for_key(
             }
 
             let detail_factor = scatter_noise(context.seed, tile_x, tile_z, 37);
+            let threshold = match tile.biome() {
+                BiomeKind::Meadow => 0.34 - tile.river() * 0.08,
+                BiomeKind::Grove => 0.18,
+                BiomeKind::Steppe => 0.52 + tile.erosion() * 0.08,
+                BiomeKind::Ridge => 0.4 - tile.erosion() * 0.06,
+                BiomeKind::DesertSand => 0.78,
+                BiomeKind::Gobi => 0.54,
+                BiomeKind::Oasis => 0.18,
+                BiomeKind::Water => 1.0,
+            };
             let should_spawn = match tile.biome() {
-                BiomeKind::Meadow => detail_factor > (0.34 - tile.river() * 0.08),
-                BiomeKind::Grove => detail_factor > 0.18,
-                BiomeKind::Steppe => detail_factor > (0.52 + tile.erosion() * 0.08),
-                BiomeKind::Ridge => detail_factor > (0.4 - tile.erosion() * 0.06),
-                BiomeKind::DesertSand => detail_factor > 0.82,
-                BiomeKind::Gobi => detail_factor > 0.56,
-                BiomeKind::Oasis => detail_factor > 0.24,
                 BiomeKind::Water => false,
+                _ => detail_factor > scatter_threshold_for_density(threshold, density),
             };
             if !should_spawn {
                 continue;
@@ -2729,12 +2776,28 @@ fn collect_scatter_placements_for_key(
                 scale: 0.72
                     + scatter_noise(context.seed, tile_x, tile_z, 89) * 0.8
                     + tile.river() * 0.18
-                    - tile.erosion() * 0.1,
+                    - tile.erosion() * 0.1
+                    + biome_scatter_scale_bias(tile.biome()),
             };
             placements.push(placement);
         }
     }
     placements
+}
+
+fn scatter_threshold_for_density(base_threshold: f32, density: f32) -> f32 {
+    (base_threshold + (1.0 - density) * 0.28).clamp(0.02, 0.98)
+}
+
+fn biome_scatter_scale_bias(biome: BiomeKind) -> f32 {
+    match biome {
+        BiomeKind::DesertSand => 0.28,
+        BiomeKind::Gobi => 0.12,
+        BiomeKind::Oasis => 0.32,
+        BiomeKind::Ridge => 0.18,
+        BiomeKind::Water => 0.0,
+        BiomeKind::Meadow | BiomeKind::Grove | BiomeKind::Steppe => 0.0,
+    }
 }
 
 fn detail_mesh_blueprint(mesh: Mesh, vertical_offset: f32) -> DetailMeshBlueprint {
@@ -2788,9 +2851,11 @@ fn build_scatter_meshes_for_key(
         let blueprint = match biome {
             BiomeKind::Meadow => &blueprints.meadow,
             BiomeKind::Grove => &blueprints.grove,
-            BiomeKind::Steppe | BiomeKind::DesertSand | BiomeKind::Gobi => &blueprints.steppe,
+            BiomeKind::Steppe => &blueprints.steppe,
+            BiomeKind::DesertSand => &blueprints.sand,
+            BiomeKind::Gobi => &blueprints.steppe,
             BiomeKind::Ridge => &blueprints.ridge,
-            BiomeKind::Oasis => &blueprints.meadow,
+            BiomeKind::Oasis => &blueprints.oasis,
             BiomeKind::Water => continue,
         };
         if let Some(mesh) = build_scatter_mesh_batch(blueprint, &placements) {
@@ -3147,12 +3212,33 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
     let rocky = (sample.slope * 0.65 + sample.erosion * 0.45).clamp(0.0, 1.0);
     let wet = (sample.river * 0.75 + sample.moisture * 0.25).clamp(0.0, 1.0);
     let sediment = sample.sediment.clamp(0.0, 1.0);
+    let grain = terrain_grain(sample);
+    let sand_ripple = if sample.biome == BiomeKind::DesertSand {
+        ((sample.world_x * 0.23 + sample.world_z * 0.06).sin() * 0.5 + 0.5) * 0.12
+    } else {
+        0.0
+    };
+    let wet_edge = if sample.height <= water_level + 0.28 || sample.river > 0.35 {
+        wet * 0.14
+    } else {
+        0.0
+    };
     Color::linear_rgba(
-        (r + sediment * 0.08 - rocky * 0.06).clamp(0.0, 1.0),
-        (g + wet * 0.04 - rocky * 0.04).clamp(0.0, 1.0),
-        (b + wet * 0.06 + rocky * 0.03).clamp(0.0, 1.0),
+        (r + sediment * 0.08 - rocky * 0.06 + grain * 0.04 + sand_ripple * 0.05 - wet_edge * 0.06)
+            .clamp(0.0, 1.0),
+        (g + wet * 0.04 - rocky * 0.04 + grain * 0.025 + sand_ripple * 0.03 - wet_edge * 0.04)
+            .clamp(0.0, 1.0),
+        (b + wet * 0.06 + rocky * 0.03 - grain * 0.025 - sand_ripple * 0.02 + wet_edge * 0.08)
+            .clamp(0.0, 1.0),
         1.0,
     )
+}
+
+fn terrain_grain(sample: &TerrainVertexSample) -> f32 {
+    let value = (sample.world_x * 0.37).sin() * 0.55
+        + (sample.world_z * 0.41).cos() * 0.35
+        + ((sample.world_x + sample.world_z) * 0.17).sin() * 0.1;
+    value.clamp(-1.0, 1.0)
 }
 
 fn detail_visuals_for_biome(
@@ -3163,19 +3249,20 @@ fn detail_visuals_for_biome(
         BiomeKind::Meadow => ("MeadowTuftBatch", materials.meadow.clone()),
         BiomeKind::Grove => ("GroveTreeBatch", materials.grove.clone()),
         BiomeKind::Steppe => ("SteppeStoneBatch", materials.steppe.clone()),
-        BiomeKind::DesertSand => ("DesertGrassBatch", materials.steppe.clone()),
+        BiomeKind::DesertSand => ("DesertRippleBatch", materials.sand.clone()),
         BiomeKind::Gobi => ("GobiStoneBatch", materials.steppe.clone()),
-        BiomeKind::Oasis => ("OasisTuftBatch", materials.meadow.clone()),
+        BiomeKind::Oasis => ("OasisReedBatch", materials.oasis.clone()),
         BiomeKind::Ridge => ("RidgeSpireBatch", materials.ridge.clone()),
-        BiomeKind::Water => ("WaterDetailBatch", materials.meadow.clone()),
+        BiomeKind::Water => ("WaterDetailBatch", materials.wetland.clone()),
     }
 }
 
 fn scatter_transform(position: Vec3, vertical_offset: f32, scale: f32) -> Transform {
+    let yaw = (position.x * 0.031 + position.z * 0.047).sin() * std::f32::consts::PI;
     Transform {
         translation: position + Vec3::Y * vertical_offset * scale,
         scale: Vec3::splat(scale),
-        ..Default::default()
+        rotation: Quat::from_rotation_y(yaw),
     }
 }
 
@@ -3322,12 +3409,13 @@ mod tests {
 
     use super::{
         BiomeKind, CachedTerrainChunk, TerrainChunkBuildContext, TerrainChunkCache,
-        TerrainChunkKey, TerrainCollisionProxy, TerrainImpostorConfig, TerrainLodConfig,
-        TerrainLodLevel, TerrainStreamingQueue, WorldChunkCoord, WorldMap, WorldSeed,
-        accumulate_normals, adaptive_budget, build_chunk_mesh_for_lod, build_collision_chunk,
-        build_scatter_mesh_batch, build_terrain_impostor_mesh, chunk_targets_for_camera,
-        chunk_targets_for_center, collision_chunk_coords_for_position, detail_mesh_blueprint,
-        determine_biome, sample_terrain, should_keep_chunk_key, streaming_inflight_cap,
+        TerrainChunkKey, TerrainCollisionProxy, TerrainDetailConfig, TerrainImpostorConfig,
+        TerrainLodConfig, TerrainLodLevel, TerrainStreamingQueue, WorldChunkCoord, WorldMap,
+        WorldSeed, accumulate_normals, adaptive_budget, build_chunk_mesh_for_lod,
+        build_collision_chunk, build_scatter_mesh_batch, build_terrain_impostor_mesh,
+        chunk_targets_for_camera, chunk_targets_for_center, collision_chunk_coords_for_position,
+        detail_mesh_blueprint, determine_biome, sample_terrain, scatter_threshold_for_density,
+        should_keep_chunk_key, streaming_inflight_cap,
     };
 
     fn test_config() -> AppConfig {
@@ -3374,6 +3462,7 @@ mod tests {
                 collision_chunk_budget: 1,
                 collision_cache_capacity: 12,
                 material_texture_resolution: 64,
+                detail_density: 1.0,
             },
             environment: EnvironmentConfig {
                 day_length_seconds: 180.0,
@@ -3406,9 +3495,12 @@ mod tests {
             ecology: EcologyConfig {
                 bird_count: 18,
                 fish_count: 10,
+                sheep_count: 9,
                 state_update_interval_seconds: 0.2,
                 visual_update_interval_seconds: 0.066,
                 max_visible_bird_distance: 240.0,
+                max_visible_fish_distance: 90.0,
+                max_visible_sheep_distance: 120.0,
             },
             assets: AssetConfig {
                 color_saturation: 1.0,
@@ -3522,6 +3614,7 @@ mod tests {
             &TerrainChunkBuildContext {
                 world_map: &world_map,
                 seed: 42,
+                detail: TerrainDetailConfig { density: 1.0 },
             },
             TerrainChunkKey {
                 coord: WorldChunkCoord { x: 0, z: 0 },
@@ -3805,6 +3898,7 @@ mod tests {
         let context = TerrainChunkBuildContext {
             world_map: &world_map,
             seed: 42,
+            detail: TerrainDetailConfig { density: 1.0 },
         };
         let key = TerrainChunkKey {
             coord: WorldChunkCoord { x: 0, z: 0 },
@@ -3835,6 +3929,7 @@ mod tests {
         let context = TerrainChunkBuildContext {
             world_map: &world_map,
             seed: 42,
+            detail: TerrainDetailConfig { density: 1.0 },
         };
         let active = WorldChunkCoord { x: 0, z: 0 };
         for key in [
@@ -3900,6 +3995,16 @@ mod tests {
         let expected_vertices = blueprint.positions.len() * placements.len();
 
         assert_eq!(positions.len(), expected_vertices);
+    }
+
+    #[test]
+    fn detail_density_raises_or_lowers_scatter_threshold() {
+        let base = 0.5;
+        let reduced = scatter_threshold_for_density(base, 0.35);
+        let boosted = scatter_threshold_for_density(base, 1.5);
+
+        assert!(reduced > base);
+        assert!(boosted < base);
     }
 
     #[test]

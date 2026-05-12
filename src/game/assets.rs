@@ -311,6 +311,7 @@ pub struct ProceduralPartBlueprint {
     pub shape: ProceduralShape,
     pub material_family: ProceduralMaterialFamily,
     pub local_transform: Transform,
+    pub animation_role: Option<ProceduralAnimationRole>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -320,6 +321,24 @@ pub enum ProceduralShape {
     Capsule { radius: f32, depth: f32 },
     Sphere { radius: f32 },
     Pyramid { width: f32, height: f32 },
+}
+
+#[derive(Debug, Component, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum ProceduralAnimationRole {
+    SheepHead,
+    SheepLegFrontLeft,
+    SheepLegFrontRight,
+    SheepLegBackLeft,
+    SheepLegBackRight,
+    BirdLeftWing,
+    BirdRightWing,
+    FishTail,
+    NpcHead,
+    NpcHandLeft,
+    NpcHandRight,
+    ClothCanopy,
+    Smoke,
+    WaterRipple,
 }
 
 pub fn spawn_procedural_asset(
@@ -455,12 +474,15 @@ fn spawn_blueprint_parts(
     blueprint: &ProceduralAssetBlueprint,
 ) {
     for part in &blueprint.parts {
-        parent.spawn((
+        let mut entity = parent.spawn((
             Name::new(part.name),
             Mesh3d(meshes.add(mesh_from_shape(part.shape))),
             MeshMaterial3d(materials.family(part.material_family)),
             part.local_transform,
         ));
+        if let Some(role) = part.animation_role {
+            entity.insert(role);
+        }
     }
 }
 
@@ -485,6 +507,23 @@ fn part(
         shape,
         material_family,
         local_transform,
+        animation_role: None,
+    }
+}
+
+fn animated_part(
+    name: &'static str,
+    shape: ProceduralShape,
+    material_family: ProceduralMaterialFamily,
+    local_transform: Transform,
+    animation_role: ProceduralAnimationRole,
+) -> ProceduralPartBlueprint {
+    ProceduralPartBlueprint {
+        name,
+        shape,
+        material_family,
+        local_transform,
+        animation_role: Some(animation_role),
     }
 }
 
@@ -560,12 +599,13 @@ fn house_parts(
                 ProceduralMaterialFamily::Stone,
                 Transform::from_translation(Vec3::new(body.x * 0.22, body.y * 1.04, body.z * 0.18)),
             ),
-            part(
+            animated_part(
                 "HouseSmokeWisp",
                 ProceduralShape::Sphere { radius: 0.34 },
                 ProceduralMaterialFamily::Shadow,
                 Transform::from_translation(Vec3::new(body.x * 0.22, body.y * 1.32, body.z * 0.18))
                     .with_scale(Vec3::new(1.0, 1.45, 1.0)),
+                ProceduralAnimationRole::Smoke,
             ),
             part(
                 "HouseEaveShadow",
@@ -654,7 +694,7 @@ fn well_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 ProceduralMaterialFamily::Wood,
                 Transform::from_translation(Vec3::new(0.0, 1.52, 0.0)),
             ),
-            part(
+            animated_part(
                 "WellWetGround",
                 ProceduralShape::Cylinder {
                     radius: 1.9,
@@ -662,6 +702,7 @@ fn well_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 },
                 ProceduralMaterialFamily::Water,
                 Transform::from_translation(Vec3::Y * 0.03).with_scale(Vec3::new(1.2, 1.0, 0.74)),
+                ProceduralAnimationRole::WaterRipple,
             ),
         ],
         ProceduralAssetLod::Mid => vec![
@@ -699,6 +740,18 @@ fn well_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
 fn sheep_pen_rail_parts(spec: &ProceduralAssetSpec) -> Vec<ProceduralPartBlueprint> {
     vec![
         part(
+            "SheepPenPostLeft",
+            ProceduralShape::Cuboid(Vec3::new(0.3, 1.25, 0.3)),
+            ProceduralMaterialFamily::Wood,
+            Transform::from_translation(Vec3::new(-spec.base_size.x * 0.5, -0.18, 0.0)),
+        ),
+        part(
+            "SheepPenPostRight",
+            ProceduralShape::Cuboid(Vec3::new(0.3, 1.25, 0.3)),
+            ProceduralMaterialFamily::Wood,
+            Transform::from_translation(Vec3::new(spec.base_size.x * 0.5, -0.18, 0.0)),
+        ),
+        part(
             "SheepPenRail",
             ProceduralShape::Cuboid(spec.base_size),
             ProceduralMaterialFamily::Wood,
@@ -714,6 +767,12 @@ fn sheep_pen_rail_parts(spec: &ProceduralAssetSpec) -> Vec<ProceduralPartBluepri
             ProceduralMaterialFamily::Wood,
             Transform::from_translation(Vec3::Y * -0.42),
         ),
+        part(
+            "SheepPenTrampledGround",
+            ProceduralShape::Cuboid(Vec3::new(spec.base_size.x * 0.86, 0.035, 0.72)),
+            ProceduralMaterialFamily::Sand,
+            Transform::from_translation(Vec3::new(0.0, -0.86, -0.34)),
+        ),
     ]
 }
 
@@ -726,11 +785,12 @@ fn market_stall_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 ProceduralMaterialFamily::Wood,
                 Transform::from_translation(Vec3::Y * 0.45),
             ),
-            part(
+            animated_part(
                 "MarketClothCanopy",
                 ProceduralShape::Cuboid(Vec3::new(5.4, 0.15, 3.0)),
                 ProceduralMaterialFamily::Cloth,
                 Transform::from_translation(Vec3::new(0.0, 2.1, -0.2)),
+                ProceduralAnimationRole::ClothCanopy,
             ),
             part(
                 "MarketPostLeft",
@@ -771,6 +831,13 @@ fn market_stall_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 ProceduralMaterialFamily::WarmLight,
                 Transform::from_translation(Vec3::new(0.0, 1.62, -1.22)),
             ),
+            animated_part(
+                "MarketCanopyEdge",
+                ProceduralShape::Cuboid(Vec3::new(5.0, 0.08, 0.12)),
+                ProceduralMaterialFamily::Cloth,
+                Transform::from_translation(Vec3::new(0.0, 1.92, -1.65)),
+                ProceduralAnimationRole::ClothCanopy,
+            ),
         ],
         ProceduralAssetLod::Mid => vec![
             part(
@@ -797,7 +864,7 @@ fn market_stall_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
 
 fn shore_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
     let mut parts = vec![
-        part(
+        animated_part(
             "ShoreWater",
             ProceduralShape::Cylinder {
                 radius: 18.0,
@@ -805,6 +872,7 @@ fn shore_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
             },
             ProceduralMaterialFamily::Water,
             Transform::from_translation(Vec3::Y * 0.03).with_scale(Vec3::new(1.45, 1.0, 0.52)),
+            ProceduralAnimationRole::WaterRipple,
         ),
         part(
             "ShoreWetSand",
@@ -835,21 +903,49 @@ fn shore_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 Transform::from_translation(Vec3::new(5.8, 0.5, -3.1))
                     .with_rotation(Quat::from_rotation_z(-0.18)),
             ),
+            animated_part(
+                "ShoreFoamLineA",
+                ProceduralShape::Cuboid(Vec3::new(9.5, 0.025, 0.16)),
+                ProceduralMaterialFamily::WarmLight,
+                Transform::from_translation(Vec3::new(-4.2, 0.08, -4.25))
+                    .with_rotation(Quat::from_rotation_y(0.08)),
+                ProceduralAnimationRole::WaterRipple,
+            ),
+            animated_part(
+                "ShoreFoamLineB",
+                ProceduralShape::Cuboid(Vec3::new(7.4, 0.025, 0.12)),
+                ProceduralMaterialFamily::WarmLight,
+                Transform::from_translation(Vec3::new(5.0, 0.09, -4.85))
+                    .with_rotation(Quat::from_rotation_y(-0.1)),
+                ProceduralAnimationRole::WaterRipple,
+            ),
         ]);
     }
     parts
 }
 
 fn path_stone_parts(spec: &ProceduralAssetSpec) -> Vec<ProceduralPartBlueprint> {
-    vec![part(
-        "PathStone",
-        ProceduralShape::Cylinder {
-            radius: spec.base_size.x * 0.5,
-            depth: spec.base_size.y,
-        },
-        ProceduralMaterialFamily::Stone,
-        Transform::from_translation(Vec3::Y * spec.base_size.y * 0.5),
-    )]
+    vec![
+        part(
+            "PathStone",
+            ProceduralShape::Cylinder {
+                radius: spec.base_size.x * 0.5,
+                depth: spec.base_size.y,
+            },
+            ProceduralMaterialFamily::Stone,
+            Transform::from_translation(Vec3::Y * spec.base_size.y * 0.5),
+        ),
+        part(
+            "PathDustPatch",
+            ProceduralShape::Cuboid(Vec3::new(
+                spec.base_size.x * 1.6,
+                0.025,
+                spec.base_size.z * 0.7,
+            )),
+            ProceduralMaterialFamily::Sand,
+            Transform::from_translation(Vec3::Y * 0.015),
+        ),
+    ]
 }
 
 fn sheep_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
@@ -865,11 +961,26 @@ fn sheep_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 Transform::from_scale(Vec3::new(1.2, 0.82, 0.82)),
             ),
             part(
+                "SheepWoolShoulder",
+                ProceduralShape::Sphere { radius: 0.18 },
+                ProceduralMaterialFamily::Wool,
+                Transform::from_translation(Vec3::new(-0.28, 0.04, -0.08))
+                    .with_scale(Vec3::new(1.05, 0.78, 1.0)),
+            ),
+            part(
+                "SheepWoolFlank",
+                ProceduralShape::Sphere { radius: 0.2 },
+                ProceduralMaterialFamily::Wool,
+                Transform::from_translation(Vec3::new(0.28, -0.02, 0.18))
+                    .with_scale(Vec3::new(1.0, 0.72, 1.05)),
+            ),
+            animated_part(
                 "SheepHead",
                 ProceduralShape::Sphere { radius: 0.24 },
                 ProceduralMaterialFamily::Wool,
                 Transform::from_translation(Vec3::new(0.0, 0.14, -0.58))
                     .with_scale(Vec3::new(0.85, 0.72, 1.0)),
+                ProceduralAnimationRole::SheepHead,
             ),
             part(
                 "SheepEarLeft",
@@ -885,29 +996,33 @@ fn sheep_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 Transform::from_translation(Vec3::new(0.2, 0.2, -0.62))
                     .with_rotation(Quat::from_rotation_z(0.45)),
             ),
-            part(
+            animated_part(
                 "SheepLegFrontLeft",
                 ProceduralShape::Cuboid(Vec3::new(0.11, 0.48, 0.11)),
                 ProceduralMaterialFamily::Wood,
                 Transform::from_translation(Vec3::new(-0.24, -0.48, -0.2)),
+                ProceduralAnimationRole::SheepLegFrontLeft,
             ),
-            part(
+            animated_part(
                 "SheepLegFrontRight",
                 ProceduralShape::Cuboid(Vec3::new(0.11, 0.48, 0.11)),
                 ProceduralMaterialFamily::Wood,
                 Transform::from_translation(Vec3::new(0.24, -0.48, -0.2)),
+                ProceduralAnimationRole::SheepLegFrontRight,
             ),
-            part(
+            animated_part(
                 "SheepLegBackLeft",
                 ProceduralShape::Cuboid(Vec3::new(0.11, 0.48, 0.11)),
                 ProceduralMaterialFamily::Wood,
                 Transform::from_translation(Vec3::new(-0.24, -0.48, 0.28)),
+                ProceduralAnimationRole::SheepLegBackLeft,
             ),
-            part(
+            animated_part(
                 "SheepLegBackRight",
                 ProceduralShape::Cuboid(Vec3::new(0.11, 0.48, 0.11)),
                 ProceduralMaterialFamily::Wood,
                 Transform::from_translation(Vec3::new(0.24, -0.48, 0.28)),
+                ProceduralAnimationRole::SheepLegBackRight,
             ),
         ],
         ProceduralAssetLod::Mid => vec![part(
@@ -940,19 +1055,28 @@ fn bird_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
                 ProceduralMaterialFamily::BirdFeather,
                 Transform::from_scale(Vec3::new(1.2, 0.5, 0.7)),
             ),
-            part(
+            animated_part(
                 "BirdLeftWing",
                 ProceduralShape::Cuboid(Vec3::new(0.52, 0.025, 0.16)),
                 ProceduralMaterialFamily::BirdFeather,
                 Transform::from_translation(Vec3::new(-0.34, 0.0, 0.0))
                     .with_rotation(Quat::from_rotation_z(-0.18)),
+                ProceduralAnimationRole::BirdLeftWing,
             ),
-            part(
+            animated_part(
                 "BirdRightWing",
                 ProceduralShape::Cuboid(Vec3::new(0.52, 0.025, 0.16)),
                 ProceduralMaterialFamily::BirdFeather,
                 Transform::from_translation(Vec3::new(0.34, 0.0, 0.0))
                     .with_rotation(Quat::from_rotation_z(0.18)),
+                ProceduralAnimationRole::BirdRightWing,
+            ),
+            part(
+                "BirdTailFork",
+                ProceduralShape::Cuboid(Vec3::new(0.08, 0.025, 0.18)),
+                ProceduralMaterialFamily::BirdFeather,
+                Transform::from_translation(Vec3::new(0.0, 0.0, 0.22))
+                    .with_rotation(Quat::from_rotation_x(0.18)),
             ),
         ],
         ProceduralAssetLod::Mid => vec![part(
@@ -980,12 +1104,19 @@ fn fish_parts(lod: ProceduralAssetLod) -> Vec<ProceduralPartBlueprint> {
     if lod == ProceduralAssetLod::Near {
         vec![
             body,
-            part(
+            animated_part(
                 "FishTail",
                 ProceduralShape::Cuboid(Vec3::new(0.08, 0.18, 0.28)),
                 ProceduralMaterialFamily::FishScale,
                 Transform::from_translation(Vec3::new(0.0, 0.0, 0.34))
                     .with_rotation(Quat::from_rotation_y(0.55)),
+                ProceduralAnimationRole::FishTail,
+            ),
+            part(
+                "FishFlashSide",
+                ProceduralShape::Cuboid(Vec3::new(0.04, 0.12, 0.34)),
+                ProceduralMaterialFamily::WarmLight,
+                Transform::from_translation(Vec3::new(0.18, 0.02, -0.02)),
             ),
         ]
     } else {
@@ -1004,31 +1135,85 @@ fn npc_parts(kind: ProceduralAssetKind, lod: ProceduralAssetLod) -> Vec<Procedur
         ProceduralAssetKind::FortuneTeller => ProceduralMaterialFamily::WarmLight,
         _ => ProceduralMaterialFamily::NpcCloth,
     };
+    let mut near_parts = vec![
+        part(
+            "NpcBody",
+            ProceduralShape::Capsule {
+                radius: 0.36,
+                depth: 1.25,
+            },
+            cloth,
+            Transform::from_translation(Vec3::Y * 0.02),
+        ),
+        animated_part(
+            "NpcHead",
+            ProceduralShape::Sphere { radius: 0.22 },
+            ProceduralMaterialFamily::NpcCloth,
+            Transform::from_translation(Vec3::Y * 0.86),
+            ProceduralAnimationRole::NpcHead,
+        ),
+        part(
+            "NpcSemanticAccent",
+            ProceduralShape::Cuboid(Vec3::new(0.14, 0.82, 0.14)),
+            accent,
+            Transform::from_translation(Vec3::new(0.44, 0.24, -0.08))
+                .with_rotation(Quat::from_rotation_z(0.12)),
+        ),
+        animated_part(
+            "NpcHandLeft",
+            ProceduralShape::Sphere { radius: 0.08 },
+            accent,
+            Transform::from_translation(Vec3::new(-0.42, 0.26, -0.06)),
+            ProceduralAnimationRole::NpcHandLeft,
+        ),
+        animated_part(
+            "NpcHandRight",
+            ProceduralShape::Sphere { radius: 0.08 },
+            accent,
+            Transform::from_translation(Vec3::new(0.42, 0.26, -0.06)),
+            ProceduralAnimationRole::NpcHandRight,
+        ),
+    ];
+    match kind {
+        ProceduralAssetKind::Shepherd => near_parts.push(part(
+            "ShepherdCrook",
+            ProceduralShape::Cuboid(Vec3::new(0.08, 1.45, 0.08)),
+            ProceduralMaterialFamily::Wood,
+            Transform::from_translation(Vec3::new(0.58, 0.28, -0.12))
+                .with_rotation(Quat::from_rotation_z(0.14)),
+        )),
+        ProceduralAssetKind::Merchant => near_parts.extend([
+            part(
+                "MerchantPack",
+                ProceduralShape::Cuboid(Vec3::new(0.48, 0.48, 0.22)),
+                ProceduralMaterialFamily::Cloth,
+                Transform::from_translation(Vec3::new(0.0, 0.2, 0.42)),
+            ),
+            part(
+                "MerchantLedger",
+                ProceduralShape::Cuboid(Vec3::new(0.34, 0.05, 0.24)),
+                ProceduralMaterialFamily::Wood,
+                Transform::from_translation(Vec3::new(-0.38, 0.42, -0.18)),
+            ),
+        ]),
+        ProceduralAssetKind::FortuneTeller => near_parts.extend([
+            part(
+                "FortuneLamp",
+                ProceduralShape::Sphere { radius: 0.15 },
+                ProceduralMaterialFamily::WarmLight,
+                Transform::from_translation(Vec3::new(0.52, 0.08, -0.22)),
+            ),
+            part(
+                "FortuneStillVeil",
+                ProceduralShape::Cuboid(Vec3::new(0.62, 0.06, 0.5)),
+                ProceduralMaterialFamily::Shadow,
+                Transform::from_translation(Vec3::new(0.0, 0.68, -0.04)),
+            ),
+        ]),
+        _ => {}
+    }
     match lod {
-        ProceduralAssetLod::Near => vec![
-            part(
-                "NpcBody",
-                ProceduralShape::Capsule {
-                    radius: 0.36,
-                    depth: 1.25,
-                },
-                cloth,
-                Transform::from_translation(Vec3::Y * 0.02),
-            ),
-            part(
-                "NpcHead",
-                ProceduralShape::Sphere { radius: 0.22 },
-                ProceduralMaterialFamily::NpcCloth,
-                Transform::from_translation(Vec3::Y * 0.86),
-            ),
-            part(
-                "NpcSemanticAccent",
-                ProceduralShape::Cuboid(Vec3::new(0.14, 0.82, 0.14)),
-                accent,
-                Transform::from_translation(Vec3::new(0.44, 0.24, -0.08))
-                    .with_rotation(Quat::from_rotation_z(0.12)),
-            ),
-        ],
+        ProceduralAssetLod::Near => near_parts,
         ProceduralAssetLod::Mid => vec![part(
             "NpcMidBody",
             ProceduralShape::Capsule {
@@ -1836,8 +2021,9 @@ fn fallback_spec(kind: ProceduralAssetKind) -> ProceduralAssetSpec {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetRegistry, ProceduralLodStrategy,
-        ProceduralSemantic, asset_blueprint, choose_lod, registered_spec, stable_asset_id,
+        ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetRegistry,
+        ProceduralLodStrategy, ProceduralSemantic, asset_blueprint, choose_lod, registered_spec,
+        stable_asset_id,
     };
 
     #[test]
@@ -1933,6 +2119,40 @@ mod tests {
         assert!(
             asset_blueprint(&pyramid, ProceduralAssetLod::Near).part_count()
                 > asset_blueprint(&pyramid, ProceduralAssetLod::Mid).part_count()
+        );
+    }
+
+    #[test]
+    fn animal_and_npc_blueprints_expose_animation_roles() {
+        let sheep = registered_spec(ProceduralAssetKind::Sheep);
+        let bird = registered_spec(ProceduralAssetKind::Bird);
+        let fish = registered_spec(ProceduralAssetKind::Fish);
+        let merchant = registered_spec(ProceduralAssetKind::Merchant);
+
+        let sheep_roles: Vec<_> = asset_blueprint(&sheep, ProceduralAssetLod::Near)
+            .parts
+            .iter()
+            .filter_map(|part| part.animation_role)
+            .collect();
+        assert!(sheep_roles.contains(&ProceduralAnimationRole::SheepHead));
+        assert!(sheep_roles.contains(&ProceduralAnimationRole::SheepLegFrontLeft));
+        assert!(
+            asset_blueprint(&bird, ProceduralAssetLod::Near)
+                .parts
+                .iter()
+                .any(|part| part.animation_role == Some(ProceduralAnimationRole::BirdLeftWing))
+        );
+        assert!(
+            asset_blueprint(&fish, ProceduralAssetLod::Near)
+                .parts
+                .iter()
+                .any(|part| part.animation_role == Some(ProceduralAnimationRole::FishTail))
+        );
+        assert!(
+            asset_blueprint(&merchant, ProceduralAssetLod::Near)
+                .parts
+                .iter()
+                .any(|part| part.name == "MerchantPack")
         );
     }
 

@@ -521,6 +521,14 @@ fn log_visual_baseline_matrix(scenes: &[PresentationScene]) {
         .iter()
         .filter(|scene| scene.visual_sample.is_visual_baseline())
     {
+        let manifest = screenshot_manifest_for_scene(scene, "current-date", "working-tree");
+        let checklist_keys = manifest
+            .checklist
+            .iter()
+            .map(|item| item.key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let required_metadata = manifest.required_metadata.join(",");
         tracing::info!(
             target: "dao_game::presentation::visual_matrix",
             scene = scene.name,
@@ -532,9 +540,81 @@ fn log_visual_baseline_matrix(scenes: &[PresentationScene]) {
             midground = scene.composition.midground,
             background = scene.composition.background,
             quality_gate = scene.composition.quality_gate,
+            screenshot_directory_rule = manifest.directory_rule,
+            screenshot_scene_label = manifest.scene_label,
+            required_metadata,
+            screenshot_checklist = checklist_keys,
             "visual baseline scene registered"
         );
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenshotCheckItem {
+    key: &'static str,
+    description: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenshotManifest {
+    directory_rule: String,
+    scene_label: String,
+    required_metadata: Vec<&'static str>,
+    checklist: Vec<ScreenshotCheckItem>,
+}
+
+fn screenshot_manifest_for_scene(
+    scene: &PresentationScene,
+    date: &str,
+    commit: &str,
+) -> ScreenshotManifest {
+    ScreenshotManifest {
+        directory_rule: format!(
+            "captures/{date}/{:02}-{}-{commit}",
+            scene.visual_sample.order() + 1,
+            scene.visual_sample.label()
+        ),
+        scene_label: scene.visual_sample.label().to_string(),
+        required_metadata: vec![
+            "scene",
+            "visual_sample",
+            "camera_mode",
+            "weather",
+            "time_override",
+            "config_summary",
+            "git_commit",
+        ],
+        checklist: screenshot_checklist(),
+    }
+}
+
+fn screenshot_checklist() -> Vec<ScreenshotCheckItem> {
+    vec![
+        ScreenshotCheckItem {
+            key: "landmark_visibility",
+            description: "core landmark or local visual focus is readable",
+        },
+        ScreenshotCheckItem {
+            key: "ui_occlusion",
+            description: "formal UI does not cover the intended subject",
+        },
+        ScreenshotCheckItem {
+            key: "text_overflow",
+            description: "visible text stays inside its container",
+        },
+        ScreenshotCheckItem {
+            key: "material_variety",
+            description: "surface colors and details are not flat single-color placeholders",
+        },
+        ScreenshotCheckItem {
+            key: "entity_intersection",
+            description: "characters and assets do not visibly float or pierce the ground",
+        },
+        ScreenshotCheckItem {
+            key: "non_blank_frame",
+            description: "camera framing contains terrain, sky and intended subject",
+        },
+    ]
 }
 
 fn visual_baseline_count(scenes: &[PresentationScene]) -> usize {
@@ -1402,8 +1482,8 @@ mod tests {
             presentation::{
                 CompositionGuide, PresentationJourneyStep, PresentationScene,
                 PresentationVisualSample, build_journey_scenes, omen_for_place,
-                scene_index_at_elapsed, scene_progress, sort_presentation_scenes_for_testing,
-                visual_baseline_count,
+                scene_index_at_elapsed, scene_progress, screenshot_manifest_for_scene,
+                sort_presentation_scenes_for_testing, visual_baseline_count,
             },
             signs::OmenKind,
             world::{BiomeKind, WorldGridCoord, WorldMap},
@@ -1581,6 +1661,26 @@ mod tests {
         assert_eq!(visual_baseline_count(&scenes), 2);
     }
 
+    #[test]
+    fn screenshot_manifest_records_directory_metadata_and_checklist() {
+        let scene = test_scene(
+            "village",
+            PresentationVisualSample::VillageDawn,
+            CameraMode::ThirdPerson,
+        );
+        let manifest = screenshot_manifest_for_scene(&scene, "2026-05-12", "abc1234");
+
+        assert!(manifest.directory_rule.contains("captures/2026-05-12"));
+        assert!(manifest.directory_rule.contains("village-dawn"));
+        assert!(manifest.required_metadata.contains(&"git_commit"));
+        assert!(
+            manifest
+                .checklist
+                .iter()
+                .any(|item| item.key == "entity_intersection")
+        );
+    }
+
     fn test_scene(
         name: &'static str,
         visual_sample: PresentationVisualSample,
@@ -1648,6 +1748,7 @@ mod tests {
                 collision_chunk_budget: 1,
                 collision_cache_capacity: 16,
                 material_texture_resolution: 64,
+                detail_density: 1.0,
             },
             environment: EnvironmentConfig {
                 day_length_seconds: 180.0,
@@ -1680,9 +1781,12 @@ mod tests {
             ecology: EcologyConfig {
                 bird_count: 18,
                 fish_count: 10,
+                sheep_count: 9,
                 state_update_interval_seconds: 0.2,
                 visual_update_interval_seconds: 0.066,
                 max_visible_bird_distance: 240.0,
+                max_visible_fish_distance: 90.0,
+                max_visible_sheep_distance: 120.0,
             },
             assets: AssetConfig {
                 color_saturation: 1.0,

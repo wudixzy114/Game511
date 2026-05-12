@@ -7,8 +7,8 @@ use crate::{
     },
     game::{
         assets::{
-            ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials,
-            ProceduralSpawnRequest, spawn_procedural_asset_entity,
+            ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod,
+            ProceduralAssetMaterials, ProceduralSpawnRequest, spawn_procedural_asset_entity,
         },
         flow::{AppScreen, InGameState},
         intent::{IntentKind, IntentState, PerceptionState},
@@ -130,8 +130,18 @@ struct EcologyActor {
     index: u32,
 }
 
+#[derive(Debug, Component, Clone, Copy, PartialEq)]
+struct EcologyAnimatedPart {
+    actor_id: u64,
+    role: ProceduralAnimationRole,
+    base_translation: Vec3,
+    base_rotation: Quat,
+    base_scale: Vec3,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 enum EcologyActorKind {
+    Sheep,
     Bird,
     Fish,
     FortuneTeller,
@@ -155,6 +165,28 @@ type EcologyInitResources<'w> = (
     Option<Res<'w, EcologyState>>,
     Res<'w, AppConfig>,
 );
+
+type EcologyPartQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static EcologyAnimatedPart, &'static mut Transform),
+    (
+        With<EcologyAnimatedPart>,
+        Without<EcologyActor>,
+        Without<WandererPrototype>,
+    ),
+>;
+
+type EcologyActorQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static EcologyActor,
+        &'static mut Transform,
+        &'static mut Visibility,
+    ),
+    (Without<WandererPrototype>, Without<EcologyAnimatedPart>),
+>;
 
 fn initialize_ecology(
     mut commands: Commands,
@@ -438,10 +470,8 @@ fn animate_ecology_entities(
     ecology: Option<ResMut<EcologyState>>,
     world_map: Option<Res<WorldMap>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
-    mut actor_query: Query<
-        (&EcologyActor, &mut Transform, &mut Visibility),
-        Without<WandererPrototype>,
-    >,
+    mut actor_query: EcologyActorQuery<'_, '_>,
+    mut part_query: EcologyPartQuery<'_, '_>,
 ) {
     let (Some(mut ecology), Some(world_map)) = (ecology, world_map) else {
         return;
@@ -459,6 +489,39 @@ fn animate_ecology_entities(
         .unwrap_or(Vec3::ZERO);
     for (actor, mut transform, mut visibility) in &mut actor_query {
         match actor.kind {
+            EcologyActorKind::Sheep => {
+                let Some(flock) = ecology
+                    .flocks
+                    .iter()
+                    .find(|flock| flock.kind == AnimalKind::SheepHerd)
+                else {
+                    continue;
+                };
+                let phase = time.elapsed_secs() * 0.42 + actor.index as f32 * 1.37;
+                let restless = flock.behavior == AnimalBehavior::Scattering;
+                let radius = flock.radius * if restless { 0.68 } else { 0.42 };
+                let offset = Vec3::new(
+                    phase.cos() * radius + ((actor.id % 5) as f32 - 2.0) * 0.42,
+                    0.0,
+                    (phase * 0.71).sin() * radius + ((actor.id % 7) as f32 - 3.0) * 0.36,
+                );
+                let target = ground_position(&world_map, flock.center + offset, 0.58);
+                transform.translation = transform.translation.lerp(target, 0.12);
+                let look_target = if restless && flock.omen_alignment > 0.4 {
+                    flock.center + Vec3::new(8.0, 0.0, -10.0)
+                } else {
+                    target + Vec3::new(phase.sin(), 0.0, phase.cos())
+                };
+                let actor_y = transform.translation.y;
+                transform.look_at(Vec3::new(look_target.x, actor_y, look_target.z), Vec3::Y);
+                *visibility = if planar_distance(player_position, transform.translation)
+                    < config.ecology.max_visible_sheep_distance
+                {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                };
+            }
             EcologyActorKind::Bird => {
                 let Some(flock) = ecology
                     .flocks
@@ -501,6 +564,13 @@ fn animate_ecology_entities(
                 let y = world_map.water_level() + 0.08;
                 transform.translation = Vec3::new(position.x, y, position.z);
                 transform.rotation = Quat::from_rotation_y(phase);
+                *visibility = if planar_distance(player_position, transform.translation)
+                    < config.ecology.max_visible_fish_distance
+                {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                };
             }
             EcologyActorKind::FortuneTeller => {
                 let Some(npc) = ecology
@@ -528,6 +598,78 @@ fn animate_ecology_entities(
                     Visibility::Hidden
                 };
             }
+        }
+    }
+    animate_ecology_parts(time.elapsed_secs(), &ecology, &mut part_query);
+}
+
+fn animate_ecology_parts(
+    elapsed: f32,
+    ecology: &EcologyState,
+    part_query: &mut EcologyPartQuery<'_, '_>,
+) {
+    let sheep_restless = ecology
+        .flocks
+        .iter()
+        .find(|flock| flock.kind == AnimalKind::SheepHerd)
+        .is_some_and(|flock| flock.behavior == AnimalBehavior::Scattering);
+    let bird_migrating = ecology
+        .flocks
+        .iter()
+        .find(|flock| flock.kind == AnimalKind::BirdFlock)
+        .is_some_and(|flock| flock.behavior == AnimalBehavior::Migrating);
+
+    for (part, mut transform) in part_query.iter_mut() {
+        let phase = elapsed + part.actor_id as f32 * 0.017;
+        transform.translation = part.base_translation;
+        transform.rotation = part.base_rotation;
+        transform.scale = part.base_scale;
+
+        match part.role {
+            ProceduralAnimationRole::SheepHead => {
+                let lift = if sheep_restless {
+                    0.34 + (phase * 3.4).sin().abs() * 0.2
+                } else {
+                    (phase * 1.5).sin().max(0.0) * 0.28
+                };
+                transform.rotation = part.base_rotation * Quat::from_rotation_x(lift);
+                transform.translation.y -= if sheep_restless { 0.0 } else { lift * 0.08 };
+            }
+            ProceduralAnimationRole::SheepLegFrontLeft
+            | ProceduralAnimationRole::SheepLegBackRight => {
+                transform.rotation =
+                    part.base_rotation * Quat::from_rotation_x((phase * 4.8).sin() * 0.24);
+            }
+            ProceduralAnimationRole::SheepLegFrontRight
+            | ProceduralAnimationRole::SheepLegBackLeft => {
+                transform.rotation = part.base_rotation
+                    * Quat::from_rotation_x((phase * 4.8 + std::f32::consts::PI).sin() * 0.24);
+            }
+            ProceduralAnimationRole::BirdLeftWing => {
+                let flap = (phase * if bird_migrating { 8.4 } else { 4.1 }).sin() * 0.55;
+                transform.rotation = part.base_rotation * Quat::from_rotation_z(-0.24 - flap.abs());
+            }
+            ProceduralAnimationRole::BirdRightWing => {
+                let flap = (phase * if bird_migrating { 8.4 } else { 4.1 }).sin() * 0.55;
+                transform.rotation = part.base_rotation * Quat::from_rotation_z(0.24 + flap.abs());
+            }
+            ProceduralAnimationRole::FishTail => {
+                transform.rotation =
+                    part.base_rotation * Quat::from_rotation_y((phase * 5.6).sin() * 0.58);
+            }
+            ProceduralAnimationRole::NpcHead => {
+                transform.rotation =
+                    part.base_rotation * Quat::from_rotation_y((phase * 0.72).sin() * 0.16);
+            }
+            ProceduralAnimationRole::NpcHandLeft => {
+                transform.translation.y += (phase * 1.1).sin() * 0.035;
+            }
+            ProceduralAnimationRole::NpcHandRight => {
+                transform.translation.y += (phase * 1.4 + 0.3).sin() * 0.055;
+            }
+            ProceduralAnimationRole::ClothCanopy
+            | ProceduralAnimationRole::Smoke
+            | ProceduralAnimationRole::WaterRipple => {}
         }
     }
 }
@@ -584,6 +726,29 @@ fn spawn_ecology_visuals(
     world_map: &WorldMap,
     config: &AppConfig,
 ) {
+    let sheep_count = config.ecology.sheep_count.max(1);
+    for index in 0..sheep_count {
+        let id = stable_ecology_id(index as u64, 79);
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::Sheep,
+                id,
+                "EcologySheep",
+                Transform::from_translation(Vec3::new(0.0, -120.0, 0.0)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert(EcologyActor {
+            id,
+            kind: EcologyActorKind::Sheep,
+            index,
+        });
+        tag_ecology_actor_parts(commands, entity, id);
+    }
+
     for index in 0..config.ecology.bird_count {
         let id = stable_ecology_id(index as u64, 101);
         let entity = spawn_procedural_asset_entity(
@@ -603,6 +768,7 @@ fn spawn_ecology_visuals(
             kind: EcologyActorKind::Bird,
             index,
         });
+        tag_ecology_actor_parts(commands, entity, id);
     }
 
     for index in 0..config.ecology.fish_count {
@@ -624,6 +790,7 @@ fn spawn_ecology_visuals(
             kind: EcologyActorKind::Fish,
             index,
         });
+        tag_ecology_actor_parts(commands, entity, id);
     }
 
     if let Some(npc) = ecology
@@ -651,7 +818,34 @@ fn spawn_ecology_visuals(
                 index: 0,
             },
         ));
+        tag_ecology_actor_parts(commands, entity, npc.id);
     }
+}
+
+fn tag_ecology_actor_parts(commands: &mut Commands, root: Entity, actor_id: u64) {
+    commands.queue(move |world: &mut World| {
+        let Some(children) = world
+            .get::<Children>(root)
+            .map(|children| children.iter().collect::<Vec<_>>())
+        else {
+            return;
+        };
+        for child in children {
+            let Some(role) = world.get::<ProceduralAnimationRole>(child).copied() else {
+                continue;
+            };
+            let Some(transform) = world.get::<Transform>(child).copied() else {
+                continue;
+            };
+            world.entity_mut(child).insert(EcologyAnimatedPart {
+                actor_id,
+                role,
+                base_translation: transform.translation,
+                base_rotation: transform.rotation,
+                base_scale: transform.scale,
+            });
+        }
+    });
 }
 
 pub fn schedule_phase_for(
@@ -807,6 +1001,18 @@ mod tests {
         assert_eq!(
             schedule_phase_for(NpcKind::FortuneTeller, 0.7, false, 0.35),
             NpcSchedulePhase::Resting
+        );
+    }
+
+    #[test]
+    fn merchant_rumor_phase_is_tied_to_afterglow_and_departure_intent() {
+        assert_eq!(
+            schedule_phase_for(NpcKind::Merchant, 0.7, true, 0.32),
+            NpcSchedulePhase::TellingRumor
+        );
+        assert_eq!(
+            schedule_phase_for(NpcKind::Merchant, 0.7, true, 0.1),
+            NpcSchedulePhase::Working
         );
     }
 }

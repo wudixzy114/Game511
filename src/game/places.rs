@@ -677,6 +677,7 @@ mod tests {
                 collision_chunk_budget: 1,
                 collision_cache_capacity: 16,
                 material_texture_resolution: 64,
+                detail_density: 1.0,
             },
             environment: EnvironmentConfig {
                 day_length_seconds: 180.0,
@@ -709,9 +710,12 @@ mod tests {
             ecology: EcologyConfig {
                 bird_count: 18,
                 fish_count: 10,
+                sheep_count: 9,
                 state_update_interval_seconds: 0.2,
                 visual_update_interval_seconds: 0.066,
                 max_visible_bird_distance: 240.0,
+                max_visible_fish_distance: 90.0,
+                max_visible_sheep_distance: 120.0,
             },
             assets: AssetConfig {
                 color_saturation: 1.0,

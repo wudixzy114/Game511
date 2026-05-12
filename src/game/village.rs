@@ -2,8 +2,8 @@ use bevy::prelude::*;
 
 use crate::game::{
     assets::{
-        ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials, ProceduralSpawnRequest,
-        spawn_procedural_asset, spawn_procedural_asset_entity,
+        ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials,
+        ProceduralSpawnRequest, spawn_procedural_asset, spawn_procedural_asset_entity,
     },
     flow::{AppScreen, InGameState},
     intent::{IntentState, apply_village_dialogue_intent},
@@ -31,6 +31,7 @@ impl Plugin for VillagePlugin {
             (
                 initialize_village_session,
                 update_village_actor_behavior,
+                animate_village_asset_parts,
                 update_village_interaction,
             )
                 .chain()
@@ -114,7 +115,7 @@ impl VillageActorKind {
 
     fn prompt(self) -> &'static str {
         match self {
-            Self::Sheep => "可观察",
+            Self::Sheep => "可安抚",
             Self::Shepherd | Self::Merchant => "可交谈",
         }
     }
@@ -141,6 +142,15 @@ struct VillageActor {
     home: Vec3,
     radius: f32,
     seed: u32,
+}
+
+#[derive(Debug, Component, Clone, Copy, PartialEq)]
+struct VillageAnimatedPart {
+    actor_id: Option<u64>,
+    role: ProceduralAnimationRole,
+    base_translation: Vec3,
+    base_rotation: Quat,
+    base_scale: Vec3,
 }
 
 #[derive(Debug, Component)]
@@ -442,6 +452,7 @@ fn spawn_village_visuals(
             }
         }
     });
+    tag_village_ambient_parts(commands, root);
 }
 
 fn spawn_house(
@@ -593,6 +604,9 @@ fn spawn_village_actors(
     world_map: &WorldMap,
 ) {
     for actor in &layout.actors {
+        if actor.kind == VillageActorKind::Sheep {
+            continue;
+        }
         let seed = actor.id as u32;
         let position = ground_position(world_map, actor.home, actor_y_offset(actor.kind));
         match actor.kind {
@@ -616,6 +630,7 @@ fn spawn_village_actors(
                     radius: actor.radius,
                     seed,
                 });
+                tag_village_actor_parts(commands, entity, actor.id);
             }
             VillageActorKind::Shepherd | VillageActorKind::Merchant => {
                 let asset_kind = match actor.kind {
@@ -642,9 +657,70 @@ fn spawn_village_actors(
                     radius: actor.radius,
                     seed,
                 });
+                tag_village_actor_parts(commands, entity, actor.id);
             }
         }
     }
+}
+
+fn tag_village_actor_parts(commands: &mut Commands, root: Entity, actor_id: u64) {
+    commands.queue(move |world: &mut World| {
+        let Some(children) = world
+            .get::<Children>(root)
+            .map(|children| children.iter().collect::<Vec<_>>())
+        else {
+            return;
+        };
+        for child in children {
+            let Some(role) = world.get::<ProceduralAnimationRole>(child).copied() else {
+                continue;
+            };
+            let Some(transform) = world.get::<Transform>(child).copied() else {
+                continue;
+            };
+            world.entity_mut(child).insert(VillageAnimatedPart {
+                actor_id: Some(actor_id),
+                role,
+                base_translation: transform.translation,
+                base_rotation: transform.rotation,
+                base_scale: transform.scale,
+            });
+        }
+    });
+}
+
+fn tag_village_ambient_parts(commands: &mut Commands, root: Entity) {
+    commands.queue(move |world: &mut World| {
+        let Some(children) = world
+            .get::<Children>(root)
+            .map(|children| children.iter().collect::<Vec<_>>())
+        else {
+            return;
+        };
+        for asset_root in children {
+            let Some(part_children) = world
+                .get::<Children>(asset_root)
+                .map(|children| children.iter().collect::<Vec<_>>())
+            else {
+                continue;
+            };
+            for child in part_children {
+                let Some(role) = world.get::<ProceduralAnimationRole>(child).copied() else {
+                    continue;
+                };
+                let Some(transform) = world.get::<Transform>(child).copied() else {
+                    continue;
+                };
+                world.entity_mut(child).insert(VillageAnimatedPart {
+                    actor_id: None,
+                    role,
+                    base_translation: transform.translation,
+                    base_rotation: transform.rotation,
+                    base_scale: transform.scale,
+                });
+            }
+        }
+    });
 }
 
 fn update_village_actor_behavior(
@@ -679,6 +755,78 @@ fn update_village_actor_behavior(
                     transform.look_at(look_target, Vec3::Y);
                 }
             }
+        }
+    }
+}
+
+fn animate_village_asset_parts(
+    time: Res<Time>,
+    actor_query: Query<&VillageActor>,
+    mut part_query: Query<(&VillageAnimatedPart, &mut Transform)>,
+) {
+    let elapsed = time.elapsed_secs();
+    for (part, mut transform) in &mut part_query {
+        let actor = part
+            .actor_id
+            .and_then(|id| actor_query.iter().find(|actor| actor.id == id));
+        let phase_seed = part.actor_id.unwrap_or(17) as f32 * 0.013;
+        let phase = elapsed + phase_seed;
+        transform.translation = part.base_translation;
+        transform.rotation = part.base_rotation;
+        transform.scale = part.base_scale;
+
+        match part.role {
+            ProceduralAnimationRole::SheepHead => {
+                let grazing = actor.is_some_and(|actor| actor.kind == VillageActorKind::Sheep);
+                let nod = if grazing {
+                    (phase * 1.7).sin().max(0.0) * 0.32
+                } else {
+                    0.04 * (phase * 0.8).sin()
+                };
+                transform.rotation = part.base_rotation * Quat::from_rotation_x(0.28 + nod);
+                transform.translation.y += nod * -0.08;
+            }
+            ProceduralAnimationRole::SheepLegFrontLeft
+            | ProceduralAnimationRole::SheepLegBackRight => {
+                let swing = (phase * 4.4).sin() * 0.18;
+                transform.rotation = part.base_rotation * Quat::from_rotation_x(swing);
+            }
+            ProceduralAnimationRole::SheepLegFrontRight
+            | ProceduralAnimationRole::SheepLegBackLeft => {
+                let swing = (phase * 4.4 + std::f32::consts::PI).sin() * 0.18;
+                transform.rotation = part.base_rotation * Quat::from_rotation_x(swing);
+            }
+            ProceduralAnimationRole::NpcHead => {
+                transform.rotation =
+                    part.base_rotation * Quat::from_rotation_y((phase * 0.7).sin() * 0.12);
+            }
+            ProceduralAnimationRole::NpcHandLeft => {
+                transform.translation.y += (phase * 1.4).sin() * 0.035;
+            }
+            ProceduralAnimationRole::NpcHandRight => {
+                transform.translation.y += (phase * 1.2 + 0.6).sin() * 0.05;
+            }
+            ProceduralAnimationRole::ClothCanopy => {
+                let flutter = (phase * 1.8).sin() * 0.06;
+                transform.rotation = part.base_rotation * Quat::from_rotation_x(flutter);
+                transform.translation.y += flutter.abs() * 0.08;
+            }
+            ProceduralAnimationRole::Smoke => {
+                let drift = Vec3::new((phase * 0.7).sin() * 0.08, (phase * 0.33).sin() * 0.04, 0.0);
+                transform.translation = part.base_translation + drift;
+                transform.scale = part.base_scale * (1.0 + (phase * 0.9).sin().abs() * 0.18);
+            }
+            ProceduralAnimationRole::WaterRipple => {
+                let pulse = 1.0 + (phase * 1.15).sin() * 0.025;
+                transform.scale = Vec3::new(
+                    part.base_scale.x * pulse,
+                    part.base_scale.y,
+                    part.base_scale.z,
+                );
+            }
+            ProceduralAnimationRole::BirdLeftWing
+            | ProceduralAnimationRole::BirdRightWing
+            | ProceduralAnimationRole::FishTail => {}
         }
     }
 }
@@ -1039,6 +1187,7 @@ mod tests {
                 collision_chunk_budget: 1,
                 collision_cache_capacity: 16,
                 material_texture_resolution: 64,
+                detail_density: 1.0,
             },
             environment: EnvironmentConfig {
                 day_length_seconds: 180.0,
@@ -1071,9 +1220,12 @@ mod tests {
             ecology: EcologyConfig {
                 bird_count: 18,
                 fish_count: 10,
+                sheep_count: 9,
                 state_update_interval_seconds: 0.2,
                 visual_update_interval_seconds: 0.066,
                 max_visible_bird_distance: 240.0,
+                max_visible_fish_distance: 90.0,
+                max_visible_sheep_distance: 120.0,
             },
             assets: AssetConfig {
                 color_saturation: 1.0,

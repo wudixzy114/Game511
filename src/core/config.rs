@@ -60,6 +60,7 @@ pub struct WorldConfig {
     pub collision_chunk_budget: u32,
     pub collision_cache_capacity: usize,
     pub material_texture_resolution: u32,
+    pub detail_density: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -107,9 +108,12 @@ pub struct CameraConfig {
 pub struct EcologyConfig {
     pub bird_count: u32,
     pub fish_count: u32,
+    pub sheep_count: u32,
     pub state_update_interval_seconds: f32,
     pub visual_update_interval_seconds: f32,
     pub max_visible_bird_distance: f32,
+    pub max_visible_fish_distance: f32,
+    pub max_visible_sheep_distance: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -216,6 +220,7 @@ collision_subdivisions = 10
 collision_chunk_budget = 2
 collision_cache_capacity = 48
 material_texture_resolution = 192
+detail_density = 1.0
 
 [presentation]
 enabled = true
@@ -253,9 +258,12 @@ third_person_ground_clearance = 0.55
 [ecology]
 bird_count = 18
 fish_count = 10
+sheep_count = 9
 state_update_interval_seconds = 0.2
 visual_update_interval_seconds = 0.066
 max_visible_bird_distance = 240.0
+max_visible_fish_distance = 90.0
+max_visible_sheep_distance = 120.0
 
 [assets]
 color_saturation = 1.0
@@ -315,6 +323,7 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.world.collision_chunk_budget, 2);
         assert_eq!(config.world.collision_cache_capacity, 48);
         assert_eq!(config.world.material_texture_resolution, 192);
+        assert_eq!(config.world.detail_density, 1.0);
         assert_eq!(config.player.walk_speed, 7.0);
         assert_eq!(config.player.eye_height, 1.65);
         assert_eq!(config.player.capsule_radius, 0.42);
@@ -324,6 +333,8 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.player.contact_substeps, 4);
         assert_eq!(config.camera.third_person_default_distance, 6.2);
         assert_eq!(config.ecology.bird_count, 18);
+        assert_eq!(config.ecology.sheep_count, 9);
+        assert_eq!(config.ecology.max_visible_fish_distance, 90.0);
         assert_eq!(config.assets.color_saturation, 1.0);
         assert_eq!(config.assets.warm_light_intensity, 1.0);
         assert_eq!(config.assets.water_alpha, 0.64);
