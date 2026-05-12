@@ -1,5 +1,5 @@
 use bevy::{
-    input::mouse::AccumulatedMouseMotion,
+    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
@@ -36,9 +36,11 @@ impl Plugin for PlayerPlugin {
             Update,
             (
                 initialize_first_person_state,
+                handle_camera_mode_toggle,
                 apply_mouse_look,
                 move_player_body,
                 sync_camera_to_player,
+                update_player_body_visibility,
             )
                 .chain()
                 .run_if(in_state(InGameState::Running))
@@ -54,6 +56,8 @@ pub struct FirstPersonState {
     pub vertical_velocity: f32,
     pub grounded: bool,
     pub cursor_locked: bool,
+    pub camera_mode: CameraMode,
+    pub third_person_distance: f32,
 }
 
 impl Default for FirstPersonState {
@@ -64,6 +68,23 @@ impl Default for FirstPersonState {
             vertical_velocity: 0.0,
             grounded: true,
             cursor_locked: true,
+            camera_mode: CameraMode::FirstPerson,
+            third_person_distance: THIRD_PERSON_DEFAULT_DISTANCE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum CameraMode {
+    FirstPerson,
+    ThirdPerson,
+}
+
+impl CameraMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FirstPerson => "第一人称",
+            Self::ThirdPerson => "第三人称",
         }
     }
 }
@@ -83,6 +104,11 @@ const CAPSULE_SUPPORT_DIRECTIONS: [Vec2; 8] = [
     Vec2::new(-0.70710677, 0.70710677),
     Vec2::new(-0.70710677, -0.70710677),
 ];
+const THIRD_PERSON_DEFAULT_DISTANCE: f32 = 6.2;
+const THIRD_PERSON_MIN_DISTANCE: f32 = 3.2;
+const THIRD_PERSON_MAX_DISTANCE: f32 = 9.5;
+const THIRD_PERSON_HEIGHT: f32 = 2.25;
+const THIRD_PERSON_SIDE_OFFSET: f32 = 0.42;
 
 type PlayerMoveResources<'w> = (
     Res<'w, Time>,
@@ -181,6 +207,8 @@ fn initialize_first_person_state(
     state.vertical_velocity = 0.0;
     state.grounded = true;
     state.cursor_locked = true;
+    state.camera_mode = CameraMode::FirstPerson;
+    state.third_person_distance = THIRD_PERSON_DEFAULT_DISTANCE;
 
     player_transform.rotation = Quat::IDENTITY;
     camera_transform.translation =
@@ -192,6 +220,32 @@ fn initialize_first_person_state(
 fn start_player_session(mut commands: Commands) {
     commands.insert_resource(FirstPersonState::default());
     commands.insert_resource(FirstPersonBootstrap { pending: true });
+}
+
+fn handle_camera_mode_toggle(
+    keys: Res<ButtonInput<KeyCode>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    state: Option<ResMut<FirstPersonState>>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    if keys.just_pressed(KeyCode::KeyV) {
+        state.camera_mode = match state.camera_mode {
+            CameraMode::FirstPerson => CameraMode::ThirdPerson,
+            CameraMode::ThirdPerson => CameraMode::FirstPerson,
+        };
+        tracing::info!(
+            target: "dao_game::player::camera",
+            mode = state.camera_mode.label(),
+            "camera mode changed"
+        );
+    }
+
+    if state.camera_mode == CameraMode::ThirdPerson && scroll.delta.y.abs() > f32::EPSILON {
+        state.third_person_distance = (state.third_person_distance - scroll.delta.y * 0.32)
+            .clamp(THIRD_PERSON_MIN_DISTANCE, THIRD_PERSON_MAX_DISTANCE);
+    }
 }
 
 fn lock_cursor_for_running_session(
@@ -520,6 +574,8 @@ fn sync_camera_to_player(
     config: Res<AppConfig>,
     state: Option<Res<FirstPersonState>>,
     bootstrap: Option<Res<FirstPersonBootstrap>>,
+    world_map: Option<Res<WorldMap>>,
+    mut collision_proxy: ResMut<TerrainCollisionProxy>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut camera_query: Query<&mut Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 ) {
@@ -539,9 +595,80 @@ fn sync_camera_to_player(
         return;
     };
 
-    camera_transform.translation =
-        player_transform.translation + Vec3::Y * config.player.eye_height;
-    camera_transform.rotation = Quat::from_euler(EulerRot::YXZ, state.yaw, state.pitch, 0.0);
+    match state.camera_mode {
+        CameraMode::FirstPerson => {
+            camera_transform.translation =
+                player_transform.translation + Vec3::Y * config.player.eye_height;
+            camera_transform.rotation =
+                Quat::from_euler(EulerRot::YXZ, state.yaw, state.pitch, 0.0);
+        }
+        CameraMode::ThirdPerson => {
+            let desired = third_person_camera_position(
+                player_transform.translation,
+                state.yaw,
+                state.pitch,
+                state.third_person_distance,
+            );
+            let adjusted = if let Some(world_map) = world_map.as_deref() {
+                avoid_terrain_for_camera(desired, &mut collision_proxy, world_map)
+            } else {
+                desired
+            };
+            camera_transform.translation = camera_transform.translation.lerp(adjusted, 0.22);
+            camera_transform.look_at(
+                player_transform.translation + Vec3::Y * (config.player.eye_height * 0.82),
+                Vec3::Y,
+            );
+        }
+    }
+}
+
+fn update_player_body_visibility(
+    state: Option<Res<FirstPersonState>>,
+    mut query: Query<&mut Visibility, With<WandererPrototype>>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    for mut visibility in &mut query {
+        *visibility = if state.camera_mode == CameraMode::ThirdPerson {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+pub fn third_person_camera_position(
+    player_position: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+) -> Vec3 {
+    let yaw_rotation = Quat::from_rotation_y(yaw);
+    let backward = yaw_rotation * Vec3::Z;
+    let right = yaw_rotation * Vec3::X;
+    let pitch_lift = (-pitch).clamp(-0.45, 0.65) * 1.2;
+    player_position
+        + Vec3::Y * (THIRD_PERSON_HEIGHT + pitch_lift)
+        + backward * distance.clamp(THIRD_PERSON_MIN_DISTANCE, THIRD_PERSON_MAX_DISTANCE)
+        + right * THIRD_PERSON_SIDE_OFFSET
+}
+
+fn avoid_terrain_for_camera(
+    desired: Vec3,
+    collision_proxy: &mut TerrainCollisionProxy,
+    world_map: &WorldMap,
+) -> Vec3 {
+    let Some(ground) = collision_proxy.sample_height(world_map, desired.x, desired.z) else {
+        return desired;
+    };
+    let min_y = ground + 0.55;
+    if desired.y < min_y {
+        Vec3::new(desired.x, min_y, desired.z)
+    } else {
+        desired
+    }
 }
 
 #[cfg(test)]
@@ -551,8 +678,8 @@ mod tests {
     use crate::game::world::TerrainCollisionSample;
 
     use super::{
-        FirstPersonState, TerrainSupport, TerrainWalkerConfig, VerticalContactInput,
-        resolve_horizontal_contact, resolve_vertical_contact,
+        CameraMode, FirstPersonState, TerrainSupport, TerrainWalkerConfig, VerticalContactInput,
+        resolve_horizontal_contact, resolve_vertical_contact, third_person_camera_position,
     };
 
     #[test]
@@ -562,6 +689,7 @@ mod tests {
         assert!(state.cursor_locked);
         assert_eq!(state.pitch, 0.0);
         assert_eq!(state.yaw, 0.0);
+        assert_eq!(state.camera_mode, CameraMode::FirstPerson);
     }
 
     fn flat_sample(height: f32) -> TerrainCollisionSample {
@@ -664,5 +792,14 @@ mod tests {
         assert!(!result.grounded);
         assert!(result.y < 2.0);
         assert!(result.vertical_velocity < 0.0);
+    }
+
+    #[test]
+    fn third_person_camera_sits_behind_player() {
+        let player = Vec3::new(0.0, 1.2, 0.0);
+        let camera = third_person_camera_position(player, 0.0, 0.0, 6.0);
+
+        assert!(camera.z > player.z);
+        assert!(camera.y > player.y);
     }
 }

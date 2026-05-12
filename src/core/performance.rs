@@ -30,7 +30,10 @@ impl Default for PerformanceSessionId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PerformancePhase {
+    Director,
+    Ecology,
     Environment,
+    Landmarks,
     Presentation,
     Player,
     Signs,
@@ -42,8 +45,11 @@ pub enum PerformancePhase {
 }
 
 impl PerformancePhase {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 12] = [
+        Self::Director,
+        Self::Ecology,
         Self::Environment,
+        Self::Landmarks,
         Self::Presentation,
         Self::Player,
         Self::Signs,
@@ -56,7 +62,10 @@ impl PerformancePhase {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Director => "director",
+            Self::Ecology => "ecology",
             Self::Environment => "environment",
+            Self::Landmarks => "landmarks",
             Self::Presentation => "presentation",
             Self::Player => "player",
             Self::Signs => "signs",
@@ -249,6 +258,9 @@ pub fn track_frame_timing(
 
     if should_log_frame(snapshot.frame_count, config.performance_detail_interval) {
         let environment_ms = performance.previous_frame_phase_ms(PerformancePhase::Environment);
+        let director_ms = performance.previous_frame_phase_ms(PerformancePhase::Director);
+        let ecology_ms = performance.previous_frame_phase_ms(PerformancePhase::Ecology);
+        let landmarks_ms = performance.previous_frame_phase_ms(PerformancePhase::Landmarks);
         let presentation_ms = performance.previous_frame_phase_ms(PerformancePhase::Presentation);
         let player_ms = performance.previous_frame_phase_ms(PerformancePhase::Player);
         let signs_ms = performance.previous_frame_phase_ms(PerformancePhase::Signs);
@@ -274,7 +286,10 @@ pub fn track_frame_timing(
             budget_ms = config.quality.frame_time_budget_ms,
             budget_delta_ms = snapshot.frame_ms - config.quality.frame_time_budget_ms,
             profiled_phase_ms = profiled_phase_ms,
+            director_ms = director_ms,
+            ecology_ms = ecology_ms,
             environment_ms = environment_ms,
+            landmarks_ms = landmarks_ms,
             presentation_ms = presentation_ms,
             player_ms = player_ms,
             signs_ms = signs_ms,

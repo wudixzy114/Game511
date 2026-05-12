@@ -34,12 +34,18 @@ function Run-GameCapture {
     }
 }
 
-function Invoke-PerfReport([string[]]$Args) {
+function Invoke-PerfReport {
+    param(
+        [string[]]$ReportArgs = @()
+    )
+
     if ($Json) {
-        cargo run --bin perf_report -- --json @Args
+        $finalArgs = @("--json") + $ReportArgs
     } else {
-        cargo run --bin perf_report -- @Args
+        $finalArgs = $ReportArgs
     }
+
+    & cargo run --bin perf_report -- @finalArgs
 }
 
 Ensure-LogDir
@@ -60,22 +66,22 @@ switch ($Action) {
     }
     "capture" {
         Run-GameCapture
-        Invoke-PerfReport @((Join-Path $LogDir "performance.log"))
+        Invoke-PerfReport -ReportArgs @((Join-Path $LogDir "performance.log"))
     }
     "report" {
         $target = if ($Log) { $Log } else { Join-Path $LogDir "performance.log" }
-        Invoke-PerfReport @($target)
+        Invoke-PerfReport -ReportArgs @($target)
     }
     "compare" {
         if ($Baseline -and $Candidate) {
-            Invoke-PerfReport @($Baseline, $Candidate)
+            Invoke-PerfReport -ReportArgs @($Baseline, $Candidate)
         } else {
             $baseline = Join-Path $LogDir "performance.log.1"
             $candidate = Join-Path $LogDir "performance.log"
             if (-not (Test-Path $baseline)) {
                 throw "No previous performance log found: $baseline"
             }
-            Invoke-PerfReport @($baseline, $candidate)
+            Invoke-PerfReport -ReportArgs @($baseline, $candidate)
         }
     }
     "html" {

@@ -744,6 +744,10 @@ impl WorldMap {
         self.radius
     }
 
+    pub fn seed_value(&self) -> u64 {
+        self.seed
+    }
+
     pub fn showcase_search_radius(&self) -> i32 {
         self.showcase_search_radius
     }

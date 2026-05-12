@@ -11,8 +11,11 @@ use serde_json::{Map, Value};
 
 const DEFAULT_LOG_DIR: &str = "logs";
 const DEFAULT_PERF_LOG_NAME: &str = "performance.log";
-const DETAIL_PHASES: [&str; 9] = [
+const DETAIL_PHASES: [&str; 12] = [
+    "director",
+    "ecology",
     "environment",
+    "landmarks",
     "presentation",
     "player",
     "signs",

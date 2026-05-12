@@ -50,6 +50,7 @@ pub enum WeatherKind {
     Mist,
     Rain,
     Storm,
+    Sandstorm,
     Snow,
 }
 
@@ -145,6 +146,7 @@ enum ParticleMode {
     None,
     Mist,
     Rain,
+    Sand,
     Snow,
 }
 
@@ -176,11 +178,12 @@ const WEATHER_TOP: f32 = 16.0;
 const WEATHER_BOTTOM: f32 = -3.0;
 const WEATHER_SEGMENT_SECONDS: f32 = 30.0;
 const WEATHER_TRANSITION_SECONDS: f32 = 3.5;
-const WEATHER_SEQUENCE: [WeatherKind; 6] = [
+const WEATHER_SEQUENCE: [WeatherKind; 7] = [
     WeatherKind::Clear,
     WeatherKind::Mist,
     WeatherKind::Rain,
     WeatherKind::Storm,
+    WeatherKind::Sandstorm,
     WeatherKind::Clear,
     WeatherKind::Snow,
 ];
@@ -696,6 +699,10 @@ fn update_celestial_visuals(
                 material.base_color = Color::srgba(0.7, 0.8, 0.94, profile.particle_alpha);
                 material.emissive = LinearRgba::rgb(0.08, 0.1, 0.14);
             }
+            ParticleMode::Sand => {
+                material.base_color = Color::srgba(0.78, 0.56, 0.32, profile.particle_alpha);
+                material.emissive = LinearRgba::rgb(0.12, 0.08, 0.035);
+            }
             ParticleMode::Snow => {
                 material.base_color = Color::srgba(0.95, 0.97, 1.0, profile.particle_alpha);
                 material.emissive = LinearRgba::rgb(0.05, 0.06, 0.08);
@@ -807,6 +814,20 @@ fn animate_weather_particles(
                 transform.rotation =
                     Quat::from_euler(EulerRot::XYZ, 0.22 + lean.y * 0.1, 0.0, -lean.x * 0.18);
             }
+            ParticleMode::Sand => {
+                transform.scale = Vec3::new(
+                    0.22 + hash_range(particle.seed, 47, 0.0, 0.34),
+                    0.08 + hash_range(particle.seed, 59, 0.0, 0.08),
+                    0.22 + hash_range(particle.seed, 71, 0.0, 0.34),
+                );
+                let lean = profile.wind.normalize_or_zero();
+                transform.rotation = Quat::from_euler(
+                    EulerRot::XYZ,
+                    0.05 + lean.y * 0.05,
+                    swirl_phase + time.elapsed_secs() * 0.22,
+                    -lean.x * 0.08,
+                );
+            }
             ParticleMode::Snow => {
                 transform.scale = Vec3::splat(0.13 + hash_range(particle.seed, 83, 0.0, 0.11));
                 transform.rotation = Quat::from_euler(
@@ -916,6 +937,28 @@ fn weather_profile(kind: WeatherKind) -> WeatherProfile {
             wind: Vec2::new(3.2, -1.15),
             lightning_strength: 1.0,
         },
+        WeatherKind::Sandstorm => WeatherProfile {
+            sky_day: Vec3::new(0.58, 0.43, 0.24),
+            sky_night: Vec3::new(0.11, 0.07, 0.045),
+            horizon_glow: Vec3::new(0.98, 0.64, 0.28),
+            fog_day: Vec3::new(0.72, 0.52, 0.3),
+            fog_night: Vec3::new(0.18, 0.12, 0.075),
+            inscatter_day: Vec3::new(0.98, 0.72, 0.38),
+            inscatter_night: Vec3::new(0.42, 0.24, 0.12),
+            ambient_color: Vec3::new(0.68, 0.48, 0.28),
+            visibility: 46.0,
+            ambient_brightness: 230.0,
+            sun_scale: 0.34,
+            moon_scale: 0.18,
+            star_scale: 0.04,
+            cloud_cover: 0.9,
+            precipitation_strength: 1.0,
+            particle_speed: 3.2,
+            particle_sway: 1.8,
+            particle_alpha: 0.42,
+            wind: Vec2::new(4.2, -1.2),
+            lightning_strength: 0.0,
+        },
         WeatherKind::Snow => WeatherProfile {
             sky_day: Vec3::new(0.68, 0.74, 0.82),
             sky_night: Vec3::new(0.045, 0.06, 0.1),
@@ -974,6 +1017,7 @@ fn particle_mode_for_weather(kind: WeatherKind) -> ParticleMode {
         WeatherKind::Clear => ParticleMode::None,
         WeatherKind::Mist => ParticleMode::Mist,
         WeatherKind::Rain | WeatherKind::Storm => ParticleMode::Rain,
+        WeatherKind::Sandstorm => ParticleMode::Sand,
         WeatherKind::Snow => ParticleMode::Snow,
     }
 }
@@ -1066,8 +1110,9 @@ mod tests {
     fn weather_sequence_wraps_cleanly() {
         assert_eq!(weather_for_elapsed(0.0), WeatherKind::Clear);
         assert_eq!(weather_for_elapsed(31.0), WeatherKind::Mist);
-        assert_eq!(weather_for_elapsed(121.0), WeatherKind::Clear);
-        assert_eq!(weather_for_elapsed(181.0), WeatherKind::Clear);
+        assert_eq!(weather_for_elapsed(121.0), WeatherKind::Sandstorm);
+        assert_eq!(weather_for_elapsed(181.0), WeatherKind::Snow);
+        assert_eq!(weather_for_elapsed(211.0), WeatherKind::Clear);
     }
 
     #[test]

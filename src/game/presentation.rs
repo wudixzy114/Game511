@@ -12,7 +12,10 @@ use crate::{
             DreamPhase, JourneyAdvanceContext, JourneyStage, JourneyState, StoryArcStage,
             advance_journey_state,
         },
+        landmarks::{LandmarkState, PyramidSignal},
         places::{MeaningfulPlaces, PlaceKind, planar_distance},
+        player::{CameraMode, FirstPersonState},
+        regions::{RegionGraphState, TransitionGateState},
         signs::{OmenKind, SignState},
         village::{VillageAreaKind, VillageState},
         world::{
@@ -77,6 +80,11 @@ enum PresentationJourneyStep {
     VillageLife,
     Dream,
     DreamEcho,
+    Boundary,
+    DesertPyramid,
+    Ecology,
+    ThirdPerson,
+    Director,
     Spawn,
     Omen,
     Approach,
@@ -99,14 +107,32 @@ struct SceneVisuals {
     expected_omen: Option<OmenKind>,
 }
 
-fn initialize_presentation(
-    mut commands: Commands,
-    config: Res<AppConfig>,
-    world_map: Option<Res<WorldMap>>,
-    places: Option<Res<MeaningfulPlaces>>,
-    village: Option<Res<VillageState>>,
-    director: Option<Res<PresentationDirector>>,
-) {
+type PresentationInitResources<'w> = (
+    Res<'w, AppConfig>,
+    Option<Res<'w, WorldMap>>,
+    Option<Res<'w, MeaningfulPlaces>>,
+    Option<Res<'w, VillageState>>,
+    Option<Res<'w, RegionGraphState>>,
+    Option<Res<'w, LandmarkState>>,
+    Option<Res<'w, PresentationDirector>>,
+);
+
+type PresentationDriveResources<'w> = (
+    Res<'w, Time>,
+    Res<'w, AppConfig>,
+    ResMut<'w, FramePerformance>,
+    Res<'w, WorldMap>,
+    Option<ResMut<'w, PresentationDirector>>,
+    Option<ResMut<'w, WorldPresentationControl>>,
+    ResMut<'w, SignState>,
+    Option<ResMut<'w, JourneyState>>,
+    Option<ResMut<'w, RegionGraphState>>,
+    Option<ResMut<'w, LandmarkState>>,
+    Option<ResMut<'w, FirstPersonState>>,
+);
+
+fn initialize_presentation(mut commands: Commands, resources: PresentationInitResources<'_>) {
+    let (config, world_map, places, village, regions, landmarks, director) = resources;
     if director.is_some() {
         return;
     }
@@ -130,102 +156,108 @@ fn initialize_presentation(
     let meadow_anchor = find_anchor(&world_map, BiomeKind::Meadow).unwrap_or(grove_anchor);
     let steppe_anchor = find_anchor(&world_map, BiomeKind::Steppe).unwrap_or(meadow_anchor);
 
-    let scenes =
-        build_presentation_scenes(village.as_deref(), &places, &world_map).unwrap_or_else(|| {
-            vec![
-                build_scene(
-                    "Panorama Sweep",
-                    "overview of terrain layers, clear daylight and long-range sky tone",
-                    meadow_anchor,
-                    &world_map,
-                    SceneVisuals {
-                        camera_offset: Vec3::new(-15.0, 9.5, 15.0),
-                        time_override: 0.18,
-                        weather: WeatherKind::Clear,
-                        expected_omen: None,
-                    },
-                    PresentationJourneyStep::Scenic,
-                ),
-                build_scene(
-                    "Grove Whisper",
-                    "misty grove atmosphere with close-range vegetation silhouettes",
-                    grove_anchor,
-                    &world_map,
-                    SceneVisuals {
-                        camera_offset: Vec3::new(-6.0, 4.8, 7.0),
-                        time_override: 0.34,
-                        weather: WeatherKind::Mist,
-                        expected_omen: Some(OmenKind::GroveWhisper),
-                    },
-                    PresentationJourneyStep::Scenic,
-                ),
-                build_scene(
-                    "Ridge Dawn",
-                    "sunrise lighting shift with a clear east-west solar arc",
-                    ridge_anchor,
-                    &world_map,
-                    SceneVisuals {
-                        camera_offset: Vec3::new(-9.0, 6.2, 10.0),
-                        time_override: 0.02,
-                        weather: WeatherKind::Clear,
-                        expected_omen: Some(OmenKind::DawnLight),
-                    },
-                    PresentationJourneyStep::Scenic,
-                ),
-                build_scene(
-                    "Storm Front",
-                    "heavy rain, dark atmosphere and lightning-driven contrast",
-                    meadow_anchor,
-                    &world_map,
-                    SceneVisuals {
-                        camera_offset: Vec3::new(-8.5, 5.4, 9.5),
-                        time_override: 0.46,
-                        weather: WeatherKind::Storm,
-                        expected_omen: None,
-                    },
-                    PresentationJourneyStep::Scenic,
-                ),
-                build_scene(
-                    "Snow Ridge",
-                    "cold snowfall, reduced visibility and summit response",
-                    ridge_anchor,
-                    &world_map,
-                    SceneVisuals {
-                        camera_offset: Vec3::new(-10.0, 7.0, 11.5),
-                        time_override: 0.61,
-                        weather: WeatherKind::Snow,
-                        expected_omen: Some(OmenKind::SummitCall),
-                    },
-                    PresentationJourneyStep::Scenic,
-                ),
-                build_scene(
-                    "Starfield Watch",
-                    "clear midnight sky for star visibility and moon transition",
-                    steppe_anchor,
-                    &world_map,
-                    SceneVisuals {
-                        camera_offset: Vec3::new(-7.2, 4.5, 8.6),
-                        time_override: 0.76,
-                        weather: WeatherKind::Clear,
-                        expected_omen: None,
-                    },
-                    PresentationJourneyStep::Scenic,
-                ),
-                build_scene(
-                    "Moonlit Water",
-                    "waterline calm test with moonlight and cool omen response",
-                    water_anchor,
-                    &world_map,
-                    SceneVisuals {
-                        camera_offset: Vec3::new(0.0, 4.2, 8.5),
-                        time_override: 0.84,
-                        weather: WeatherKind::Clear,
-                        expected_omen: Some(OmenKind::StillWater),
-                    },
-                    PresentationJourneyStep::Scenic,
-                ),
-            ]
-        });
+    let scenes = build_presentation_scenes(
+        village.as_deref(),
+        regions.as_deref(),
+        landmarks.as_deref(),
+        &places,
+        &world_map,
+    )
+    .unwrap_or_else(|| {
+        vec![
+            build_scene(
+                "Panorama Sweep",
+                "overview of terrain layers, clear daylight and long-range sky tone",
+                meadow_anchor,
+                &world_map,
+                SceneVisuals {
+                    camera_offset: Vec3::new(-15.0, 9.5, 15.0),
+                    time_override: 0.18,
+                    weather: WeatherKind::Clear,
+                    expected_omen: None,
+                },
+                PresentationJourneyStep::Scenic,
+            ),
+            build_scene(
+                "Grove Whisper",
+                "misty grove atmosphere with close-range vegetation silhouettes",
+                grove_anchor,
+                &world_map,
+                SceneVisuals {
+                    camera_offset: Vec3::new(-6.0, 4.8, 7.0),
+                    time_override: 0.34,
+                    weather: WeatherKind::Mist,
+                    expected_omen: Some(OmenKind::GroveWhisper),
+                },
+                PresentationJourneyStep::Scenic,
+            ),
+            build_scene(
+                "Ridge Dawn",
+                "sunrise lighting shift with a clear east-west solar arc",
+                ridge_anchor,
+                &world_map,
+                SceneVisuals {
+                    camera_offset: Vec3::new(-9.0, 6.2, 10.0),
+                    time_override: 0.02,
+                    weather: WeatherKind::Clear,
+                    expected_omen: Some(OmenKind::DawnLight),
+                },
+                PresentationJourneyStep::Scenic,
+            ),
+            build_scene(
+                "Storm Front",
+                "heavy rain, dark atmosphere and lightning-driven contrast",
+                meadow_anchor,
+                &world_map,
+                SceneVisuals {
+                    camera_offset: Vec3::new(-8.5, 5.4, 9.5),
+                    time_override: 0.46,
+                    weather: WeatherKind::Storm,
+                    expected_omen: None,
+                },
+                PresentationJourneyStep::Scenic,
+            ),
+            build_scene(
+                "Snow Ridge",
+                "cold snowfall, reduced visibility and summit response",
+                ridge_anchor,
+                &world_map,
+                SceneVisuals {
+                    camera_offset: Vec3::new(-10.0, 7.0, 11.5),
+                    time_override: 0.61,
+                    weather: WeatherKind::Snow,
+                    expected_omen: Some(OmenKind::SummitCall),
+                },
+                PresentationJourneyStep::Scenic,
+            ),
+            build_scene(
+                "Starfield Watch",
+                "clear midnight sky for star visibility and moon transition",
+                steppe_anchor,
+                &world_map,
+                SceneVisuals {
+                    camera_offset: Vec3::new(-7.2, 4.5, 8.6),
+                    time_override: 0.76,
+                    weather: WeatherKind::Clear,
+                    expected_omen: None,
+                },
+                PresentationJourneyStep::Scenic,
+            ),
+            build_scene(
+                "Moonlit Water",
+                "waterline calm test with moonlight and cool omen response",
+                water_anchor,
+                &world_map,
+                SceneVisuals {
+                    camera_offset: Vec3::new(0.0, 4.2, 8.5),
+                    time_override: 0.84,
+                    weather: WeatherKind::Clear,
+                    expected_omen: Some(OmenKind::StillWater),
+                },
+                PresentationJourneyStep::Scenic,
+            ),
+        ]
+    });
 
     tracing::info!(
         target: "dao_game::presentation",
@@ -244,19 +276,22 @@ fn initialize_presentation(
 }
 
 fn advance_presentation_director(
-    resources: (
-        Res<Time>,
-        Res<AppConfig>,
-        ResMut<FramePerformance>,
-        Res<WorldMap>,
-    ),
-    director: Option<ResMut<PresentationDirector>>,
-    control: Option<ResMut<WorldPresentationControl>>,
-    mut signs: ResMut<SignState>,
-    mut journey: Option<ResMut<JourneyState>>,
+    resources: PresentationDriveResources<'_>,
     mut wanderer_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
-    let (time, config, mut performance, world_map) = resources;
+    let (
+        time,
+        config,
+        mut performance,
+        world_map,
+        director,
+        control,
+        mut signs,
+        mut journey,
+        mut regions,
+        mut landmarks,
+        mut camera_state,
+    ) = resources;
     let started_at = std::time::Instant::now();
     let Some(mut director) = director else {
         return;
@@ -298,6 +333,15 @@ fn advance_presentation_director(
     }
     if let Some(journey) = journey.as_deref_mut() {
         drive_journey_showcase(journey, &mut signs, &scene, scene_progress);
+    }
+    if let Some(regions) = regions.as_deref_mut() {
+        drive_region_showcase(regions, &scene, scene_progress);
+    }
+    if let Some(landmarks) = landmarks.as_deref_mut() {
+        drive_landmark_showcase(landmarks, &scene, scene_progress);
+    }
+    if let Some(camera_state) = camera_state.as_deref_mut() {
+        drive_camera_mode_showcase(camera_state, &scene);
     }
     performance.record_phase_duration(PerformancePhase::Presentation, started_at.elapsed());
 }
@@ -434,12 +478,21 @@ fn build_journey_scenes(
 
 fn build_presentation_scenes(
     village: Option<&VillageState>,
+    regions: Option<&RegionGraphState>,
+    landmarks: Option<&LandmarkState>,
     places: &MeaningfulPlaces,
     world_map: &WorldMap,
 ) -> Option<Vec<PresentationScene>> {
     let mut scenes = Vec::new();
     if let Some(village) = village {
         scenes.extend(build_village_scenes(village, world_map));
+    }
+    if let Some(regions) = regions {
+        scenes.extend(build_region_scenes(regions, world_map));
+        scenes.extend(build_director_scenes(regions, world_map));
+    }
+    if let Some(landmarks) = landmarks {
+        scenes.extend(build_landmark_scenes(landmarks, world_map));
     }
     if let Some(mut journey_scenes) = build_journey_scenes(places, world_map) {
         scenes.append(&mut journey_scenes);
@@ -521,7 +574,99 @@ fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<Pre
             WeatherKind::Mist,
             PresentationJourneyStep::DreamEcho,
         ),
+        village_scene(
+            "Ecology Omen",
+            "birds and village life carry early omen behavior",
+            sheep_pen + Vec3::new(0.0, 0.0, -4.0),
+            sheep_pen + Vec3::Y * 1.0,
+            world_map,
+            Vec3::new(-10.0, 6.4, 12.0),
+            0.22,
+            WeatherKind::Clear,
+            PresentationJourneyStep::Ecology,
+        ),
     ]
+}
+
+fn build_region_scenes(regions: &RegionGraphState, world_map: &WorldMap) -> Vec<PresentationScene> {
+    regions
+        .gates
+        .iter()
+        .take(2)
+        .map(|gate| {
+            build_journey_scene(
+                "Natural Boundary",
+                "mist, mountain or harbor boundary appears as part of the world",
+                gate.position + Vec3::new(0.0, 0.0, gate.radius * 0.42),
+                gate.position + Vec3::Y * 1.3,
+                world_map,
+                Vec3::new(-9.0, 5.8, 10.0),
+                0.08,
+                WeatherKind::Mist,
+                Some(OmenKind::SummitCall),
+                PresentationJourneyStep::Boundary,
+            )
+        })
+        .collect()
+}
+
+fn build_director_scenes(
+    regions: &RegionGraphState,
+    world_map: &WorldMap,
+) -> Vec<PresentationScene> {
+    let Some(gate) = regions.gates.first() else {
+        return Vec::new();
+    };
+    vec![build_journey_scene(
+        "Director Interface",
+        "deterministic director validates non-task suggestions near a world anchor",
+        gate.position + Vec3::new(6.0, 0.0, gate.radius * 0.32),
+        gate.position + Vec3::Y * 1.2,
+        world_map,
+        Vec3::new(-8.0, 5.2, 9.0),
+        0.34,
+        WeatherKind::Mist,
+        Some(OmenKind::SummitCall),
+        PresentationJourneyStep::Director,
+    )]
+}
+
+fn build_landmark_scenes(
+    landmarks: &LandmarkState,
+    world_map: &WorldMap,
+) -> Vec<PresentationScene> {
+    let mut scenes = Vec::new();
+    if let Some(pyramid) = landmarks.desert_pyramid() {
+        scenes.push(build_journey_scene(
+            "Desert Pyramid",
+            "sandstorm reveal of the distant pyramid silhouette",
+            pyramid.position + Vec3::new(-pyramid.scale * 2.4, 0.0, pyramid.scale * 1.4),
+            pyramid.position + Vec3::Y * (pyramid.scale * 0.38),
+            world_map,
+            Vec3::new(
+                -pyramid.scale * 1.6,
+                pyramid.scale * 0.72,
+                pyramid.scale * 1.2,
+            ),
+            0.18,
+            WeatherKind::Sandstorm,
+            Some(OmenKind::DawnLight),
+            PresentationJourneyStep::DesertPyramid,
+        ));
+        scenes.push(build_journey_scene(
+            "Third Person Travel",
+            "third-person travel silhouette against a large landmark",
+            pyramid.position + Vec3::new(-pyramid.scale * 1.1, 0.0, pyramid.scale * 0.7),
+            pyramid.position + Vec3::Y * (pyramid.scale * 0.28),
+            world_map,
+            Vec3::new(-16.0, 7.0, 18.0),
+            0.26,
+            WeatherKind::Sandstorm,
+            Some(OmenKind::DawnLight),
+            PresentationJourneyStep::ThirdPerson,
+        ));
+    }
+    scenes
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -702,6 +847,11 @@ fn drive_journey_showcase(
             | PresentationJourneyStep::VillageLife
             | PresentationJourneyStep::Dream
             | PresentationJourneyStep::DreamEcho
+            | PresentationJourneyStep::Boundary
+            | PresentationJourneyStep::DesertPyramid
+            | PresentationJourneyStep::Ecology
+            | PresentationJourneyStep::ThirdPerson
+            | PresentationJourneyStep::Director
     ) {
         match scene.journey_step {
             PresentationJourneyStep::VillageBirth => {
@@ -730,6 +880,19 @@ fn drive_journey_showcase(
                 signs.current_omen = Some(OmenKind::DawnLight);
                 signs.omen_intensity = signs.omen_intensity.max(0.78);
             }
+            PresentationJourneyStep::Boundary
+            | PresentationJourneyStep::DesertPyramid
+            | PresentationJourneyStep::Ecology
+            | PresentationJourneyStep::ThirdPerson
+            | PresentationJourneyStep::Director => {
+                journey.story_stage = StoryArcStage::DreamAfterglow;
+                journey.dream.phase = DreamPhase::Afterglow;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 0.9;
+                signs.omen_triggered = true;
+                signs.current_omen = scene.expected_omen.or(Some(OmenKind::DawnLight));
+                signs.omen_intensity = signs.omen_intensity.max(0.82);
+            }
             _ => {}
         }
         return;
@@ -740,7 +903,12 @@ fn drive_journey_showcase(
         PresentationJourneyStep::VillageBirth
         | PresentationJourneyStep::VillageLife
         | PresentationJourneyStep::Dream
-        | PresentationJourneyStep::DreamEcho => {}
+        | PresentationJourneyStep::DreamEcho
+        | PresentationJourneyStep::Boundary
+        | PresentationJourneyStep::DesertPyramid
+        | PresentationJourneyStep::Ecology
+        | PresentationJourneyStep::ThirdPerson
+        | PresentationJourneyStep::Director => {}
         PresentationJourneyStep::Spawn => {
             let _ = advance_journey_state(
                 journey,
@@ -786,6 +954,59 @@ fn drive_journey_showcase(
             );
         }
     }
+}
+
+fn drive_region_showcase(
+    regions: &mut RegionGraphState,
+    scene: &PresentationScene,
+    scene_progress: f32,
+) {
+    if scene.journey_step != PresentationJourneyStep::Boundary {
+        return;
+    }
+    let Some(gate) = regions.gates.iter_mut().min_by(|left, right| {
+        planar_distance(left.position, scene.focus)
+            .total_cmp(&planar_distance(right.position, scene.focus))
+    }) else {
+        return;
+    };
+    gate.state = if scene_progress > 0.6 {
+        TransitionGateState::Open
+    } else {
+        TransitionGateState::Hinted
+    };
+    regions.current_region = gate.from;
+    regions.nearest_gate = Some(crate::game::regions::GateProximity {
+        gate_id: gate.id,
+        distance: planar_distance(scene.wander_target, gate.position),
+        open: gate.state == TransitionGateState::Open,
+    });
+}
+
+fn drive_landmark_showcase(
+    landmarks: &mut LandmarkState,
+    scene: &PresentationScene,
+    scene_progress: f32,
+) {
+    if scene.journey_step != PresentationJourneyStep::DesertPyramid
+        && scene.journey_step != PresentationJourneyStep::ThirdPerson
+    {
+        return;
+    }
+    landmarks.pyramid_signal = PyramidSignal {
+        visible: true,
+        distance: Some(planar_distance(scene.wander_target, scene.focus)),
+        sandstorm_strength: (0.84 - scene_progress * 0.42).clamp(0.2, 0.9),
+        silhouette_strength: (0.48 + scene_progress * 0.45).clamp(0.0, 1.0),
+    };
+}
+
+fn drive_camera_mode_showcase(state: &mut FirstPersonState, scene: &PresentationScene) {
+    state.camera_mode = if scene.journey_step == PresentationJourneyStep::ThirdPerson {
+        CameraMode::ThirdPerson
+    } else {
+        CameraMode::FirstPerson
+    };
 }
 
 fn presentation_context(

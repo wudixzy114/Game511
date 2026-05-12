@@ -6,11 +6,16 @@ use std::{fs, path::PathBuf};
 
 use crate::core::performance::{FramePerformance, PerformancePhase};
 use crate::game::{
+    director::DirectorState,
+    ecology::EcologyState,
     flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
     intent::{IntentState, PerceptionState, intent_debug_line, perception_label},
     journey::{JourneyStage, JourneyState, format_journey_memory_line},
+    landmarks::LandmarkState,
     notebook::{NotebookState, format_notebook_entry_line},
     places::PlaceKind,
+    player::{CameraMode, FirstPersonState},
+    regions::RegionGraphState,
     signs::{OmenGuidancePhase, OmenKind, SignState},
     village::VillageState,
     world::{BiomeKind, WandererPrototype, WorldCycle, WorldMap},
@@ -128,6 +133,11 @@ type HudResources<'w> = (
     Option<Res<'w, JourneyState>>,
     Option<Res<'w, IntentState>>,
     Option<Res<'w, PerceptionState>>,
+    Option<Res<'w, FirstPersonState>>,
+    Option<Res<'w, RegionGraphState>>,
+    Option<Res<'w, LandmarkState>>,
+    Option<Res<'w, EcologyState>>,
+    Option<Res<'w, DirectorState>>,
 );
 
 const TEXT_PRIMARY: Color = Color::srgb(0.92, 0.9, 0.85);
@@ -816,7 +826,7 @@ fn update_hud_control_text(
     controls_text.0 = format!(
         "{}\n{}",
         control_hint(*session_mode),
-        "F 交谈/观察  E 感知  F3 开发 HUD"
+        "F 交谈/观察  E 感知  V 切换视角  G 通过边界  F3 开发 HUD"
     );
     for mut visibility in &mut panel_query {
         *visibility = if keys.pressed(KeyCode::F3) {
@@ -837,7 +847,20 @@ fn update_hud_stats_text(
     mut panel_query: Query<&mut Visibility, With<HudDevPanel>>,
 ) {
     let started_at = std::time::Instant::now();
-    let (_, cycle, signs, world_map, journey, intent, perception) = resources;
+    let (
+        _,
+        cycle,
+        signs,
+        world_map,
+        journey,
+        intent,
+        perception,
+        camera_state,
+        regions,
+        landmarks,
+        ecology,
+        director,
+    ) = resources;
     for mut visibility in &mut panel_query {
         *visibility = if keys.pressed(KeyCode::F3) {
             Visibility::Visible
@@ -894,11 +917,78 @@ fn update_hud_stats_text(
         })
         .unwrap_or_else(|| "旅程：未开始  距离：--".to_string());
     let intent_line = intent_debug_line(intent.as_deref(), perception.as_deref());
+    let camera_line = camera_state
+        .as_deref()
+        .map(|state| {
+            format!(
+                "视角：{}  第三人称距离：{:.1}",
+                state.camera_mode.label(),
+                state.third_person_distance
+            )
+        })
+        .unwrap_or_else(|| "视角：未初始化".to_string());
+    let region_line = regions
+        .as_deref()
+        .map(|regions| {
+            let current = regions
+                .region(regions.current_region)
+                .map(|region| region.kind.label())
+                .unwrap_or("未知区域");
+            let gate = regions
+                .nearest_gate
+                .map(|gate| {
+                    format!(
+                        "边界 {:.0}m {}",
+                        gate.distance,
+                        if gate.open { "可通过" } else { "有征兆" }
+                    )
+                })
+                .unwrap_or_else(|| "无近处边界".to_string());
+            format!("区域：{current}  {gate}")
+        })
+        .unwrap_or_else(|| "区域：未初始化".to_string());
+    let pyramid_line = landmarks
+        .as_deref()
+        .map(|landmarks| {
+            format!(
+                "金字塔：{}  沙暴 {:.0}%  轮廓 {:.0}%",
+                landmarks
+                    .pyramid_signal
+                    .distance
+                    .map(|distance| format!("{distance:.0}m"))
+                    .unwrap_or_else(|| "--".to_string()),
+                landmarks.pyramid_signal.sandstorm_strength * 100.0,
+                landmarks.pyramid_signal.silhouette_strength * 100.0,
+            )
+        })
+        .unwrap_or_else(|| "金字塔：未初始化".to_string());
+    let ecology_line = ecology
+        .as_deref()
+        .and_then(|ecology| {
+            ecology
+                .latest_signal
+                .map(|signal| format!("生态征兆：{signal:?}"))
+        })
+        .unwrap_or_else(|| "生态征兆：平静".to_string());
+    let director_line = director
+        .as_deref()
+        .and_then(|director| {
+            director.last_validation.as_ref().map(|validation| {
+                format!(
+                    "导演建议：采纳 {} 拒绝 {}",
+                    validation.accepted.len(),
+                    validation.rejected.len()
+                )
+            })
+        })
+        .unwrap_or_else(|| "导演建议：待定".to_string());
 
     let Some(mut stats_text) = stats_query.iter_mut().next() else {
         return;
     };
-    stats_text.0 = format!("{status_line}\n{resonance_line}\n{journey_line}\n{intent_line}");
+    stats_text.0 = format!(
+        "{status_line}\n{resonance_line}\n{journey_line}\n{intent_line}\n{camera_line}\n{region_line}\n{pyramid_line}\n{ecology_line}\n{director_line}"
+    );
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
@@ -940,6 +1030,7 @@ fn update_hud_context_text(
     village: Option<Res<VillageState>>,
     notebook: Option<Res<NotebookState>>,
     perception: Option<Res<PerceptionState>>,
+    regions: Option<Res<RegionGraphState>>,
     mut interaction_query: Query<&mut Text, With<HudInteractionText>>,
     mut notebook_query: Query<&mut Text, (With<HudNotebookText>, Without<HudInteractionText>)>,
 ) {
@@ -953,7 +1044,18 @@ fn update_hud_context_text(
             .as_deref()
             .map(|perception| format!("{}  E", perception_label(perception)))
             .unwrap_or_default();
-        interaction_text.0 = [interaction, perception]
+        let gate = regions
+            .as_deref()
+            .and_then(|regions| regions.nearest_gate)
+            .map(|gate| {
+                if gate.open {
+                    "边界可通过  G".to_string()
+                } else {
+                    "雾中有边界".to_string()
+                }
+            })
+            .unwrap_or_default();
+        interaction_text.0 = [interaction, perception, gate]
             .into_iter()
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
@@ -979,10 +1081,14 @@ fn update_hud_context_text(
 fn update_crosshair_visibility(
     session_mode: Res<SessionMode>,
     in_game_state: Res<State<InGameState>>,
+    camera_state: Option<Res<FirstPersonState>>,
     mut query: Query<&mut Visibility, With<Crosshair>>,
 ) {
-    let visible =
-        *session_mode == SessionMode::Exploration && *in_game_state.get() == InGameState::Running;
+    let visible = *session_mode == SessionMode::Exploration
+        && *in_game_state.get() == InGameState::Running
+        && camera_state
+            .as_deref()
+            .is_none_or(|state| state.camera_mode == CameraMode::FirstPerson);
     for mut visibility in &mut query {
         *visibility = if visible {
             Visibility::Visible
@@ -1016,7 +1122,7 @@ fn button_border_color(tone: ButtonTone) -> Color {
 
 fn control_hint(session_mode: SessionMode) -> &'static str {
     match session_mode {
-        SessionMode::Exploration => "WASD 移动  Shift 疾走  Space 跳跃  Esc 暂停",
+        SessionMode::Exploration => "WASD 移动  Shift 疾走  Space 跳跃  V 视角  Esc 暂停",
         SessionMode::Presentation => "自动巡游展示场景  Esc 暂停",
     }
 }
@@ -1185,7 +1291,7 @@ mod tests {
     fn labels_match_known_gameplay_terms() {
         assert_eq!(
             control_hint(SessionMode::Exploration),
-            "WASD 移动  Shift 疾走  Space 跳跃  Esc 暂停"
+            "WASD 移动  Shift 疾走  Space 跳跃  V 视角  Esc 暂停"
         );
         assert_eq!(biome_label(BiomeKind::Grove), "林地");
         assert_eq!(omen_label(Some(OmenKind::StillWater)), "止水");
