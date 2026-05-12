@@ -1,6 +1,7 @@
 pub mod environment;
 pub mod flow;
 pub mod journey;
+pub mod places;
 pub mod player;
 pub mod presentation;
 pub mod signs;
@@ -35,6 +36,7 @@ impl Plugin for GamePlugin {
 
         app.add_plugins(ui::UiPlugin);
         app.add_plugins(world::WorldPlugin);
+        app.add_plugins(places::PlacesPlugin);
         app.add_plugins(environment::EnvironmentPlugin);
         app.add_plugins(signs::SignPlugin);
         app.add_plugins(player::PlayerPlugin);

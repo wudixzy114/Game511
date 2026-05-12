@@ -4,9 +4,12 @@ use bevy::prelude::*;
 
 use crate::game::{
     flow::{AppScreen, InGameState},
+    places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance},
     signs::{OmenKind, SignState},
-    world::{BiomeKind, TerrainTile, WandererPrototype, WorldGridCoord, WorldMap},
+    world::{BiomeKind, WandererPrototype, WorldCamera, WorldGridCoord},
 };
+
+pub type JourneyPlaceKind = PlaceKind;
 
 pub struct JourneyPlugin;
 
@@ -27,11 +30,14 @@ impl Plugin for JourneyPlugin {
 pub struct JourneyState {
     pub stage: JourneyStage,
     pub target: Option<JourneyTarget>,
+    pub interaction: JourneyInteractionState,
+    pub response: JourneyResponseState,
     pub triggered_omens: Vec<JourneyOmenMemory>,
     pub memories: Vec<JourneyMemory>,
     pub session_elapsed: f32,
     pub stage_elapsed: f32,
     pub last_distance_to_target: Option<f32>,
+    pub last_player_position: Option<Vec3>,
 }
 
 impl Default for JourneyState {
@@ -39,11 +45,14 @@ impl Default for JourneyState {
         Self {
             stage: JourneyStage::FirstArrival,
             target: None,
+            interaction: JourneyInteractionState::default(),
+            response: JourneyResponseState::default(),
             triggered_omens: Vec::new(),
             memories: Vec::new(),
             session_elapsed: 0.0,
             stage_elapsed: 0.0,
             last_distance_to_target: None,
+            last_player_position: None,
         }
     }
 }
@@ -71,27 +80,6 @@ impl JourneyStage {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub enum JourneyPlaceKind {
-    AncientTree,
-    SpringEye,
-    RidgeGate,
-    QuietBay,
-    StoneRing,
-}
-
-impl JourneyPlaceKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::AncientTree => "古树",
-            Self::SpringEye => "泉眼",
-            Self::RidgeGate => "山脊门",
-            Self::QuietBay => "静水湾",
-            Self::StoneRing => "石阵",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JourneyTarget {
     pub id: u64,
@@ -99,6 +87,22 @@ pub struct JourneyTarget {
     pub position: Vec3,
     pub kind: JourneyPlaceKind,
     pub biome: BiomeKind,
+    pub arrival_radius: f32,
+    pub interaction_radius: f32,
+}
+
+impl JourneyTarget {
+    fn from_place(place: &MeaningfulPlace) -> Self {
+        Self {
+            id: place.id,
+            grid: place.grid,
+            position: place.position,
+            kind: place.kind,
+            biome: place.biome,
+            arrival_radius: place.arrival_radius,
+            interaction_radius: place.interaction_radius,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,6 +120,7 @@ pub struct JourneyMemory {
     pub position: Vec3,
     pub place_kind: Option<JourneyPlaceKind>,
     pub omen: Option<OmenKind>,
+    pub interaction: Option<JourneyInteractionKind>,
     pub text: String,
 }
 
@@ -126,11 +131,78 @@ pub enum JourneyMemoryKind {
     Echo,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum JourneyInteractionKind {
+    Stay,
+    Gaze,
+    Listen,
+}
+
+impl JourneyInteractionKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stay => "停留",
+            Self::Gaze => "注视",
+            Self::Listen => "聆听",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JourneyInteractionState {
+    pub near_target: bool,
+    pub stay_seconds: f32,
+    pub gaze_seconds: f32,
+    pub listen_seconds: f32,
+    pub completed: bool,
+    pub completed_kind: Option<JourneyInteractionKind>,
+}
+
+impl Default for JourneyInteractionState {
+    fn default() -> Self {
+        Self {
+            near_target: false,
+            stay_seconds: 0.0,
+            gaze_seconds: 0.0,
+            listen_seconds: 0.0,
+            completed: false,
+            completed_kind: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JourneyResponseState {
+    pub active: bool,
+    pub elapsed_seconds: f32,
+    pub duration_seconds: f32,
+    pub intensity: f32,
+    pub place_id: Option<u64>,
+    pub place_kind: Option<JourneyPlaceKind>,
+}
+
+impl Default for JourneyResponseState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            elapsed_seconds: 0.0,
+            duration_seconds: RESPONSE_DURATION_SECONDS,
+            intensity: 0.0,
+            place_id: None,
+            place_kind: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum JourneyEvent {
     StageChanged {
         from: JourneyStage,
         to: JourneyStage,
+        at_seconds: f32,
+    },
+    InteractionCompleted {
+        kind: JourneyInteractionKind,
         at_seconds: f32,
     },
     OmenRecorded(JourneyOmenMemory),
@@ -142,18 +214,24 @@ pub struct JourneyAdvanceContext {
     pub delta_seconds: f32,
     pub player_position: Vec3,
     pub distance_to_target: Option<f32>,
+    pub target_arrival_radius: Option<f32>,
+    pub target_interaction_radius: Option<f32>,
+    pub look_alignment_to_target: Option<f32>,
+    pub calm: f32,
     pub omen_triggered: bool,
     pub current_omen: Option<OmenKind>,
 }
 
-const TARGET_SEARCH_RADIUS_TILES: i32 = 52;
-const TARGET_SEARCH_STEP_TILES: usize = 2;
-const MIN_TARGET_DISTANCE: f32 = 42.0;
-const MAX_TARGET_DISTANCE: f32 = 180.0;
-const IDEAL_TARGET_DISTANCE: f32 = 96.0;
-const ARRIVAL_RADIUS: f32 = 13.5;
+const DEFAULT_ARRIVAL_RADIUS: f32 = 13.5;
+const DEFAULT_INTERACTION_RADIUS: f32 = 7.5;
 const OMEN_FALLBACK_SECONDS: f32 = 4.0;
-const RESPONSE_DELAY_SECONDS: f32 = 1.35;
+const STILL_SPEED_THRESHOLD: f32 = 0.42;
+const STAY_INTERACTION_SECONDS: f32 = 1.25;
+const GAZE_INTERACTION_SECONDS: f32 = 0.85;
+const LISTEN_INTERACTION_SECONDS: f32 = 1.1;
+const GAZE_ALIGNMENT_THRESHOLD: f32 = 0.82;
+const LISTEN_CALM_THRESHOLD: f32 = 0.72;
+const RESPONSE_DURATION_SECONDS: f32 = 7.5;
 const ECHO_DELAY_SECONDS: f32 = 2.1;
 const MAX_OMEN_MEMORIES: usize = 12;
 const MAX_JOURNEY_MEMORIES: usize = 16;
@@ -172,7 +250,7 @@ fn cleanup_journey_session(mut commands: Commands) {
 
 fn select_journey_target(
     journey: Option<ResMut<JourneyState>>,
-    world_map: Option<Res<WorldMap>>,
+    places: Option<Res<MeaningfulPlaces>>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
 ) {
     let Some(mut journey) = journey else {
@@ -182,7 +260,7 @@ fn select_journey_target(
         return;
     }
 
-    let Some(world_map) = world_map else {
+    let Some(places) = places else {
         return;
     };
     let Some(transform) = wanderer_query.iter().next() else {
@@ -190,7 +268,7 @@ fn select_journey_target(
     };
 
     let started_at = Instant::now();
-    match select_journey_target_from_world(&world_map, transform.translation) {
+    match choose_primary_place(&places, transform.translation).map(JourneyTarget::from_place) {
         Some(target) => {
             let distance = planar_distance(transform.translation, target.position);
             journey.target = Some(target);
@@ -224,6 +302,7 @@ fn advance_journey_session(
     signs: Option<Res<SignState>>,
     journey: Option<ResMut<JourneyState>>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
+    camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 ) {
     let Some(mut journey) = journey else {
         return;
@@ -235,6 +314,14 @@ fn advance_journey_session(
     let distance_to_target = journey
         .target
         .map(|target| planar_distance(transform.translation, target.position));
+    let target_arrival_radius = journey.target.map(|target| target.arrival_radius);
+    let target_interaction_radius = journey.target.map(|target| target.interaction_radius);
+    let look_alignment_to_target = journey
+        .target
+        .map(|target| match camera_query.iter().next() {
+            Some(camera_transform) => look_alignment(camera_transform, target.position),
+            None => look_alignment(transform, target.position),
+        });
     let sign_state = signs.as_deref();
     let events = advance_journey_state(
         &mut journey,
@@ -242,6 +329,10 @@ fn advance_journey_session(
             delta_seconds: time.delta_secs(),
             player_position: transform.translation,
             distance_to_target,
+            target_arrival_radius,
+            target_interaction_radius,
+            look_alignment_to_target,
+            calm: sign_state.map_or(1.0, |signs| signs.calm),
             omen_triggered: sign_state.is_some_and(|signs| signs.omen_triggered),
             current_omen: sign_state.and_then(|signs| signs.current_omen),
         },
@@ -260,6 +351,12 @@ pub fn advance_journey_state(
     let delta_seconds = context.delta_seconds.max(0.0);
     state.session_elapsed += delta_seconds;
     state.stage_elapsed += delta_seconds;
+    let player_speed = state
+        .last_player_position
+        .map(|last| planar_distance(last, context.player_position) / delta_seconds.max(0.001))
+        .unwrap_or(0.0);
+    state.last_player_position = Some(context.player_position);
+    advance_response_state(&mut state.response, delta_seconds);
 
     if let Some(distance) = context.distance_to_target {
         state.last_distance_to_target = Some(distance);
@@ -292,17 +389,27 @@ pub fn advance_journey_state(
             }
         }
         JourneyStage::BeingDrawn => {
+            let arrival_radius = context
+                .target_arrival_radius
+                .unwrap_or(DEFAULT_ARRIVAL_RADIUS);
             if context
                 .distance_to_target
-                .is_some_and(|distance| distance <= ARRIVAL_RADIUS)
+                .is_some_and(|distance| distance <= arrival_radius)
             {
                 transition_stage(state, JourneyStage::PlaceReached, &mut events);
                 record_journey_memory(state, JourneyMemoryKind::Arrival, context, &mut events);
             }
         }
         JourneyStage::PlaceReached => {
-            if state.stage_elapsed >= RESPONSE_DELAY_SECONDS {
+            if let Some(interaction) =
+                advance_interaction_state(&mut state.interaction, context, player_speed)
+            {
+                events.push(JourneyEvent::InteractionCompleted {
+                    kind: interaction,
+                    at_seconds: state.session_elapsed,
+                });
                 transition_stage(state, JourneyStage::WorldResponded, &mut events);
+                start_response_state(&mut state.response, state.target);
                 record_journey_memory(state, JourneyMemoryKind::Response, context, &mut events);
             }
         }
@@ -345,10 +452,111 @@ fn record_journey_memory(
         position: context.player_position,
         place_kind: state.target.map(|target| target.kind),
         omen: context.current_omen,
-        text: memory_text(kind, state.target.map(|target| target.kind)),
+        interaction: state.interaction.completed_kind,
+        text: memory_text(
+            kind,
+            state.target.map(|target| target.kind),
+            state.interaction.completed_kind,
+        ),
     };
     push_bounded(&mut state.memories, memory.clone(), MAX_JOURNEY_MEMORIES);
     events.push(JourneyEvent::MemoryRecorded(memory));
+}
+
+fn advance_interaction_state(
+    interaction: &mut JourneyInteractionState,
+    context: JourneyAdvanceContext,
+    player_speed: f32,
+) -> Option<JourneyInteractionKind> {
+    let interaction_radius = context
+        .target_interaction_radius
+        .unwrap_or(DEFAULT_INTERACTION_RADIUS);
+    let near_target = context
+        .distance_to_target
+        .is_some_and(|distance| distance <= interaction_radius);
+    interaction.near_target = near_target;
+
+    if !near_target {
+        if !interaction.completed {
+            interaction.stay_seconds = 0.0;
+            interaction.gaze_seconds = 0.0;
+            interaction.listen_seconds = 0.0;
+        }
+        return None;
+    }
+    if interaction.completed {
+        return None;
+    }
+
+    let delta_seconds = context.delta_seconds.max(0.0);
+    let is_still = player_speed <= STILL_SPEED_THRESHOLD;
+    if is_still {
+        interaction.stay_seconds += delta_seconds;
+    } else {
+        interaction.stay_seconds = 0.0;
+    }
+
+    if context
+        .look_alignment_to_target
+        .is_some_and(|alignment| alignment >= GAZE_ALIGNMENT_THRESHOLD)
+    {
+        interaction.gaze_seconds += delta_seconds;
+    } else {
+        interaction.gaze_seconds = 0.0;
+    }
+
+    if is_still && context.calm >= LISTEN_CALM_THRESHOLD {
+        interaction.listen_seconds += delta_seconds;
+    } else {
+        interaction.listen_seconds = 0.0;
+    }
+
+    let completed = if interaction.gaze_seconds >= GAZE_INTERACTION_SECONDS {
+        Some(JourneyInteractionKind::Gaze)
+    } else if interaction.listen_seconds >= LISTEN_INTERACTION_SECONDS {
+        Some(JourneyInteractionKind::Listen)
+    } else if interaction.stay_seconds >= STAY_INTERACTION_SECONDS {
+        Some(JourneyInteractionKind::Stay)
+    } else {
+        None
+    };
+
+    if let Some(kind) = completed {
+        interaction.completed = true;
+        interaction.completed_kind = Some(kind);
+        return Some(kind);
+    }
+    None
+}
+
+fn start_response_state(response: &mut JourneyResponseState, target: Option<JourneyTarget>) {
+    response.active = true;
+    response.elapsed_seconds = 0.0;
+    response.duration_seconds = RESPONSE_DURATION_SECONDS;
+    response.intensity = 1.0;
+    response.place_id = target.map(|target| target.id);
+    response.place_kind = target.map(|target| target.kind);
+}
+
+fn advance_response_state(response: &mut JourneyResponseState, delta_seconds: f32) {
+    if !response.active {
+        return;
+    }
+    response.elapsed_seconds += delta_seconds;
+    response.intensity =
+        response_intensity(response.elapsed_seconds, response.duration_seconds).clamp(0.0, 1.0);
+    if response.elapsed_seconds >= response.duration_seconds {
+        response.active = false;
+        response.intensity = 0.0;
+    }
+}
+
+fn response_intensity(elapsed_seconds: f32, duration_seconds: f32) -> f32 {
+    let duration = duration_seconds.max(0.001);
+    let fade_in = smoothstep_unit((elapsed_seconds / 1.2).clamp(0.0, 1.0));
+    let fade_out =
+        1.0 - smoothstep_unit(((elapsed_seconds - (duration - 1.6)) / 1.6).clamp(0.0, 1.0));
+    fade_in.min(fade_out).max(0.0)
 }
 
 fn should_record_omen(state: &JourneyState, omen: OmenKind) -> bool {
@@ -358,15 +566,29 @@ fn should_record_omen(state: &JourneyState, omen: OmenKind) -> bool {
         .is_none_or(|memory| memory.omen != omen)
 }
 
-fn memory_text(kind: JourneyMemoryKind, place_kind: Option<JourneyPlaceKind>) -> String {
+fn memory_text(
+    kind: JourneyMemoryKind,
+    place_kind: Option<JourneyPlaceKind>,
+    interaction: Option<JourneyInteractionKind>,
+) -> String {
     let place = place_kind
         .map(JourneyPlaceKind::label)
         .unwrap_or("未名之地");
     match kind {
         JourneyMemoryKind::Arrival => format!("你抵达了{place}。"),
-        JourneyMemoryKind::Response => format!("{place}回应了你的停留。"),
+        JourneyMemoryKind::Response => match interaction {
+            Some(interaction) => format!("{place}因你的{}回应。", interaction.label()),
+            None => format!("{place}回应了你的停留。"),
+        },
         JourneyMemoryKind::Echo => format!("{place}的回响沉入记忆。"),
     }
+}
+
+pub fn format_journey_memory_line(memory: &JourneyMemory) -> String {
+    let total_seconds = memory.at_seconds.max(0.0).floor() as u32;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02} {}", memory.text)
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, max_len: usize) {
@@ -402,6 +624,14 @@ fn log_journey_event(event: &JourneyEvent) {
                 "journey omen recorded"
             );
         }
+        JourneyEvent::InteractionCompleted { kind, at_seconds } => {
+            tracing::info!(
+                target: "dao_game::journey::interaction",
+                interaction = kind.label(),
+                at_seconds,
+                "journey light interaction completed"
+            );
+        }
         JourneyEvent::MemoryRecorded(memory) => {
             tracing::info!(
                 target: "dao_game::journey::memory",
@@ -415,103 +645,24 @@ fn log_journey_event(event: &JourneyEvent) {
     }
 }
 
-fn select_journey_target_from_world(world_map: &WorldMap, origin: Vec3) -> Option<JourneyTarget> {
-    let origin_x = (origin.x / world_map.cell_size()).round() as i32;
-    let origin_z = (origin.z / world_map.cell_size()).round() as i32;
-    let search_radius = TARGET_SEARCH_RADIUS_TILES.min(world_map.radius()).max(1);
-    let mut best: Option<(f32, JourneyTarget)> = None;
-
-    for z in (origin_z - search_radius..=origin_z + search_radius).step_by(TARGET_SEARCH_STEP_TILES)
-    {
-        for x in
-            (origin_x - search_radius..=origin_x + search_radius).step_by(TARGET_SEARCH_STEP_TILES)
-        {
-            let Some(tile) = world_map.tile_at_grid(x, z) else {
-                continue;
-            };
-            let position =
-                world_map.tile_translation(x, z, tile.height().max(world_map.water_level()) + 0.1);
-            let distance = planar_distance(origin, position);
-            if !(MIN_TARGET_DISTANCE..=MAX_TARGET_DISTANCE).contains(&distance) {
-                continue;
-            }
-
-            let kind = place_kind_for_tile(tile);
-            let score = score_journey_target(tile, kind, distance, x, z);
-            let candidate = JourneyTarget {
-                id: journey_target_id(x, z, kind),
-                grid: WorldGridCoord { x, z },
-                position,
-                kind,
-                biome: tile.biome(),
-            };
-
-            if best
-                .as_ref()
-                .is_none_or(|(best_score, _)| score > *best_score)
-            {
-                best = Some((score, candidate));
-            }
-        }
+fn look_alignment(transform: &Transform, target_position: Vec3) -> f32 {
+    let to_target = Vec3::new(
+        target_position.x - transform.translation.x,
+        0.0,
+        target_position.z - transform.translation.z,
+    )
+    .normalize_or_zero();
+    if to_target == Vec3::ZERO {
+        return 1.0;
     }
-
-    best.map(|(_, target)| target)
+    let forward = transform.forward();
+    let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    forward.dot(to_target).clamp(-1.0, 1.0)
 }
 
-fn score_journey_target(
-    tile: TerrainTile,
-    kind: JourneyPlaceKind,
-    distance: f32,
-    x: i32,
-    z: i32,
-) -> f32 {
-    let distance_score = 1.0 - ((distance - IDEAL_TARGET_DISTANCE).abs() / IDEAL_TARGET_DISTANCE);
-    let terrain_score = match kind {
-        JourneyPlaceKind::AncientTree => tile.moisture() * 0.55 + (1.0 - tile.slope()) * 0.25,
-        JourneyPlaceKind::SpringEye => tile.river() * 0.48 + tile.moisture() * 0.32,
-        JourneyPlaceKind::RidgeGate => tile.height() * 0.08 + tile.slope() * 0.5,
-        JourneyPlaceKind::QuietBay => {
-            (1.0 - tile.slope()).clamp(0.0, 1.0) * 0.35 + tile.moisture() * 0.25
-        }
-        JourneyPlaceKind::StoneRing => {
-            (1.0 - tile.moisture()).clamp(0.0, 1.0) * 0.34 + tile.erosion() * 0.2
-        }
-    };
-    distance_score.clamp(0.0, 1.0) * 0.54 + terrain_score + hash_unit(x, z, kind as u64) * 0.015
-}
-
-fn place_kind_for_tile(tile: TerrainTile) -> JourneyPlaceKind {
-    match tile.biome() {
-        BiomeKind::Grove => JourneyPlaceKind::AncientTree,
-        BiomeKind::Ridge => JourneyPlaceKind::RidgeGate,
-        BiomeKind::Water if tile.river() > 0.46 => JourneyPlaceKind::SpringEye,
-        BiomeKind::Water => JourneyPlaceKind::QuietBay,
-        BiomeKind::Meadow if tile.moisture() > 0.68 || tile.river() > 0.42 => {
-            JourneyPlaceKind::SpringEye
-        }
-        BiomeKind::Meadow | BiomeKind::Steppe => JourneyPlaceKind::StoneRing,
-    }
-}
-
-fn journey_target_id(x: i32, z: i32, kind: JourneyPlaceKind) -> u64 {
-    let mut value = (x as i64 as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add((z as i64 as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9))
-        .wrapping_add((kind as u64).wrapping_mul(0x94D0_49BB_1331_11EB));
-    value ^= value >> 30;
-    value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value ^= value >> 27;
-    value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^ (value >> 31)
-}
-
-fn hash_unit(x: i32, z: i32, salt: u64) -> f32 {
-    let value = journey_target_id(x, z, JourneyPlaceKind::StoneRing).wrapping_add(salt);
-    (value as f64 / u64::MAX as f64) as f32
-}
-
-fn planar_distance(a: Vec3, b: Vec3) -> f32 {
-    Vec2::new(a.x - b.x, a.z - b.z).length()
+fn smoothstep_unit(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]
@@ -524,8 +675,9 @@ mod tests {
     use crate::game::{
         flow::{AppScreen, InGameState},
         journey::{
-            JourneyAdvanceContext, JourneyEvent, JourneyMemoryKind, JourneyPlaceKind,
-            JourneyPlugin, JourneyStage, JourneyState, JourneyTarget, advance_journey_state,
+            JourneyAdvanceContext, JourneyEvent, JourneyInteractionKind, JourneyMemoryKind,
+            JourneyPlaceKind, JourneyPlugin, JourneyStage, JourneyState, JourneyTarget,
+            advance_journey_state, format_journey_memory_line,
         },
         signs::OmenKind,
         world::{BiomeKind, WorldGridCoord},
@@ -538,6 +690,8 @@ mod tests {
             position: Vec3::new(64.0, 2.0, -32.0),
             kind: JourneyPlaceKind::AncientTree,
             biome: BiomeKind::Grove,
+            arrival_radius: 13.5,
+            interaction_radius: 7.5,
         }
     }
 
@@ -550,6 +704,10 @@ mod tests {
             delta_seconds,
             player_position: Vec3::new(0.0, 2.0, 0.0),
             distance_to_target,
+            target_arrival_radius: Some(13.5),
+            target_interaction_radius: Some(7.5),
+            look_alignment_to_target: Some(0.9),
+            calm: 0.8,
             omen_triggered,
             current_omen: omen_triggered.then_some(OmenKind::GroveWhisper),
         }
@@ -634,7 +792,7 @@ mod tests {
             ));
             all_events.extend(advance_journey_state(
                 &mut state,
-                context(1.4, Some(6.0), true),
+                context(0.9, Some(6.0), true),
             ));
             all_events.extend(advance_journey_state(
                 &mut state,
@@ -657,6 +815,83 @@ mod tests {
                 JourneyMemoryKind::Response,
                 JourneyMemoryKind::Echo
             ]
+        );
+    }
+
+    #[test]
+    fn place_reached_waits_for_light_interaction_before_response() {
+        let mut state = JourneyState {
+            target: Some(sample_target()),
+            ..Default::default()
+        };
+        advance_journey_state(&mut state, context(0.25, Some(84.0), false));
+        advance_journey_state(&mut state, context(0.2, Some(68.0), true));
+        advance_journey_state(&mut state, context(0.4, Some(8.0), true));
+
+        let before_interaction = advance_journey_state(&mut state, context(0.3, Some(6.0), true));
+
+        assert_eq!(state.stage, JourneyStage::PlaceReached);
+        assert!(!state.interaction.completed);
+        assert!(!state.response.active);
+        assert!(before_interaction.iter().all(|event| {
+            !matches!(
+                event,
+                JourneyEvent::StageChanged {
+                    to: JourneyStage::WorldResponded,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn gaze_interaction_triggers_world_response_memory() {
+        let mut state = JourneyState {
+            target: Some(sample_target()),
+            ..Default::default()
+        };
+        advance_journey_state(&mut state, context(0.25, Some(84.0), false));
+        advance_journey_state(&mut state, context(0.2, Some(68.0), true));
+        advance_journey_state(&mut state, context(0.4, Some(8.0), true));
+
+        let events = advance_journey_state(&mut state, context(0.9, Some(6.0), true));
+
+        assert_eq!(state.stage, JourneyStage::WorldResponded);
+        assert!(state.response.active);
+        assert_eq!(
+            state.interaction.completed_kind,
+            Some(JourneyInteractionKind::Gaze)
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                JourneyEvent::InteractionCompleted {
+                    kind: JourneyInteractionKind::Gaze,
+                    ..
+                }
+            )
+        }));
+        assert!(state.memories.iter().any(
+            |memory| memory.kind == JourneyMemoryKind::Response && memory.text.contains("注视")
+        ));
+    }
+
+    #[test]
+    fn journey_memory_line_formats_elapsed_time_without_task_language() {
+        let memory = super::JourneyMemory {
+            kind: JourneyMemoryKind::Response,
+            stage: JourneyStage::WorldResponded,
+            at_seconds: 75.4,
+            position: Vec3::ZERO,
+            place_kind: Some(JourneyPlaceKind::StoneRing),
+            omen: Some(OmenKind::DawnLight),
+            interaction: Some(JourneyInteractionKind::Stay),
+            text: "石阵因你的停留回应。".to_string(),
+        };
+
+        assert_eq!(
+            format_journey_memory_line(&memory),
+            "01:15 石阵因你的停留回应。"
         );
     }
 

@@ -11,6 +11,7 @@ use bevy::{
 use crate::core::performance::{FramePerformance, PerformancePhase};
 use crate::game::{
     flow::{AppScreen, InGameState},
+    journey::JourneyState,
     world::{SunLight, WorldCamera, WorldCycle, WorldPresentationControl},
 };
 
@@ -424,6 +425,7 @@ fn update_atmosphere_and_fog(
         Res<WeatherState>,
         Res<WeatherTransition>,
     ),
+    journey: Option<Res<JourneyState>>,
     mut clear_color: ResMut<ClearColor>,
     mut ambient_light: ResMut<GlobalAmbientLight>,
     mut fog_query: Query<&mut DistanceFog, With<WorldCamera>>,
@@ -437,13 +439,17 @@ fn update_atmosphere_and_fog(
     let profile = environment.profile;
     let frame = environment.celestial;
     let flash = environment.flash;
+    let response = journey
+        .as_deref()
+        .map(|journey| journey.response.intensity)
+        .unwrap_or(0.0);
 
     let sky_mix = cycle.daylight.powf(0.62);
     let mut sky_rgb = profile.sky_night.lerp(profile.sky_day, sky_mix);
     let horizon_boost =
         frame.horizon_factor * frame.sun_visibility * (1.0 - profile.cloud_cover * 0.42);
     sky_rgb = sky_rgb.lerp(profile.horizon_glow, horizon_boost * 0.6);
-    sky_rgb += Vec3::splat(flash * 0.28);
+    sky_rgb += Vec3::splat(flash * 0.28 + response * 0.08);
     let sky_rgb = sky_rgb.clamp(Vec3::ZERO, Vec3::ONE);
     clear_color.0 = srgb_color(sky_rgb);
 
@@ -454,12 +460,14 @@ fn update_atmosphere_and_fog(
     );
     ambient_light.brightness = profile.ambient_brightness
         * (0.16 + cycle.daylight * 0.84 + frame.moon_visibility * 0.12)
-        + flash * 190.0;
+        + flash * 190.0
+        + response * 120.0;
 
     let fog_rgb = profile
         .fog_night
         .lerp(profile.fog_day, cycle.daylight.powf(0.72))
-        + Vec3::splat(flash * 0.18);
+        + Vec3::splat(flash * 0.18)
+        + Vec3::new(0.08, 0.06, 0.03) * response;
     let fog_rgb = fog_rgb.clamp(Vec3::ZERO, Vec3::ONE);
     let inscatter_rgb = profile
         .inscatter_night
@@ -479,7 +487,7 @@ fn update_atmosphere_and_fog(
     );
     fog.directional_light_exponent = 18.0 + profile.cloud_cover * 12.0;
     fog.falloff = FogFalloff::from_visibility_colors(
-        profile.visibility,
+        (profile.visibility - response * 18.0).max(42.0),
         srgb_color(fog_rgb),
         srgb_color(inscatter_rgb),
     );
@@ -493,6 +501,7 @@ fn update_celestial_visuals(
         Res<WeatherState>,
         Res<WeatherTransition>,
     ),
+    journey: Option<Res<JourneyState>>,
     environment_assets: Option<Res<EnvironmentAssets>>,
     camera_query: Query<
         &Transform,
@@ -589,6 +598,10 @@ fn update_celestial_visuals(
     let dominant_kind = environment.dominant_kind;
     let frame = environment.celestial;
     let flash = environment.flash;
+    let response = journey
+        .as_deref()
+        .map(|journey| journey.response.intensity)
+        .unwrap_or(0.0);
 
     if let Some((mut light, mut transform)) = transform_queries.p0().iter_mut().next() {
         transform.look_at(-frame.sun_position, Vec3::Y);
@@ -599,7 +612,8 @@ fn update_celestial_visuals(
             * frame.sun_visibility
             * profile.sun_scale
             * (1.0 - profile.cloud_cover * 0.46)
-            + flash * 21_000.0;
+            + flash * 21_000.0
+            + response * 14_000.0;
     }
     if let Some((mut light, mut transform)) = transform_queries.p1().iter_mut().next() {
         transform.look_at(-frame.moon_position, Vec3::Y);
@@ -651,7 +665,8 @@ fn update_celestial_visuals(
         let sun_emission = 9.0 + frame.sun_visibility * 22.0;
         material.base_color = Color::srgb(1.0, 0.84, 0.6);
         material.emissive =
-            LinearRgba::rgb(1.0 * sun_emission, 0.82 * sun_emission, 0.48 * sun_emission);
+            LinearRgba::rgb(1.0 * sun_emission, 0.82 * sun_emission, 0.48 * sun_emission)
+                + LinearRgba::rgb(response * 2.6, response * 1.8, response * 0.7);
     }
     if let Some(material) = materials.get_mut(&environment_assets.moon_material) {
         let moon_emission = 0.35 + frame.moon_visibility * profile.moon_scale * 2.2;

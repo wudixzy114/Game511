@@ -735,6 +735,11 @@ impl WorldMap {
         }
     }
 
+    #[cfg(test)]
+    pub fn new_for_testing(seed: u64, config: &AppConfig) -> Self {
+        Self::new(seed, config)
+    }
+
     pub fn radius(&self) -> i32 {
         self.radius
     }

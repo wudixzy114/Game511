@@ -7,7 +7,9 @@ use std::{fs, path::PathBuf};
 use crate::core::performance::{FramePerformance, PerformancePhase};
 use crate::game::{
     flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
-    signs::{OmenKind, SignState},
+    journey::{JourneyStage, JourneyState, format_journey_memory_line},
+    places::PlaceKind,
+    signs::{OmenGuidancePhase, OmenKind, SignState},
     world::{BiomeKind, WandererPrototype, WorldCycle, WorldMap},
 };
 
@@ -69,6 +71,9 @@ struct HudOmenText;
 struct HudOmenContainer;
 
 #[derive(Component)]
+struct HudJourneyText;
+
+#[derive(Component)]
 struct Crosshair;
 
 #[derive(Resource)]
@@ -104,6 +109,7 @@ type HudResources<'w> = (
     Option<Res<'w, WorldCycle>>,
     Option<Res<'w, SignState>>,
     Option<Res<'w, WorldMap>>,
+    Option<Res<'w, JourneyState>>,
 );
 
 const TEXT_PRIMARY: Color = Color::srgb(0.92, 0.9, 0.85);
@@ -373,7 +379,7 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                 BorderColor::all(Color::srgba(0.32, 0.35, 0.28, 0.85)),
                 children![
                     (
-                        Text::new(format!("{}模式", session_mode.label())),
+                        Text::new(format!("开发 HUD / {}模式", session_mode.label())),
                         ui_text_font(&font, 21.0),
                         TextColor(TEXT_ACCENT),
                     ),
@@ -404,6 +410,27 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                     ui_text_font(&font, 16.0),
                     TextColor(TEXT_MUTED),
                     HudControlText,
+                )],
+            ));
+
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(24),
+                    bottom: px(28),
+                    padding: UiRect::axes(px(16), px(12)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(8)),
+                    width: px(420),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.58)),
+                BorderColor::all(Color::srgba(0.35, 0.32, 0.24, 0.78)),
+                children![(
+                    Text::new("初入世界"),
+                    ui_text_font(&font, 17.0),
+                    TextColor(TEXT_PRIMARY),
+                    HudJourneyText,
                 )],
             ));
 
@@ -457,6 +484,7 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
 fn spawn_pause_menu(
     mut commands: Commands,
     session_mode: Res<SessionMode>,
+    journey: Option<Res<JourneyState>>,
     ui_font: Res<UiFontHandle>,
 ) {
     let font = ui_font.0.clone();
@@ -504,6 +532,31 @@ fn spawn_pause_menu(
                             ..Default::default()
                         },
                     ));
+                    parent
+                        .spawn((
+                            Node {
+                                padding: UiRect::all(px(14)),
+                                border: UiRect::all(px(1)),
+                                border_radius: BorderRadius::all(px(8)),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(8),
+                                ..Default::default()
+                            },
+                            BackgroundColor(Color::srgba(0.11, 0.12, 0.1, 0.78)),
+                            BorderColor::all(Color::srgba(0.38, 0.33, 0.25, 0.8)),
+                        ))
+                        .with_children(|parent| {
+                            parent.spawn((
+                                Text::new("回响"),
+                                ui_text_font(&font, 20.0),
+                                TextColor(TEXT_ACCENT),
+                            ));
+                            parent.spawn((
+                                Text::new(pause_echo_text(journey.as_deref())),
+                                ui_text_font(&font, 15.0),
+                                TextColor(TEXT_MUTED),
+                            ));
+                        });
                     spawn_action_button(
                         parent,
                         &font,
@@ -690,7 +743,7 @@ fn update_hud_stats_text(
     mut stats_query: Query<&mut Text, With<HudStatsText>>,
 ) {
     let started_at = std::time::Instant::now();
-    let (_, cycle, signs, world_map) = resources;
+    let (_, cycle, signs, world_map, journey) = resources;
 
     let status_line = if let (Some(cycle), Some(world_map), Some(transform)) = (
         cycle.as_deref(),
@@ -716,26 +769,42 @@ fn update_hud_stats_text(
         .as_deref()
         .map(|signs| {
             format!(
-                "共鸣：{:.0}%  平静：{:.0}%  征兆：{}",
+                "共鸣：{:.0}%  平静：{:.0}%  征兆：{}  强度：{:.0}%",
                 signs.resonance * 100.0,
                 signs.calm * 100.0,
                 omen_label(signs.current_omen),
+                signs.omen_intensity * 100.0,
             )
         })
         .unwrap_or_else(|| "共鸣：--  平静：--  征兆：未感知".to_string());
+    let journey_line = journey
+        .as_deref()
+        .map(|journey| {
+            format!(
+                "旅程：{}  距离：{}",
+                journey.stage.label(),
+                journey
+                    .last_distance_to_target
+                    .map(|distance| format!("{distance:.0}m"))
+                    .unwrap_or_else(|| "--".to_string())
+            )
+        })
+        .unwrap_or_else(|| "旅程：未开始  距离：--".to_string());
 
     let Some(mut stats_text) = stats_query.iter_mut().next() else {
         return;
     };
-    stats_text.0 = format!("{status_line}\n{resonance_line}");
+    stats_text.0 = format!("{status_line}\n{resonance_line}\n{journey_line}");
     performance.record_phase_duration(PerformancePhase::Ui, started_at.elapsed());
 }
 
 fn update_hud_omen_text(
     mut performance: ResMut<FramePerformance>,
     signs: Option<Res<SignState>>,
+    journey: Option<Res<JourneyState>>,
     mut omen_text_query: Query<&mut Text, With<HudOmenText>>,
     mut omen_container_query: Query<&mut Visibility, With<HudOmenContainer>>,
+    mut journey_text_query: Query<&mut Text, (With<HudJourneyText>, Without<HudOmenText>)>,
 ) {
     let started_at = std::time::Instant::now();
     let Some(mut visibility) = omen_container_query.iter_mut().next() else {
@@ -744,8 +813,16 @@ fn update_hud_omen_text(
     let Some(mut omen_text) = omen_text_query.iter_mut().next() else {
         return;
     };
-    if let Some(signs) = signs.as_deref().filter(|signs| signs.omen_triggered) {
-        omen_text.0 = format!("征兆显现：{}", omen_label(signs.current_omen));
+    if let Some(mut journey_text) = journey_text_query.iter_mut().next()
+        && let Some(journey) = journey.as_deref()
+    {
+        journey_text.0 = formal_journey_hint(journey, signs.as_deref());
+    }
+    if let Some(signs) = signs
+        .as_deref()
+        .filter(|signs| signs.omen_intensity > 0.05 || signs.response_intensity > 0.02)
+    {
+        omen_text.0 = formal_omen_hint(signs);
         *visibility = Visibility::Visible;
     } else {
         omen_text.0.clear();
@@ -827,6 +904,85 @@ fn omen_label(omen: Option<OmenKind>) -> &'static str {
         Some(OmenKind::StillWater) => "止水",
         None => "未感知",
     }
+}
+
+fn place_label(place: Option<PlaceKind>) -> &'static str {
+    place.map(PlaceKind::label).unwrap_or("未名之地")
+}
+
+fn guidance_phase_label(phase: OmenGuidancePhase) -> &'static str {
+    match phase {
+        OmenGuidancePhase::Dormant => "风声尚远",
+        OmenGuidancePhase::Far => "远处有微光",
+        OmenGuidancePhase::DrawingNear => "征兆渐近",
+        OmenGuidancePhase::Arrived => "此地正安静等待",
+        OmenGuidancePhase::Responding => "世界正在回应",
+    }
+}
+
+fn formal_omen_hint(signs: &SignState) -> String {
+    let place = place_label(signs.target_place_kind);
+    let distance = signs
+        .target_distance
+        .map(|distance| format!(" {distance:.0}m"))
+        .unwrap_or_default();
+    format!(
+        "{}：{}{}",
+        omen_label(signs.current_omen),
+        guidance_phase_label(signs.guidance_phase),
+        if signs.guidance_phase == OmenGuidancePhase::Responding {
+            format!("，{place}有了回声")
+        } else if distance.is_empty() {
+            String::new()
+        } else {
+            format!("，{place}{distance}")
+        }
+    )
+}
+
+fn formal_journey_hint(journey: &JourneyState, signs: Option<&SignState>) -> String {
+    if matches!(
+        journey.stage,
+        JourneyStage::WorldResponded | JourneyStage::EchoSettled
+    ) && let Some(memory) = journey.memories.last()
+    {
+        return memory.text.clone();
+    }
+    if journey.interaction.near_target {
+        return match journey.interaction.completed_kind {
+            Some(kind) => format!("你已{}，此地开始回应。", kind.label()),
+            None => "近处安静下来。".to_string(),
+        };
+    }
+    signs
+        .and_then(|signs| signs.target_place_kind)
+        .map(|kind| format!("{}在远处留下气息。", kind.label()))
+        .unwrap_or_else(|| journey.stage.label().to_string())
+}
+
+fn pause_echo_text(journey: Option<&JourneyState>) -> String {
+    let Some(journey) = journey else {
+        return "还没有留下回响。".to_string();
+    };
+    if journey.memories.is_empty() && journey.triggered_omens.is_empty() {
+        return "还没有留下回响。".to_string();
+    }
+
+    let mut lines: Vec<String> = journey
+        .memories
+        .iter()
+        .rev()
+        .take(5)
+        .map(format_journey_memory_line)
+        .collect();
+    if lines.is_empty() {
+        lines.push(format!(
+            "{}曾经显现。",
+            omen_label(journey.triggered_omens.last().map(|memory| memory.omen))
+        ));
+    }
+    lines.reverse();
+    lines.join("\n")
 }
 
 #[cfg(test)]
