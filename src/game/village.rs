@@ -6,6 +6,7 @@ use bevy::{
 };
 
 use crate::game::{
+    assets::{ProceduralAsset, ProceduralAssetKind, registered_spec},
     flow::{AppScreen, InGameState},
     intent::{IntentState, apply_village_dialogue_intent},
     notebook::{
@@ -490,6 +491,7 @@ fn spawn_house(
         MeshMaterial3d(materials.wall.clone()),
         Transform::from_translation(position + Vec3::Y * 1.2)
             .with_rotation(Quat::from_rotation_y(yaw)),
+        procedural_asset(ProceduralAssetKind::VillageHouse, index as u64 * 10),
     ));
     parent.spawn((
         Name::new("VillageHouseRoof"),
@@ -498,6 +500,7 @@ fn spawn_house(
         Transform::from_translation(position + Vec3::Y * 2.75)
             .with_rotation(Quat::from_rotation_y(yaw))
             .with_scale(Vec3::new(1.0, 1.0, 1.0)),
+        procedural_asset(ProceduralAssetKind::VillageHouse, index as u64 * 10 + 1),
     ));
 }
 
@@ -512,12 +515,14 @@ fn spawn_well(
         Mesh3d(meshes.add(Mesh::from(Cylinder::new(1.1, 0.8)))),
         MeshMaterial3d(materials.stone.clone()),
         Transform::from_translation(position + Vec3::Y * 0.4),
+        procedural_asset(ProceduralAssetKind::VillageWell, 1),
     ));
     parent.spawn((
         Name::new("VillageWellWater"),
         Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.82, 0.05)))),
         MeshMaterial3d(materials.water.clone()),
         Transform::from_translation(position + Vec3::Y * 0.84),
+        procedural_asset(ProceduralAssetKind::VillageWell, 2),
     ));
 }
 
@@ -545,6 +550,7 @@ fn spawn_sheep_pen(
             Mesh3d(meshes.add(Mesh::from(size))),
             MeshMaterial3d(materials.wood.clone()),
             Transform::from_translation(position + offset),
+            procedural_asset(ProceduralAssetKind::SheepPenRail, side as u64),
         ));
     }
 }
@@ -560,12 +566,14 @@ fn spawn_market(
         Mesh3d(meshes.add(Mesh::from(Cuboid::new(4.8, 0.7, 1.4)))),
         MeshMaterial3d(materials.wood.clone()),
         Transform::from_translation(position + Vec3::new(0.0, 0.45, 0.0)),
+        procedural_asset(ProceduralAssetKind::MarketStall, 1),
     ));
     parent.spawn((
         Name::new("MarketStallCloth"),
         Mesh3d(meshes.add(Mesh::from(Cuboid::new(5.4, 0.15, 3.0)))),
         MeshMaterial3d(materials.cloth.clone()),
         Transform::from_translation(position + Vec3::new(0.0, 2.1, -0.2)),
+        procedural_asset(ProceduralAssetKind::MarketStall, 2),
     ));
 }
 
@@ -582,12 +590,14 @@ fn spawn_shore(
         MeshMaterial3d(materials.water.clone()),
         Transform::from_translation(position + Vec3::Y * 0.03)
             .with_scale(Vec3::new(1.45, 1.0, 0.52)),
+        procedural_asset(ProceduralAssetKind::VillageShore, 1),
     ));
     parent.spawn((
         Name::new("VillageShoreSand"),
         Mesh3d(meshes.add(Mesh::from(Cuboid::new(28.0, 0.08, 5.0)))),
         MeshMaterial3d(materials.marker.clone()),
         Transform::from_translation(position + Vec3::new(0.0, 0.05, -5.5)),
+        procedural_asset(ProceduralAssetKind::VillageShore, 2),
     ));
 }
 
@@ -605,6 +615,7 @@ fn spawn_path_marker(
             Transform::from_translation(
                 position + Vec3::new((index as f32 - 2.0) * 1.8, 0.08, index as f32 * -1.1),
             ),
+            procedural_asset(ProceduralAssetKind::PathStone, index as u64),
         ));
     }
 }
@@ -634,9 +645,15 @@ fn spawn_village_actors(
                         radius: actor.radius,
                         seed,
                     },
+                    procedural_asset(ProceduralAssetKind::Sheep, actor.id),
                 ));
             }
             VillageActorKind::Shepherd | VillageActorKind::Merchant => {
+                let asset_kind = match actor.kind {
+                    VillageActorKind::Shepherd => ProceduralAssetKind::Shepherd,
+                    VillageActorKind::Merchant => ProceduralAssetKind::Merchant,
+                    VillageActorKind::Sheep => ProceduralAssetKind::Sheep,
+                };
                 commands.spawn((
                     Name::new(actor.kind.label()),
                     DespawnOnExit(AppScreen::InGame),
@@ -650,6 +667,7 @@ fn spawn_village_actors(
                         radius: actor.radius,
                         seed,
                     },
+                    procedural_asset(asset_kind, actor.id),
                 ));
             }
         }
@@ -952,6 +970,10 @@ fn stable_actor_id(index: u64, kind: VillageActorKind) -> u64 {
     value ^= value >> 30;
     value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value ^ (value >> 27)
+}
+
+fn procedural_asset(kind: ProceduralAssetKind, seed_salt: u64) -> ProceduralAsset {
+    ProceduralAsset::new(registered_spec(kind).instance(seed_salt))
 }
 
 #[cfg(test)]

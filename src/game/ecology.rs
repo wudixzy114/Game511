@@ -10,6 +10,7 @@ use crate::{
         performance::{FramePerformance, PerformancePhase},
     },
     game::{
+        assets::{ProceduralAsset, ProceduralAssetKind, registered_spec},
         flow::{AppScreen, InGameState},
         intent::{IntentKind, IntentState, PerceptionState},
         journey::{DreamPhase, JourneyState},
@@ -595,6 +596,7 @@ fn spawn_ecology_visuals(
 ) {
     let bird_mesh = meshes.add(Mesh::from(Capsule3d::new(0.12, 0.42)));
     for index in 0..config.ecology.bird_count {
+        let id = stable_ecology_id(index as u64, 101);
         commands.spawn((
             Name::new("BirdFlockMember"),
             DespawnOnExit(AppScreen::InGame),
@@ -603,15 +605,17 @@ fn spawn_ecology_visuals(
             Transform::from_translation(Vec3::new(0.0, -120.0, 0.0))
                 .with_scale(Vec3::new(1.6, 0.34, 0.62)),
             EcologyActor {
-                id: stable_ecology_id(index as u64, 101),
+                id,
                 kind: EcologyActorKind::Bird,
                 index,
             },
+            procedural_asset(ProceduralAssetKind::Bird, id),
         ));
     }
 
     let fish_mesh = meshes.add(Sphere::new(0.22).mesh().uv(12, 8));
     for index in 0..config.ecology.fish_count {
+        let id = stable_ecology_id(index as u64, 203);
         commands.spawn((
             Name::new("ShoreFish"),
             DespawnOnExit(AppScreen::InGame),
@@ -620,10 +624,11 @@ fn spawn_ecology_visuals(
             Transform::from_translation(Vec3::new(0.0, world_map.water_level(), 0.0))
                 .with_scale(Vec3::new(1.8, 0.42, 0.72)),
             EcologyActor {
-                id: stable_ecology_id(index as u64, 203),
+                id,
                 kind: EcologyActorKind::Fish,
                 index,
             },
+            procedural_asset(ProceduralAssetKind::Fish, id),
         ));
     }
 
@@ -644,6 +649,7 @@ fn spawn_ecology_visuals(
                 kind: EcologyActorKind::FortuneTeller,
                 index: 0,
             },
+            procedural_asset(ProceduralAssetKind::FortuneTeller, npc.id),
         ));
     }
 }
@@ -738,6 +744,10 @@ fn stable_ecology_id(seed: u64, salt: u64) -> u64 {
     value ^= value >> 27;
     value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^ (value >> 31)
+}
+
+fn procedural_asset(kind: ProceduralAssetKind, seed_salt: u64) -> ProceduralAsset {
+    ProceduralAsset::new(registered_spec(kind).instance(seed_salt))
 }
 
 fn cleanup_ecology_session(mut commands: Commands) {

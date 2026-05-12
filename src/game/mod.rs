@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod director;
 pub mod ecology;
 pub mod environment;
@@ -41,6 +42,7 @@ impl Plugin for GamePlugin {
         app.add_sub_state::<flow::InGameState>();
         app.insert_resource(PendingSessionLaunch(auto_start_mode));
 
+        app.add_plugins(assets::ProceduralAssetPlugin);
         app.add_plugins(ui::UiPlugin);
         app.add_plugins(world::WorldPlugin);
         app.add_plugins(notebook::NotebookPlugin);

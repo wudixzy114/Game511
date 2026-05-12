@@ -51,6 +51,7 @@ struct PresentationDirector {
     scene_duration: f32,
     elapsed: f32,
     current_scene_index: usize,
+    activated_scene_index: Option<usize>,
     scenes: Vec<PresentationScene>,
 }
 
@@ -58,19 +59,121 @@ impl PresentationDirector {
     fn current_scene(&self) -> &PresentationScene {
         &self.scenes[self.current_scene_index]
     }
+
+    fn has_full_visual_baseline(&self) -> bool {
+        visual_baseline_count(&self.scenes) >= PresentationVisualSample::BASELINE.len()
+    }
 }
 
 #[derive(Debug, Clone)]
 struct PresentationScene {
     name: &'static str,
     description: &'static str,
+    visual_sample: PresentationVisualSample,
+    composition: CompositionGuide,
     focus: Vec3,
     camera_offset: Vec3,
+    camera_drift: Vec3,
+    camera_mode: CameraMode,
+    wander_start: Vec3,
     wander_target: Vec3,
     time_override: f32,
     weather: WeatherKind,
     expected_omen: Option<OmenKind>,
     journey_step: PresentationJourneyStep,
+}
+
+impl PresentationScene {
+    fn with_visual_sample(
+        mut self,
+        visual_sample: PresentationVisualSample,
+        camera_mode: CameraMode,
+        composition: CompositionGuide,
+    ) -> Self {
+        self.visual_sample = visual_sample;
+        self.camera_mode = camera_mode;
+        self.composition = composition;
+        self
+    }
+
+    fn with_camera_drift(mut self, camera_drift: Vec3) -> Self {
+        self.camera_drift = camera_drift;
+        self
+    }
+
+    fn with_wander_start(mut self, wander_start: Vec3, world_map: &WorldMap) -> Self {
+        let wander_height = world_map
+            .sample_height(wander_start.x, wander_start.z)
+            .unwrap_or(wander_start.y)
+            .max(world_map.water_level())
+            + 1.2;
+        self.wander_start = Vec3::new(wander_start.x, wander_height, wander_start.z);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentationVisualSample {
+    Functional,
+    VillageDawn,
+    DreamAfterSeaWind,
+    MistBoundary,
+    SandstormPyramid,
+    OasisRuins,
+    NightSea,
+}
+
+impl PresentationVisualSample {
+    const BASELINE: [Self; 6] = [
+        Self::VillageDawn,
+        Self::DreamAfterSeaWind,
+        Self::MistBoundary,
+        Self::SandstormPyramid,
+        Self::OasisRuins,
+        Self::NightSea,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Functional => "functional-showcase",
+            Self::VillageDawn => "village-dawn",
+            Self::DreamAfterSeaWind => "dream-after-sea-wind",
+            Self::MistBoundary => "mist-boundary",
+            Self::SandstormPyramid => "sandstorm-pyramid",
+            Self::OasisRuins => "oasis-ruins",
+            Self::NightSea => "night-sea",
+        }
+    }
+
+    fn order(self) -> usize {
+        Self::BASELINE
+            .iter()
+            .position(|sample| *sample == self)
+            .unwrap_or(Self::BASELINE.len())
+    }
+
+    fn is_visual_baseline(self) -> bool {
+        self != Self::Functional
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CompositionGuide {
+    foreground: &'static str,
+    midground: &'static str,
+    background: &'static str,
+    quality_gate: &'static str,
+}
+
+impl CompositionGuide {
+    const fn functional() -> Self {
+        Self {
+            foreground: "system anchor",
+            midground: "showcase target",
+            background: "terrain and atmosphere",
+            quality_gate: "scene remains readable without task UI",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +236,10 @@ type PresentationDriveResources<'w> = (
 
 fn initialize_presentation(mut commands: Commands, resources: PresentationInitResources<'_>) {
     let (config, world_map, places, village, regions, landmarks, director) = resources;
-    if director.is_some() {
+    if director
+        .as_deref()
+        .is_some_and(PresentationDirector::has_full_visual_baseline)
+    {
         return;
     }
     let Some(world_map) = world_map else {
@@ -142,6 +248,9 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
     let Some(places) = places else {
         return;
     };
+    if village.is_none() || regions.is_none() || landmarks.is_none() {
+        return;
+    }
     let center_anchor = SceneAnchor {
         x: 0,
         z: 0,
@@ -177,7 +286,8 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
                     expected_omen: None,
                 },
                 PresentationJourneyStep::Scenic,
-            ),
+            )
+            .with_camera_drift(Vec3::new(3.2, -0.4, -2.8)),
             build_scene(
                 "Grove Whisper",
                 "misty grove atmosphere with close-range vegetation silhouettes",
@@ -190,7 +300,8 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
                     expected_omen: Some(OmenKind::GroveWhisper),
                 },
                 PresentationJourneyStep::Scenic,
-            ),
+            )
+            .with_camera_drift(Vec3::new(1.6, 0.1, -1.2)),
             build_scene(
                 "Ridge Dawn",
                 "sunrise lighting shift with a clear east-west solar arc",
@@ -203,7 +314,8 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
                     expected_omen: Some(OmenKind::DawnLight),
                 },
                 PresentationJourneyStep::Scenic,
-            ),
+            )
+            .with_camera_drift(Vec3::new(2.4, 0.3, -2.0)),
             build_scene(
                 "Storm Front",
                 "heavy rain, dark atmosphere and lightning-driven contrast",
@@ -216,7 +328,8 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
                     expected_omen: None,
                 },
                 PresentationJourneyStep::Scenic,
-            ),
+            )
+            .with_camera_drift(Vec3::new(1.1, 0.0, -1.8)),
             build_scene(
                 "Snow Ridge",
                 "cold snowfall, reduced visibility and summit response",
@@ -229,7 +342,8 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
                     expected_omen: Some(OmenKind::SummitCall),
                 },
                 PresentationJourneyStep::Scenic,
-            ),
+            )
+            .with_camera_drift(Vec3::new(2.0, 0.2, -2.4)),
             build_scene(
                 "Starfield Watch",
                 "clear midnight sky for star visibility and moon transition",
@@ -242,7 +356,18 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
                     expected_omen: None,
                 },
                 PresentationJourneyStep::Scenic,
-            ),
+            )
+            .with_visual_sample(
+                PresentationVisualSample::NightSea,
+                CameraMode::FirstPerson,
+                CompositionGuide {
+                    foreground: "quiet traveler silhouette or shoreline",
+                    midground: "dark waterline and low horizon",
+                    background: "moon, star field and cool fog",
+                    quality_gate: "sky remains readable without UI or debug overlays",
+                },
+            )
+            .with_camera_drift(Vec3::new(0.8, 0.15, -1.1)),
             build_scene(
                 "Moonlit Water",
                 "waterline calm test with moonlight and cool omen response",
@@ -255,21 +380,35 @@ fn initialize_presentation(mut commands: Commands, resources: PresentationInitRe
                     expected_omen: Some(OmenKind::StillWater),
                 },
                 PresentationJourneyStep::Scenic,
-            ),
+            )
+            .with_visual_sample(
+                PresentationVisualSample::NightSea,
+                CameraMode::FirstPerson,
+                CompositionGuide {
+                    foreground: "water edge and low land shape",
+                    midground: "moonlit water surface",
+                    background: "clear night sky and distant shore",
+                    quality_gate: "water, sky and horizon are not collapsed into a dark flat plane",
+                },
+            )
+            .with_camera_drift(Vec3::new(0.6, 0.0, -1.4)),
         ]
     });
 
     tracing::info!(
         target: "dao_game::presentation",
         scene_count = scenes.len(),
+        visual_baseline_count = visual_baseline_count(&scenes),
         scene_duration_seconds = config.presentation.scene_duration_seconds,
         "presentation mode initialized"
     );
+    log_visual_baseline_matrix(&scenes);
 
     commands.insert_resource(PresentationDirector {
         scene_duration: config.presentation.scene_duration_seconds.max(1.0),
         elapsed: 0.0,
         current_scene_index: 0,
+        activated_scene_index: None,
         scenes,
     });
     commands.insert_resource(WorldPresentationControl::default());
@@ -300,7 +439,6 @@ fn advance_presentation_director(
         return;
     };
 
-    let previous_scene_index = director.current_scene_index;
     director.elapsed += time.delta_secs();
     let scene_index = scene_index_at_elapsed(
         director.elapsed,
@@ -311,13 +449,22 @@ fn advance_presentation_director(
     director.current_scene_index = scene_index;
     let scene = director.current_scene().clone();
 
-    if previous_scene_index != scene_index {
+    if director.activated_scene_index != Some(scene_index) {
         reset_sign_state_for_scene(&mut signs);
         teleport_wanderer_to_scene(&mut wanderer_query, &scene, &world_map);
+        director.activated_scene_index = Some(scene_index);
         tracing::info!(
             target: "dao_game::presentation::scene",
             scene = scene.name,
             description = scene.description,
+            visual_sample = scene.visual_sample.label(),
+            camera_mode = scene.camera_mode.label(),
+            foreground = scene.composition.foreground,
+            midground = scene.composition.midground,
+            background = scene.composition.background,
+            quality_gate = scene.composition.quality_gate,
+            time_override = scene.time_override,
+            weather = ?scene.weather,
             expected_omen = ?scene.expected_omen,
             "presentation scene activated"
         );
@@ -360,11 +507,41 @@ fn drive_presentation_camera(
     };
 
     let scene = director.current_scene();
-    let desired_position = scene.focus + scene.camera_offset;
+    let progress = scene_progress(director.elapsed, director.scene_duration);
+    let drift = scene.camera_drift * smoothstep_unit(progress);
+    let desired_position = scene.focus + scene.camera_offset + drift;
     let blend = 1.0 - (-config.presentation.camera_blend_speed.max(0.1) * time.delta_secs()).exp();
 
     transform.translation = transform.translation.lerp(desired_position, blend);
     transform.look_at(scene.focus, Vec3::Y);
+}
+
+fn log_visual_baseline_matrix(scenes: &[PresentationScene]) {
+    for scene in scenes
+        .iter()
+        .filter(|scene| scene.visual_sample.is_visual_baseline())
+    {
+        tracing::info!(
+            target: "dao_game::presentation::visual_matrix",
+            scene = scene.name,
+            visual_sample = scene.visual_sample.label(),
+            camera_mode = scene.camera_mode.label(),
+            weather = ?scene.weather,
+            time_override = scene.time_override,
+            foreground = scene.composition.foreground,
+            midground = scene.composition.midground,
+            background = scene.composition.background,
+            quality_gate = scene.composition.quality_gate,
+            "visual baseline scene registered"
+        );
+    }
+}
+
+fn visual_baseline_count(scenes: &[PresentationScene]) -> usize {
+    PresentationVisualSample::BASELINE
+        .iter()
+        .filter(|sample| scenes.iter().any(|scene| scene.visual_sample == **sample))
+        .count()
 }
 
 fn build_scene(
@@ -390,8 +567,13 @@ fn build_scene(
     PresentationScene {
         name,
         description,
+        visual_sample: PresentationVisualSample::Functional,
+        composition: CompositionGuide::functional(),
         focus,
         camera_offset: visuals.camera_offset,
+        camera_drift: Vec3::ZERO,
+        camera_mode: CameraMode::FirstPerson,
+        wander_start: wander_target,
         wander_target,
         time_override: visuals.time_override,
         weather: visuals.weather,
@@ -497,10 +679,20 @@ fn build_presentation_scenes(
     if let Some(mut journey_scenes) = build_journey_scenes(places, world_map) {
         scenes.append(&mut journey_scenes);
     }
+    scenes.sort_by_key(|scene| scene.visual_sample.order());
     (!scenes.is_empty()).then_some(scenes)
 }
 
+#[cfg(test)]
+fn sort_presentation_scenes_for_testing(scenes: &mut [PresentationScene]) {
+    scenes.sort_by_key(|scene| scene.visual_sample.order());
+}
+
 fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<PresentationScene> {
+    let houses = village
+        .area(VillageAreaKind::Houses)
+        .map(|area| area.position)
+        .unwrap_or(village.origin + Vec3::new(-8.0, 0.0, 6.0));
     let sheep_pen = village
         .area(VillageAreaKind::SheepPen)
         .map(|area| area.position)
@@ -517,19 +709,32 @@ fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<Pre
         .area(VillageAreaKind::OuterPath)
         .map(|area| area.position)
         .unwrap_or(village.origin + Vec3::new(0.0, 0.0, -36.0));
+    let sea_watch = shore + Vec3::new(0.0, 0.0, 11.0);
 
     vec![
         village_scene(
-            "Village Birth",
-            "opening village spawn without task prompts",
-            village.spawn_point,
-            village.origin + Vec3::Y * 1.2,
+            "Village Dawn Baseline",
+            "warm village dawn with houses, flock life, smoke-ready roofs and a quiet choice to stay",
+            sheep_pen + Vec3::new(-5.0, 0.0, 5.0),
+            (houses + sheep_pen) * 0.5 + Vec3::Y * 1.2,
             world_map,
-            Vec3::new(-10.0, 6.0, 12.0),
-            0.18,
+            Vec3::new(-14.0, 6.8, 13.5),
+            0.04,
             WeatherKind::Clear,
             PresentationJourneyStep::VillageBirth,
-        ),
+        )
+        .with_visual_sample(
+            PresentationVisualSample::VillageDawn,
+            CameraMode::ThirdPerson,
+            CompositionGuide {
+                foreground: "traveler, sheep pen and warm village ground",
+                midground: "houses, well path and daily-life actors",
+                background: "low dawn sky and sea-side brightness",
+                quality_gate: "opening village reads as a place to remain, with no task wording or debug dominance",
+            },
+        )
+        .with_wander_start(village.spawn_point + Vec3::new(-6.0, 0.0, 5.0), world_map)
+        .with_camera_drift(Vec3::new(2.8, -0.2, -2.6)),
         village_scene(
             "Village Flock",
             "sheep pen, shepherd and quiet daily life",
@@ -540,7 +745,8 @@ fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<Pre
             0.3,
             WeatherKind::Clear,
             PresentationJourneyStep::VillageLife,
-        ),
+        )
+        .with_camera_drift(Vec3::new(1.4, 0.0, -1.2)),
         village_scene(
             "Village Market",
             "merchant rumor and human place before departure",
@@ -551,7 +757,8 @@ fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<Pre
             0.42,
             WeatherKind::Mist,
             PresentationJourneyStep::VillageLife,
-        ),
+        )
+        .with_camera_drift(Vec3::new(1.2, 0.0, -1.0)),
         village_scene(
             "Pyramid Dream",
             "hard-coded first dream of desert, sandstorm and pyramid",
@@ -562,18 +769,54 @@ fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<Pre
             0.74,
             WeatherKind::Storm,
             PresentationJourneyStep::Dream,
-        ),
+        )
+        .with_camera_drift(Vec3::new(0.8, 0.15, -1.6)),
         village_scene(
-            "Dream Afterglow",
-            "dream echo becomes non-task omen toward the outer path",
+            "Dream After Sea Wind",
+            "after the pyramid dream, sea mist and bird direction make the outer path feel newly charged",
             outer,
-            outer + Vec3::Y * 1.0,
+            (outer + shore) * 0.5 + Vec3::Y * 1.0,
             world_map,
-            Vec3::new(-9.0, 5.2, 10.0),
-            0.05,
+            Vec3::new(-12.0, 5.6, 13.0),
+            0.01,
             WeatherKind::Mist,
             PresentationJourneyStep::DreamEcho,
-        ),
+        )
+        .with_visual_sample(
+            PresentationVisualSample::DreamAfterSeaWind,
+            CameraMode::FirstPerson,
+            CompositionGuide {
+                foreground: "village edge and player-height path",
+                midground: "sea mist, birds and outer road glow",
+                background: "open coast and pale post-dream dawn",
+                quality_gate: "omen is visible as atmosphere, never as an arrow or task marker",
+            },
+        )
+        .with_wander_start(shore + Vec3::new(-4.0, 0.0, -6.0), world_map)
+        .with_camera_drift(Vec3::new(2.4, 0.05, -2.2)),
+        village_scene(
+            "Night Sea Baseline",
+            "quiet sea at night with stars and water carrying memory rather than instructions",
+            sea_watch,
+            shore + Vec3::new(0.0, 1.0, 26.0),
+            world_map,
+            Vec3::new(-6.0, 3.8, 7.0),
+            0.78,
+            WeatherKind::Clear,
+            PresentationJourneyStep::DreamEcho,
+        )
+        .with_visual_sample(
+            PresentationVisualSample::NightSea,
+            CameraMode::FirstPerson,
+            CompositionGuide {
+                foreground: "shoreline and low traveler viewpoint",
+                midground: "dark water band with readable horizon",
+                background: "moon, star field and far sea haze",
+                quality_gate: "night scene keeps horizon, water and sky separated without UI clutter",
+            },
+        )
+        .with_wander_start(shore + Vec3::new(-6.0, 0.0, 5.0), world_map)
+        .with_camera_drift(Vec3::new(0.8, 0.0, -1.6)),
         village_scene(
             "Ecology Omen",
             "birds and village life carry early omen behavior",
@@ -584,7 +827,8 @@ fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<Pre
             0.22,
             WeatherKind::Clear,
             PresentationJourneyStep::Ecology,
-        ),
+        )
+        .with_camera_drift(Vec3::new(1.8, 0.0, -1.6)),
     ]
 }
 
@@ -593,19 +837,46 @@ fn build_region_scenes(regions: &RegionGraphState, world_map: &WorldMap) -> Vec<
         .gates
         .iter()
         .take(2)
-        .map(|gate| {
-            build_journey_scene(
-                "Natural Boundary",
-                "mist, mountain or harbor boundary appears as part of the world",
-                gate.position + Vec3::new(0.0, 0.0, gate.radius * 0.42),
+        .enumerate()
+        .map(|(index, gate)| {
+            let scene = build_journey_scene(
+                if index == 0 {
+                    "Mist Boundary Baseline"
+                } else {
+                    "Natural Boundary"
+                },
+                if index == 0 {
+                    "old ford, river mist and mountain shadow read as a natural border, not a portal"
+                } else {
+                    "mist, mountain or harbor boundary appears as part of the world"
+                },
+                gate.position + Vec3::new(0.0, 0.0, gate.radius * 0.5),
                 gate.position + Vec3::Y * 1.3,
                 world_map,
-                Vec3::new(-9.0, 5.8, 10.0),
+                Vec3::new(-10.5, 6.2, 11.5),
                 0.08,
                 WeatherKind::Mist,
                 Some(OmenKind::SummitCall),
                 PresentationJourneyStep::Boundary,
             )
+            .with_camera_drift(Vec3::new(2.0, 0.1, -2.4));
+
+            if index == 0 {
+                scene
+                    .with_visual_sample(
+                        PresentationVisualSample::MistBoundary,
+                        CameraMode::FirstPerson,
+                        CompositionGuide {
+                            foreground: "river edge, old crossing ground and low mist",
+                            midground: "gate stones or ford silhouette inside fog",
+                            background: "mountain or far-bank shadow",
+                            quality_gate: "boundary is readable as landscape, not a glowing UI doorway",
+                        },
+                    )
+                    .with_wander_start(gate.position + Vec3::new(-8.0, 0.0, gate.radius * 0.82), world_map)
+            } else {
+                scene
+            }
         })
         .collect()
 }
@@ -617,18 +888,21 @@ fn build_director_scenes(
     let Some(gate) = regions.gates.first() else {
         return Vec::new();
     };
-    vec![build_journey_scene(
-        "Director Interface",
-        "deterministic director validates non-task suggestions near a world anchor",
-        gate.position + Vec3::new(6.0, 0.0, gate.radius * 0.32),
-        gate.position + Vec3::Y * 1.2,
-        world_map,
-        Vec3::new(-8.0, 5.2, 9.0),
-        0.34,
-        WeatherKind::Mist,
-        Some(OmenKind::SummitCall),
-        PresentationJourneyStep::Director,
-    )]
+    vec![
+        build_journey_scene(
+            "Director Interface",
+            "deterministic director validates non-task suggestions near a world anchor",
+            gate.position + Vec3::new(6.0, 0.0, gate.radius * 0.32),
+            gate.position + Vec3::Y * 1.2,
+            world_map,
+            Vec3::new(-8.0, 5.2, 9.0),
+            0.34,
+            WeatherKind::Mist,
+            Some(OmenKind::SummitCall),
+            PresentationJourneyStep::Director,
+        )
+        .with_camera_drift(Vec3::new(1.6, 0.0, -1.8)),
+    ]
 }
 
 fn build_landmark_scenes(
@@ -638,33 +912,78 @@ fn build_landmark_scenes(
     let mut scenes = Vec::new();
     if let Some(pyramid) = landmarks.desert_pyramid() {
         scenes.push(build_journey_scene(
-            "Desert Pyramid",
-            "sandstorm reveal of the distant pyramid silhouette",
-            pyramid.position + Vec3::new(-pyramid.scale * 2.4, 0.0, pyramid.scale * 1.4),
+            "Sandstorm Pyramid Baseline",
+            "sandstorm gap reveals a huge pyramid silhouette at world scale",
+            pyramid.position + Vec3::new(-pyramid.scale * 2.7, 0.0, pyramid.scale * 1.55),
             pyramid.position + Vec3::Y * (pyramid.scale * 0.38),
             world_map,
             Vec3::new(
-                -pyramid.scale * 1.6,
-                pyramid.scale * 0.72,
-                pyramid.scale * 1.2,
+                -pyramid.scale * 1.82,
+                pyramid.scale * 0.76,
+                pyramid.scale * 1.34,
             ),
             0.18,
             WeatherKind::Sandstorm,
             Some(OmenKind::DawnLight),
             PresentationJourneyStep::DesertPyramid,
-        ));
-        scenes.push(build_journey_scene(
-            "Third Person Travel",
-            "third-person travel silhouette against a large landmark",
-            pyramid.position + Vec3::new(-pyramid.scale * 1.1, 0.0, pyramid.scale * 0.7),
-            pyramid.position + Vec3::Y * (pyramid.scale * 0.28),
+        )
+        .with_visual_sample(
+            PresentationVisualSample::SandstormPyramid,
+            CameraMode::FirstPerson,
+            CompositionGuide {
+                foreground: "sand haze and low dune contour",
+                midground: "traveler scale against open desert",
+                background: "giant pyramid silhouette visible through storm gaps",
+                quality_gate: "landmark remains identifiable under sandstorm and is not hidden by UI or foreground clutter",
+            },
+        )
+        .with_wander_start(
+            pyramid.position + Vec3::new(-pyramid.scale * 3.08, 0.0, pyramid.scale * 1.9),
             world_map,
-            Vec3::new(-16.0, 7.0, 18.0),
-            0.26,
+        )
+        .with_camera_drift(Vec3::new(pyramid.scale * 0.18, -1.0, -pyramid.scale * 0.12)));
+        scenes.push(build_journey_scene(
+            "Oasis Ruins Baseline",
+            "near pyramid oasis, ruin walls and relics create a readable exploration pocket",
+            pyramid.position + Vec3::new(-pyramid.scale * 0.92, 0.0, pyramid.scale * 0.52),
+            pyramid.position + Vec3::new(-pyramid.scale * 0.42, pyramid.scale * 0.12, pyramid.scale * 0.18),
+            world_map,
+            Vec3::new(-pyramid.scale * 0.42, pyramid.scale * 0.18, pyramid.scale * 0.36),
+            0.31,
             WeatherKind::Sandstorm,
-            Some(OmenKind::DawnLight),
-            PresentationJourneyStep::ThirdPerson,
-        ));
+            Some(OmenKind::StillWater),
+            PresentationJourneyStep::DesertPyramid,
+        )
+        .with_visual_sample(
+            PresentationVisualSample::OasisRuins,
+            CameraMode::ThirdPerson,
+            CompositionGuide {
+                foreground: "traveler, oasis edge and sand-dark water",
+                midground: "ruin walls, relic block and wind-cut stones",
+                background: "pyramid mass beyond the local discovery space",
+                quality_gate: "near detail and landmark scale coexist without entity intersections dominating the shot",
+            },
+        )
+        .with_wander_start(
+            pyramid.position + Vec3::new(-pyramid.scale * 1.18, 0.0, pyramid.scale * 0.72),
+            world_map,
+        )
+        .with_camera_drift(Vec3::new(pyramid.scale * 0.08, 0.4, -pyramid.scale * 0.08)));
+        scenes.push(
+            build_journey_scene(
+                "Third Person Travel",
+                "third-person travel silhouette against a large landmark",
+                pyramid.position + Vec3::new(-pyramid.scale * 1.1, 0.0, pyramid.scale * 0.7),
+                pyramid.position + Vec3::Y * (pyramid.scale * 0.28),
+                world_map,
+                Vec3::new(-16.0, 7.0, 18.0),
+                0.26,
+                WeatherKind::Sandstorm,
+                Some(OmenKind::DawnLight),
+                PresentationJourneyStep::ThirdPerson,
+            )
+            .with_camera_drift(Vec3::new(2.4, 0.1, -2.8)),
+        );
     }
     scenes
 }
@@ -694,8 +1013,13 @@ fn village_scene(
     PresentationScene {
         name,
         description,
+        visual_sample: PresentationVisualSample::Functional,
+        composition: CompositionGuide::functional(),
         focus: Vec3::new(focus.x, focus_height, focus.z),
         camera_offset,
+        camera_drift: Vec3::ZERO,
+        camera_mode: CameraMode::FirstPerson,
+        wander_start: Vec3::new(wander_target.x, wander_height, wander_target.z),
         wander_target: Vec3::new(wander_target.x, wander_height, wander_target.z),
         time_override,
         weather,
@@ -730,8 +1054,13 @@ fn build_journey_scene(
     PresentationScene {
         name,
         description,
+        visual_sample: PresentationVisualSample::Functional,
+        composition: CompositionGuide::functional(),
         focus: Vec3::new(focus.x, focus_height, focus.z),
         camera_offset,
+        camera_drift: Vec3::ZERO,
+        camera_mode: CameraMode::FirstPerson,
+        wander_start: Vec3::new(wander_target.x, wander_height, wander_target.z),
         wander_target: Vec3::new(wander_target.x, wander_height, wander_target.z),
         time_override,
         weather,
@@ -789,6 +1118,11 @@ fn scene_progress(elapsed: f32, scene_duration: f32) -> f32 {
     (elapsed / scene_duration).fract()
 }
 
+fn smoothstep_unit(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn reset_sign_state_for_scene(signs: &mut SignState) {
     *signs = SignState {
         resonance: 0.18,
@@ -805,7 +1139,8 @@ fn teleport_wanderer_to_scene(
     let Some(mut transform) = wanderer_query.iter_mut().next() else {
         return;
     };
-    transform.translation = scene.wander_target;
+    transform.translation = scene.wander_start;
+    transform.look_at(scene.wander_target + Vec3::new(0.0, 0.0, 0.2), Vec3::Y);
 }
 
 fn nudge_sign_state_for_showcase(
@@ -1005,11 +1340,10 @@ fn drive_landmark_showcase(
 }
 
 fn drive_camera_mode_showcase(state: &mut FirstPersonState, scene: &PresentationScene) {
-    state.camera_mode = if scene.journey_step == PresentationJourneyStep::ThirdPerson {
-        CameraMode::ThirdPerson
-    } else {
-        CameraMode::FirstPerson
-    };
+    state.camera_mode = scene.camera_mode;
+    if scene.camera_mode == CameraMode::ThirdPerson {
+        state.third_person_distance = state.third_person_distance.max(5.8);
+    }
 }
 
 fn presentation_context(
@@ -1064,9 +1398,12 @@ mod tests {
         },
         game::{
             places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, PlaceTag},
+            player::CameraMode,
             presentation::{
-                PresentationJourneyStep, build_journey_scenes, omen_for_place,
-                scene_index_at_elapsed, scene_progress,
+                CompositionGuide, PresentationJourneyStep, PresentationScene,
+                PresentationVisualSample, build_journey_scenes, omen_for_place,
+                scene_index_at_elapsed, scene_progress, sort_presentation_scenes_for_testing,
+                visual_baseline_count,
             },
             signs::OmenKind,
             world::{BiomeKind, WorldGridCoord, WorldMap},
@@ -1138,6 +1475,133 @@ mod tests {
         assert_eq!(omen_for_place(PlaceKind::SpringEye), OmenKind::StillWater);
         assert_eq!(omen_for_place(PlaceKind::RidgeGate), OmenKind::SummitCall);
         assert_eq!(omen_for_place(PlaceKind::StoneRing), OmenKind::DawnLight);
+    }
+
+    #[test]
+    fn visual_baseline_matrix_defines_six_fixed_samples() {
+        let labels: Vec<&'static str> = PresentationVisualSample::BASELINE
+            .iter()
+            .map(|sample| sample.label())
+            .collect();
+
+        assert_eq!(
+            labels,
+            vec![
+                "village-dawn",
+                "dream-after-sea-wind",
+                "mist-boundary",
+                "sandstorm-pyramid",
+                "oasis-ruins",
+                "night-sea",
+            ]
+        );
+        assert!(
+            PresentationVisualSample::BASELINE
+                .iter()
+                .all(|sample| sample.is_visual_baseline())
+        );
+    }
+
+    #[test]
+    fn visual_baseline_scenes_sort_before_functional_showcases() {
+        let mut scenes = vec![
+            test_scene(
+                "functional",
+                PresentationVisualSample::Functional,
+                CameraMode::FirstPerson,
+            ),
+            test_scene(
+                "oasis",
+                PresentationVisualSample::OasisRuins,
+                CameraMode::ThirdPerson,
+            ),
+            test_scene(
+                "village",
+                PresentationVisualSample::VillageDawn,
+                CameraMode::ThirdPerson,
+            ),
+            test_scene(
+                "night",
+                PresentationVisualSample::NightSea,
+                CameraMode::FirstPerson,
+            ),
+        ];
+
+        sort_presentation_scenes_for_testing(&mut scenes);
+
+        assert_eq!(
+            scenes
+                .iter()
+                .map(|scene| scene.visual_sample)
+                .collect::<Vec<_>>(),
+            vec![
+                PresentationVisualSample::VillageDawn,
+                PresentationVisualSample::OasisRuins,
+                PresentationVisualSample::NightSea,
+                PresentationVisualSample::Functional,
+            ]
+        );
+        assert!(
+            scenes
+                .iter()
+                .any(|scene| scene.camera_mode == CameraMode::ThirdPerson)
+        );
+        assert!(
+            scenes
+                .iter()
+                .any(|scene| scene.camera_mode == CameraMode::FirstPerson)
+        );
+    }
+
+    #[test]
+    fn visual_baseline_count_tracks_unique_samples() {
+        let scenes = vec![
+            test_scene(
+                "village",
+                PresentationVisualSample::VillageDawn,
+                CameraMode::ThirdPerson,
+            ),
+            test_scene(
+                "another village",
+                PresentationVisualSample::VillageDawn,
+                CameraMode::FirstPerson,
+            ),
+            test_scene(
+                "mist",
+                PresentationVisualSample::MistBoundary,
+                CameraMode::FirstPerson,
+            ),
+            test_scene(
+                "functional",
+                PresentationVisualSample::Functional,
+                CameraMode::FirstPerson,
+            ),
+        ];
+
+        assert_eq!(visual_baseline_count(&scenes), 2);
+    }
+
+    fn test_scene(
+        name: &'static str,
+        visual_sample: PresentationVisualSample,
+        camera_mode: CameraMode,
+    ) -> PresentationScene {
+        PresentationScene {
+            name,
+            description: "test scene",
+            visual_sample,
+            composition: CompositionGuide::functional(),
+            focus: Vec3::ZERO,
+            camera_offset: Vec3::new(-1.0, 1.0, 1.0),
+            camera_drift: Vec3::ZERO,
+            camera_mode,
+            wander_start: Vec3::ZERO,
+            wander_target: Vec3::ZERO,
+            time_override: 0.0,
+            weather: crate::game::environment::WeatherKind::Clear,
+            expected_omen: None,
+            journey_step: PresentationJourneyStep::Scenic,
+        }
     }
 
     fn test_config() -> AppConfig {

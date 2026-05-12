@@ -8,6 +8,7 @@ use bevy::{
 use crate::{
     core::performance::{FramePerformance, PerformancePhase},
     game::{
+        assets::{ProceduralAsset, ProceduralAssetKind, registered_spec},
         flow::{AppScreen, InGameState},
         intent::PerceptionState,
         journey::{DreamPhase, JourneyState},
@@ -323,6 +324,7 @@ fn spawn_landmark_visual(
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Silhouette,
                 },
+                procedural_asset(ProceduralAssetKind::DesertPyramid, landmark.id),
             ));
             commands.spawn((
                 Name::new("DesertOasis"),
@@ -343,6 +345,7 @@ fn spawn_landmark_visual(
                     near_detail: true,
                     feature_kind: LandmarkFeatureKind::Oasis,
                 },
+                procedural_asset(ProceduralAssetKind::DesertOasis, landmark.id),
             ));
             commands.spawn((
                 Name::new("DesertRelicPlaceholder"),
@@ -362,12 +365,16 @@ fn spawn_landmark_visual(
                     near_detail: true,
                     feature_kind: LandmarkFeatureKind::Relic,
                 },
+                procedural_asset(ProceduralAssetKind::DesertRelic, landmark.id),
             ));
-            for offset in [
+            for (index, offset) in [
                 Vec3::new(-landmark.scale * 0.28, 0.0, landmark.scale * 0.42),
                 Vec3::new(landmark.scale * 0.32, 0.0, landmark.scale * 0.34),
                 Vec3::new(0.0, 0.0, -landmark.scale * 0.46),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 commands.spawn((
                     Name::new("PyramidRuinWall"),
                     DespawnOnExit(AppScreen::InGame),
@@ -385,6 +392,10 @@ fn spawn_landmark_visual(
                         near_detail: true,
                         feature_kind: LandmarkFeatureKind::Ruin,
                     },
+                    procedural_asset(
+                        ProceduralAssetKind::PyramidRuinWall,
+                        landmark.id.wrapping_add(index as u64),
+                    ),
                 ));
             }
             commands.spawn((
@@ -405,6 +416,7 @@ fn spawn_landmark_visual(
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Silhouette,
                 },
+                procedural_asset(ProceduralAssetKind::DesertPyramid, landmark.id + 97),
             ));
         }
         RegionLandmarkKind::MistRiver => {
@@ -424,6 +436,7 @@ fn spawn_landmark_visual(
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Boundary,
                 },
+                procedural_asset(ProceduralAssetKind::MistRiver, landmark.id),
             ));
         }
         RegionLandmarkKind::VillageHeadland | RegionLandmarkKind::FarIslandLight => {
@@ -442,6 +455,7 @@ fn spawn_landmark_visual(
                     near_detail: false,
                     feature_kind: LandmarkFeatureKind::Boundary,
                 },
+                procedural_asset(ProceduralAssetKind::HeadlandMarker, landmark.id),
             ));
         }
     }
@@ -533,6 +547,10 @@ fn stable_landmark_id(seed: u64, kind: RegionLandmarkKind) -> u64 {
     value ^= value >> 27;
     value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^ (value >> 31)
+}
+
+fn procedural_asset(kind: ProceduralAssetKind, seed_salt: u64) -> ProceduralAsset {
+    ProceduralAsset::new(registered_spec(kind).instance(seed_salt))
 }
 
 impl LandmarkMaterials {
