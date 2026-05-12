@@ -52,6 +52,22 @@ impl ProceduralAsset {
     }
 }
 
+#[derive(Debug, Component, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum AssetFoundationClass {
+    EnvironmentStructure,
+    EnvironmentAccent,
+    CharacterActor,
+    LandmarkHero,
+}
+
+#[derive(Debug, Component, Clone, PartialEq)]
+pub struct AssetPresentationAnchor {
+    pub kind: ProceduralAssetKind,
+    pub class: AssetFoundationClass,
+    pub placeholder_enabled: bool,
+    pub preferred_scene_path: Option<String>,
+}
+
 #[derive(Debug, Resource, Clone, PartialEq)]
 pub struct ProceduralAssetRegistry {
     specs: Vec<ProceduralAssetSpec>,
@@ -268,6 +284,7 @@ pub struct ProceduralSpawnRequest<'a> {
     pub name: &'a str,
     pub transform: Transform,
     pub lod: ProceduralAssetLod,
+    pub placeholder_enabled: Option<bool>,
 }
 
 impl<'a> ProceduralSpawnRequest<'a> {
@@ -283,11 +300,17 @@ impl<'a> ProceduralSpawnRequest<'a> {
             name,
             transform,
             lod: ProceduralAssetLod::Near,
+            placeholder_enabled: None,
         }
     }
 
     pub fn with_lod(mut self, lod: ProceduralAssetLod) -> Self {
         self.lod = lod;
+        self
+    }
+
+    pub fn with_placeholder_enabled(mut self, placeholder_enabled: bool) -> Self {
+        self.placeholder_enabled = Some(placeholder_enabled);
         self
     }
 }
@@ -345,19 +368,26 @@ pub fn spawn_procedural_asset(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    config: &AssetConfig,
     request: ProceduralSpawnRequest<'_>,
 ) -> Entity {
     let spec = registered_spec(request.kind).instance(request.seed_salt);
     let blueprint = asset_blueprint(&spec, request.lod);
+    let placeholder_enabled = request
+        .placeholder_enabled
+        .unwrap_or(default_placeholder_enabled(config, request.kind));
     let mut entity = parent.spawn((
         Name::new(request.name.to_string()),
         request.transform,
         ProceduralAsset::new(spec),
+        asset_presentation_anchor(request.kind, placeholder_enabled),
     ));
     let root = entity.id();
-    entity.with_children(|part_parent| {
-        spawn_blueprint_parts(part_parent, meshes, materials, &blueprint);
-    });
+    if placeholder_enabled {
+        entity.with_children(|part_parent| {
+            spawn_blueprint_parts(part_parent, meshes, materials, &blueprint);
+        });
+    }
     root
 }
 
@@ -365,22 +395,106 @@ pub fn spawn_procedural_asset_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    config: &AssetConfig,
     request: ProceduralSpawnRequest<'_>,
 ) -> Entity {
     let spec = registered_spec(request.kind).instance(request.seed_salt);
     let blueprint = asset_blueprint(&spec, request.lod);
+    let placeholder_enabled = request
+        .placeholder_enabled
+        .unwrap_or(default_placeholder_enabled(config, request.kind));
     let root = commands
         .spawn((
             Name::new(request.name.to_string()),
             DespawnOnExit(AppScreen::InGame),
             request.transform,
             ProceduralAsset::new(spec),
+            asset_presentation_anchor(request.kind, placeholder_enabled),
         ))
         .id();
-    commands.entity(root).with_children(|part_parent| {
-        spawn_blueprint_parts(part_parent, meshes, materials, &blueprint);
-    });
+    if placeholder_enabled {
+        commands.entity(root).with_children(|part_parent| {
+            spawn_blueprint_parts(part_parent, meshes, materials, &blueprint);
+        });
+    }
     root
+}
+
+pub fn asset_foundation_class(kind: ProceduralAssetKind) -> AssetFoundationClass {
+    match kind {
+        ProceduralAssetKind::VillageHouse
+        | ProceduralAssetKind::VillageWell
+        | ProceduralAssetKind::SheepPenRail
+        | ProceduralAssetKind::MarketStall
+        | ProceduralAssetKind::VillageShore
+        | ProceduralAssetKind::PathStone
+        | ProceduralAssetKind::MistRiver
+        | ProceduralAssetKind::HeadlandMarker => AssetFoundationClass::EnvironmentStructure,
+        ProceduralAssetKind::Sheep
+        | ProceduralAssetKind::Shepherd
+        | ProceduralAssetKind::Merchant
+        | ProceduralAssetKind::Bird
+        | ProceduralAssetKind::Fish
+        | ProceduralAssetKind::FortuneTeller => AssetFoundationClass::CharacterActor,
+        ProceduralAssetKind::DesertPyramid
+        | ProceduralAssetKind::DesertOasis
+        | ProceduralAssetKind::PyramidRuinWall
+        | ProceduralAssetKind::DesertRelic => AssetFoundationClass::LandmarkHero,
+    }
+}
+
+pub fn preferred_scene_path(kind: ProceduralAssetKind) -> Option<&'static str> {
+    match kind {
+        ProceduralAssetKind::VillageHouse => Some("art/foundation/village/house.glb#Scene0"),
+        ProceduralAssetKind::VillageWell => Some("art/foundation/village/well.glb#Scene0"),
+        ProceduralAssetKind::SheepPenRail => Some("art/foundation/village/sheep_pen.glb#Scene0"),
+        ProceduralAssetKind::MarketStall => Some("art/foundation/village/market_stall.glb#Scene0"),
+        ProceduralAssetKind::VillageShore => Some("art/foundation/village/shoreline.glb#Scene0"),
+        ProceduralAssetKind::PathStone => Some("art/foundation/village/path_cluster.glb#Scene0"),
+        ProceduralAssetKind::Sheep => Some("art/foundation/characters/sheep.glb#Scene0"),
+        ProceduralAssetKind::Shepherd => Some("art/foundation/characters/shepherd.glb#Scene0"),
+        ProceduralAssetKind::Merchant => Some("art/foundation/characters/merchant.glb#Scene0"),
+        ProceduralAssetKind::Bird => Some("art/foundation/characters/bird_flock.glb#Scene0"),
+        ProceduralAssetKind::Fish => Some("art/foundation/characters/fish_school.glb#Scene0"),
+        ProceduralAssetKind::FortuneTeller => {
+            Some("art/foundation/characters/fortune_teller.glb#Scene0")
+        }
+        ProceduralAssetKind::DesertPyramid => Some("art/foundation/landmarks/pyramid.glb#Scene0"),
+        ProceduralAssetKind::DesertOasis => Some("art/foundation/landmarks/oasis.glb#Scene0"),
+        ProceduralAssetKind::PyramidRuinWall => {
+            Some("art/foundation/landmarks/ruin_wall.glb#Scene0")
+        }
+        ProceduralAssetKind::DesertRelic => Some("art/foundation/landmarks/relic.glb#Scene0"),
+        ProceduralAssetKind::MistRiver => Some("art/foundation/boundaries/mist_river.glb#Scene0"),
+        ProceduralAssetKind::HeadlandMarker => {
+            Some("art/foundation/boundaries/headland_marker.glb#Scene0")
+        }
+    }
+}
+
+pub fn default_placeholder_enabled(config: &AssetConfig, kind: ProceduralAssetKind) -> bool {
+    if !config.foundation_proxy_mode {
+        return true;
+    }
+    match asset_foundation_class(kind) {
+        AssetFoundationClass::CharacterActor => config.animate_placeholder_characters,
+        AssetFoundationClass::EnvironmentStructure | AssetFoundationClass::EnvironmentAccent => {
+            config.animate_placeholder_ambience
+        }
+        AssetFoundationClass::LandmarkHero => true,
+    }
+}
+
+fn asset_presentation_anchor(
+    kind: ProceduralAssetKind,
+    placeholder_enabled: bool,
+) -> AssetPresentationAnchor {
+    AssetPresentationAnchor {
+        kind,
+        class: asset_foundation_class(kind),
+        placeholder_enabled,
+        preferred_scene_path: preferred_scene_path(kind).map(str::to_string),
+    }
 }
 
 pub fn choose_lod(spec: &ProceduralAssetSpec, distance: f32) -> ProceduralAssetLod {

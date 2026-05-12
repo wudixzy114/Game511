@@ -7,8 +7,9 @@ use crate::{
     },
     game::{
         assets::{
-            ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod,
-            ProceduralAssetMaterials, ProceduralSpawnRequest, spawn_procedural_asset_entity,
+            AssetPresentationAnchor, ProceduralAnimationRole, ProceduralAssetKind,
+            ProceduralAssetLod, ProceduralAssetMaterials, ProceduralSpawnRequest,
+            spawn_procedural_asset_entity,
         },
         flow::{AppScreen, InGameState},
         intent::{IntentKind, IntentState, PerceptionState},
@@ -600,7 +601,9 @@ fn animate_ecology_entities(
             }
         }
     }
-    animate_ecology_parts(time.elapsed_secs(), &ecology, &mut part_query);
+    if config.assets.animate_placeholder_characters {
+        animate_ecology_parts(time.elapsed_secs(), &ecology, &mut part_query);
+    }
 }
 
 fn animate_ecology_parts(
@@ -733,6 +736,7 @@ fn spawn_ecology_visuals(
             commands,
             meshes,
             materials,
+            &config.assets,
             ProceduralSpawnRequest::new(
                 ProceduralAssetKind::Sheep,
                 id,
@@ -755,6 +759,7 @@ fn spawn_ecology_visuals(
             commands,
             meshes,
             materials,
+            &config.assets,
             ProceduralSpawnRequest::new(
                 ProceduralAssetKind::Bird,
                 id,
@@ -777,6 +782,7 @@ fn spawn_ecology_visuals(
             commands,
             meshes,
             materials,
+            &config.assets,
             ProceduralSpawnRequest::new(
                 ProceduralAssetKind::Fish,
                 id,
@@ -802,6 +808,7 @@ fn spawn_ecology_visuals(
             commands,
             meshes,
             materials,
+            &config.assets,
             ProceduralSpawnRequest::new(
                 ProceduralAssetKind::FortuneTeller,
                 npc.id,
@@ -824,6 +831,12 @@ fn spawn_ecology_visuals(
 
 fn tag_ecology_actor_parts(commands: &mut Commands, root: Entity, actor_id: u64) {
     commands.queue(move |world: &mut World| {
+        let placeholder_enabled = world
+            .get::<AssetPresentationAnchor>(root)
+            .is_some_and(|anchor| anchor.placeholder_enabled);
+        if !placeholder_enabled {
+            return;
+        }
         let Some(children) = world
             .get::<Children>(root)
             .map(|children| children.iter().collect::<Vec<_>>())

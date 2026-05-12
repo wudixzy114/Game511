@@ -122,6 +122,9 @@ pub struct AssetConfig {
     pub warm_light_intensity: f32,
     pub water_alpha: f32,
     pub shadow_alpha: f32,
+    pub foundation_proxy_mode: bool,
+    pub animate_placeholder_characters: bool,
+    pub animate_placeholder_ambience: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -270,6 +273,9 @@ color_saturation = 1.0
 warm_light_intensity = 1.0
 water_alpha = 0.64
 shadow_alpha = 0.58
+foundation_proxy_mode = true
+animate_placeholder_characters = false
+animate_placeholder_ambience = false
 
 [desert]
 dune_height = 3.2
@@ -339,6 +345,9 @@ frame_time_budget_ms = 6.9
         assert_eq!(config.assets.warm_light_intensity, 1.0);
         assert_eq!(config.assets.water_alpha, 0.64);
         assert_eq!(config.assets.shadow_alpha, 0.58);
+        assert!(config.assets.foundation_proxy_mode);
+        assert!(!config.assets.animate_placeholder_characters);
+        assert!(!config.assets.animate_placeholder_ambience);
         assert_eq!(config.desert.dune_height, 3.2);
         assert_eq!(config.environment.day_length_seconds, 180.0);
         assert_eq!(config.environment.wander_radius, 4.5);

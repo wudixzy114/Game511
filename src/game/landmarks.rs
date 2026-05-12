@@ -121,6 +121,7 @@ fn initialize_landmarks(
     world_map: Option<Res<WorldMap>>,
     regions: Option<Res<RegionGraphState>>,
     existing: Option<Res<LandmarkState>>,
+    config: Res<crate::core::config::AppConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<ProceduralAssetMaterials>,
 ) {
@@ -132,7 +133,13 @@ fn initialize_landmarks(
     };
     let landmarks = build_landmarks(&world_map, &regions);
     for landmark in &landmarks {
-        spawn_landmark_visual(&mut commands, &mut meshes, &materials, landmark);
+        spawn_landmark_visual(
+            &mut commands,
+            &mut meshes,
+            &materials,
+            &config.assets,
+            landmark,
+        );
     }
 
     let pyramid = landmarks
@@ -296,6 +303,7 @@ fn spawn_landmark_visual(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     landmark: &Landmark,
 ) {
     match landmark.kind {
@@ -304,6 +312,7 @@ fn spawn_landmark_visual(
                 commands,
                 meshes,
                 materials,
+                asset_config,
                 ProceduralSpawnRequest::new(
                     ProceduralAssetKind::DesertPyramid,
                     landmark.id,
@@ -324,6 +333,7 @@ fn spawn_landmark_visual(
                 commands,
                 meshes,
                 materials,
+                asset_config,
                 ProceduralSpawnRequest::new(
                     ProceduralAssetKind::DesertOasis,
                     landmark.id,
@@ -347,6 +357,7 @@ fn spawn_landmark_visual(
                 commands,
                 meshes,
                 materials,
+                asset_config,
                 ProceduralSpawnRequest::new(
                     ProceduralAssetKind::DesertRelic,
                     landmark.id,
@@ -379,6 +390,7 @@ fn spawn_landmark_visual(
                     commands,
                     meshes,
                     materials,
+                    asset_config,
                     ProceduralSpawnRequest::new(
                         ProceduralAssetKind::PyramidRuinWall,
                         landmark.id.wrapping_add(index as u64),
@@ -422,6 +434,7 @@ fn spawn_landmark_visual(
                 commands,
                 meshes,
                 materials,
+                asset_config,
                 ProceduralSpawnRequest::new(
                     ProceduralAssetKind::MistRiver,
                     landmark.id,
@@ -444,6 +457,7 @@ fn spawn_landmark_visual(
                 commands,
                 meshes,
                 materials,
+                asset_config,
                 ProceduralSpawnRequest::new(
                     ProceduralAssetKind::HeadlandMarker,
                     landmark.id,

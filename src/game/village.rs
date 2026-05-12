@@ -2,8 +2,9 @@ use bevy::prelude::*;
 
 use crate::game::{
     assets::{
-        ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials,
-        ProceduralSpawnRequest, spawn_procedural_asset, spawn_procedural_asset_entity,
+        AssetPresentationAnchor, ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod,
+        ProceduralAssetMaterials, ProceduralSpawnRequest, spawn_procedural_asset,
+        spawn_procedural_asset_entity,
     },
     flow::{AppScreen, InGameState},
     intent::{IntentState, apply_village_dialogue_intent},
@@ -181,6 +182,7 @@ fn initialize_village_session(
     world_map: Option<Res<WorldMap>>,
     spots: Option<Res<WorldShowcaseSpots>>,
     village: Option<ResMut<VillageState>>,
+    config: Res<crate::core::config::AppConfig>,
     mut queries: VillageInitQueries<'_, '_>,
     mut assets: VillageInitAssets<'_>,
 ) {
@@ -200,8 +202,22 @@ fn initialize_village_session(
 
     let origin = choose_village_origin(&world_map, spots.meadow.position);
     let layout = build_layout_internal(&world_map, origin, VillageLayoutConfig::default());
-    spawn_village_visuals(&mut commands, &mut assets.0, &assets.1, &layout, &world_map);
-    spawn_village_actors(&mut commands, &mut assets.0, &assets.1, &layout, &world_map);
+    spawn_village_visuals(
+        &mut commands,
+        &mut assets.0,
+        &assets.1,
+        &config.assets,
+        &layout,
+        &world_map,
+    );
+    spawn_village_actors(
+        &mut commands,
+        &mut assets.0,
+        &assets.1,
+        &config.assets,
+        &layout,
+        &world_map,
+    );
 
     tracing::info!(
         target: "dao_game::village::generation",
@@ -424,6 +440,7 @@ fn spawn_village_visuals(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     layout: &VillageLayout,
     world_map: &WorldMap,
 ) {
@@ -438,16 +455,24 @@ fn spawn_village_visuals(
     commands.entity(root).with_children(|parent| {
         for (index, house) in layout.houses.iter().enumerate() {
             let local = *house - layout.origin;
-            spawn_house(parent, meshes, materials, local, index);
+            spawn_house(parent, meshes, materials, asset_config, local, index);
         }
         for area in &layout.areas {
             let local = area.position - layout.origin;
             match area.kind {
-                VillageAreaKind::Well => spawn_well(parent, meshes, materials, local),
-                VillageAreaKind::SheepPen => spawn_sheep_pen(parent, meshes, materials, local),
-                VillageAreaKind::Market => spawn_market(parent, meshes, materials, local),
-                VillageAreaKind::Shore => spawn_shore(parent, meshes, materials, local, world_map),
-                VillageAreaKind::OuterPath => spawn_path_marker(parent, meshes, materials, local),
+                VillageAreaKind::Well => spawn_well(parent, meshes, materials, asset_config, local),
+                VillageAreaKind::SheepPen => {
+                    spawn_sheep_pen(parent, meshes, materials, asset_config, local)
+                }
+                VillageAreaKind::Market => {
+                    spawn_market(parent, meshes, materials, asset_config, local)
+                }
+                VillageAreaKind::Shore => {
+                    spawn_shore(parent, meshes, materials, asset_config, local, world_map)
+                }
+                VillageAreaKind::OuterPath => {
+                    spawn_path_marker(parent, meshes, materials, asset_config, local)
+                }
                 VillageAreaKind::Houses => {}
             }
         }
@@ -459,6 +484,7 @@ fn spawn_house(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     position: Vec3,
     index: usize,
 ) {
@@ -467,6 +493,7 @@ fn spawn_house(
         parent,
         meshes,
         materials,
+        asset_config,
         ProceduralSpawnRequest::new(
             ProceduralAssetKind::VillageHouse,
             index as u64,
@@ -481,12 +508,14 @@ fn spawn_well(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     position: Vec3,
 ) {
     spawn_procedural_asset(
         parent,
         meshes,
         materials,
+        asset_config,
         ProceduralSpawnRequest::new(
             ProceduralAssetKind::VillageWell,
             1,
@@ -501,6 +530,7 @@ fn spawn_sheep_pen(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     position: Vec3,
 ) {
     for side in 0..4 {
@@ -520,6 +550,7 @@ fn spawn_sheep_pen(
             parent,
             meshes,
             materials,
+            asset_config,
             ProceduralSpawnRequest::new(
                 ProceduralAssetKind::SheepPenRail,
                 side as u64,
@@ -535,12 +566,14 @@ fn spawn_market(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     position: Vec3,
 ) {
     spawn_procedural_asset(
         parent,
         meshes,
         materials,
+        asset_config,
         ProceduralSpawnRequest::new(
             ProceduralAssetKind::MarketStall,
             1,
@@ -555,6 +588,7 @@ fn spawn_shore(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     position: Vec3,
     _world_map: &WorldMap,
 ) {
@@ -562,6 +596,7 @@ fn spawn_shore(
         parent,
         meshes,
         materials,
+        asset_config,
         ProceduralSpawnRequest::new(
             ProceduralAssetKind::VillageShore,
             1,
@@ -576,6 +611,7 @@ fn spawn_path_marker(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     position: Vec3,
 ) {
     for index in 0..5 {
@@ -583,6 +619,7 @@ fn spawn_path_marker(
             parent,
             meshes,
             materials,
+            asset_config,
             ProceduralSpawnRequest::new(
                 ProceduralAssetKind::PathStone,
                 index as u64,
@@ -600,6 +637,7 @@ fn spawn_village_actors(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
     layout: &VillageLayout,
     world_map: &WorldMap,
 ) {
@@ -615,6 +653,7 @@ fn spawn_village_actors(
                     commands,
                     meshes,
                     materials,
+                    asset_config,
                     ProceduralSpawnRequest::new(
                         ProceduralAssetKind::Sheep,
                         actor.id,
@@ -642,6 +681,7 @@ fn spawn_village_actors(
                     commands,
                     meshes,
                     materials,
+                    asset_config,
                     ProceduralSpawnRequest::new(
                         asset_kind,
                         actor.id,
@@ -665,6 +705,12 @@ fn spawn_village_actors(
 
 fn tag_village_actor_parts(commands: &mut Commands, root: Entity, actor_id: u64) {
     commands.queue(move |world: &mut World| {
+        let placeholder_enabled = world
+            .get::<AssetPresentationAnchor>(root)
+            .is_some_and(|anchor| anchor.placeholder_enabled);
+        if !placeholder_enabled {
+            return;
+        }
         let Some(children) = world
             .get::<Children>(root)
             .map(|children| children.iter().collect::<Vec<_>>())
@@ -698,6 +744,12 @@ fn tag_village_ambient_parts(commands: &mut Commands, root: Entity) {
             return;
         };
         for asset_root in children {
+            let placeholder_enabled = world
+                .get::<AssetPresentationAnchor>(asset_root)
+                .is_some_and(|anchor| anchor.placeholder_enabled);
+            if !placeholder_enabled {
+                continue;
+            }
             let Some(part_children) = world
                 .get::<Children>(asset_root)
                 .map(|children| children.iter().collect::<Vec<_>>())
@@ -761,9 +813,14 @@ fn update_village_actor_behavior(
 
 fn animate_village_asset_parts(
     time: Res<Time>,
+    config: Res<crate::core::config::AppConfig>,
     actor_query: Query<&VillageActor>,
     mut part_query: Query<(&VillageAnimatedPart, &mut Transform)>,
 ) {
+    if !config.assets.animate_placeholder_characters && !config.assets.animate_placeholder_ambience
+    {
+        return;
+    }
     let elapsed = time.elapsed_secs();
     for (part, mut transform) in &mut part_query {
         let actor = part
@@ -1232,6 +1289,9 @@ mod tests {
                 warm_light_intensity: 1.0,
                 water_alpha: 0.64,
                 shadow_alpha: 0.58,
+                foundation_proxy_mode: true,
+                animate_placeholder_characters: false,
+                animate_placeholder_ambience: false,
             },
             desert: DesertConfig {
                 dune_height: 3.2,

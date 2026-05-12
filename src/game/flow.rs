@@ -181,6 +181,9 @@ mod tests {
                 warm_light_intensity: 1.0,
                 water_alpha: 0.64,
                 shadow_alpha: 0.58,
+                foundation_proxy_mode: true,
+                animate_placeholder_characters: false,
+                animate_placeholder_ambience: false,
             },
             desert: DesertConfig {
                 dune_height: 3.2,
