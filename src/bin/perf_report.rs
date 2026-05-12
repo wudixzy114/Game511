@@ -1277,7 +1277,7 @@ fn sorted_log_paths(log_dir: &Path) -> Result<Vec<PathBuf>, String> {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if file_name == DEFAULT_PERF_LOG_NAME || file_name.starts_with("performance.log.") {
+        if file_name == DEFAULT_PERF_LOG_NAME || file_name == "performance.log.1" {
             paths.push(path);
         }
     }

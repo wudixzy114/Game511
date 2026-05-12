@@ -28,6 +28,12 @@ pub enum DaoError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to rotate log file {path}: {source}")]
+    RotateLogFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("logger initialization failed: {0}")]
     LoggerInit(#[from] tracing::subscriber::SetGlobalDefaultError),
 }

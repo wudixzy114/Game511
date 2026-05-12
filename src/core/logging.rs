@@ -29,6 +29,8 @@ impl std::io::Write for SharedFileWriter {
 
 static LOG_GUARDS: OnceLock<Vec<tracing_appender::non_blocking::WorkerGuard>> = OnceLock::new();
 
+const RETAINED_ROTATED_LOGS: usize = 1;
+
 pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
     let log_dir = &config.log_directory;
     fs::create_dir_all(log_dir).map_err(|source| DaoError::CreateDirectory {
@@ -36,14 +38,19 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
         source,
     })?;
 
-    let app_log = rolling_path(log_dir, "application.log");
-    let error_log = rolling_path(log_dir, "error.log");
-    let perf_log = rolling_path(log_dir, &config.performance_log_name);
+    let app_log = active_log_path(log_dir, "application.log");
+    let error_log = active_log_path(log_dir, "error.log");
+    let perf_log = active_log_path(log_dir, &config.performance_log_name);
 
-    let appender = tracing_appender::rolling::daily(log_dir, "application.log");
+    rotate_log_file(&app_log, RETAINED_ROTATED_LOGS)?;
+    rotate_log_file(&error_log, RETAINED_ROTATED_LOGS)?;
+    rotate_log_file(&perf_log, RETAINED_ROTATED_LOGS)?;
+
+    let app_file = create_log_file(&app_log)?;
     let error_file = File::options()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&error_log)
         .map_err(|source| DaoError::CreateLogFile {
             path: error_log.clone(),
@@ -51,14 +58,17 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
         })?;
     let perf_file = File::options()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&perf_log)
         .map_err(|source| DaoError::CreateLogFile {
             path: perf_log.clone(),
             source,
         })?;
 
-    let (app_writer, app_guard) = tracing_appender::non_blocking(appender);
+    let (app_writer, app_guard) = tracing_appender::non_blocking(SharedFileWriter {
+        file: Arc::new(app_file),
+    });
     let (error_writer, error_guard) = tracing_appender::non_blocking(SharedFileWriter {
         file: Arc::new(error_file),
     });
@@ -70,10 +80,12 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
         .unwrap_or_else(|_| EnvFilter::new("info,dao_game=debug,wgpu=warn,naga=warn"));
 
     let app_layer = fmt::layer()
+        .json()
         .with_writer(app_writer)
         .with_ansi(false)
         .with_filter(env_filter);
     let error_layer = fmt::layer()
+        .json()
         .with_writer(error_writer)
         .with_ansi(false)
         .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
@@ -101,8 +113,69 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
     Ok(())
 }
 
-fn rolling_path(directory: &Path, file_name: &str) -> PathBuf {
+fn active_log_path(directory: &Path, file_name: &str) -> PathBuf {
     directory.join(file_name)
+}
+
+fn rotated_log_path(path: &Path, generation: usize) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("log");
+    path.with_file_name(format!("{file_name}.{generation}"))
+}
+
+fn rotate_log_file(path: &Path, retained_rotated_logs: usize) -> Result<(), DaoError> {
+    if retained_rotated_logs == 0 {
+        if path.exists() {
+            fs::remove_file(path).map_err(|source| DaoError::RotateLogFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        }
+        return Ok(());
+    }
+
+    let oldest = rotated_log_path(path, retained_rotated_logs);
+    if oldest.exists() {
+        fs::remove_file(&oldest).map_err(|source| DaoError::RotateLogFile {
+            path: oldest,
+            source,
+        })?;
+    }
+
+    for generation in (1..retained_rotated_logs).rev() {
+        let source_path = rotated_log_path(path, generation);
+        if source_path.exists() {
+            let target_path = rotated_log_path(path, generation + 1);
+            fs::rename(&source_path, &target_path).map_err(|source| DaoError::RotateLogFile {
+                path: source_path,
+                source,
+            })?;
+        }
+    }
+
+    if path.exists() {
+        let target_path = rotated_log_path(path, 1);
+        fs::rename(path, &target_path).map_err(|source| DaoError::RotateLogFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    Ok(())
+}
+
+fn create_log_file(path: &Path) -> Result<File, DaoError> {
+    File::options()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|source| DaoError::CreateLogFile {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 #[cfg(test)]
@@ -114,12 +187,38 @@ mod tests {
         WorldConfig,
     };
 
-    use super::rolling_path;
+    use std::fs;
+
+    use super::{active_log_path, rotate_log_file, rotated_log_path};
 
     #[test]
-    fn rolling_path_joins_directory_and_filename() {
-        let path = rolling_path(&PathBuf::from("logs"), "application.log");
+    fn active_log_path_joins_directory_and_filename() {
+        let path = active_log_path(&PathBuf::from("logs"), "application.log");
         assert_eq!(path, PathBuf::from("logs").join("application.log"));
+    }
+
+    #[test]
+    fn rotated_log_path_appends_generation() {
+        let path = rotated_log_path(&PathBuf::from("logs").join("application.log"), 1);
+        assert_eq!(path, PathBuf::from("logs").join("application.log.1"));
+    }
+
+    #[test]
+    fn rotate_log_file_keeps_current_and_previous_generation() {
+        let temp_dir = tempfile::tempdir().expect("tempdir should exist");
+        let path = temp_dir.path().join("application.log");
+        fs::write(&path, "first").expect("first log should be written");
+
+        rotate_log_file(&path, 1).expect("first rotate should work");
+        fs::write(&path, "second").expect("second log should be written");
+        rotate_log_file(&path, 1).expect("second rotate should work");
+
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_to_string(rotated_log_path(&path, 1)).expect("rotated log should exist"),
+            "second"
+        );
+        assert!(!rotated_log_path(&path, 2).exists());
     }
 
     #[test]

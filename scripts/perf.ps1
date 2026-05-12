@@ -20,12 +20,7 @@ function Ensure-LogDir {
     }
 }
 
-function New-PerfSnapshotName([string]$Prefix) {
-    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    Join-Path $LogDir "$Prefix-$Mode-$timestamp.log"
-}
-
-function Run-GameCapture([string]$SnapshotPath) {
+function Run-GameCapture {
     Ensure-LogDir
     $source = Join-Path $LogDir "performance.log"
     $env:DAO_AUTO_EXIT_SECONDS = "$Seconds"
@@ -37,8 +32,6 @@ function Run-GameCapture([string]$SnapshotPath) {
     if (-not (Test-Path $source)) {
         throw "Performance log was not created: $source"
     }
-    Copy-Item $source $SnapshotPath
-    Write-Host "Performance snapshot: $SnapshotPath"
 }
 
 function Invoke-PerfReport([string[]]$Args) {
@@ -54,27 +47,20 @@ Ensure-LogDir
 switch ($Action) {
     "auto" {
         $source = Join-Path $LogDir "performance.log"
-        $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        $autoBaseline = Join-Path $LogDir "performance-baseline-before-$timestamp.log"
-        $autoCandidate = Join-Path $LogDir "performance-$Mode-$timestamp.log"
+        $baseline = Join-Path $LogDir "performance.log.1"
 
-        if (Test-Path $source) {
-            Copy-Item $source $autoBaseline
-        }
+        Run-GameCapture
 
-        Run-GameCapture $autoCandidate
-
-        if (Test-Path $autoBaseline) {
-            cargo run --bin perf_report -- html $Output $autoBaseline $autoCandidate
+        if (Test-Path $baseline) {
+            cargo run --bin perf_report -- html $Output $baseline $source
         } else {
-            cargo run --bin perf_report -- html $Output $autoCandidate
+            cargo run --bin perf_report -- html $Output $source
         }
         Write-Host "HTML report: $Output"
     }
     "capture" {
-        $snapshot = if ($Candidate) { $Candidate } else { New-PerfSnapshotName "performance" }
-        Run-GameCapture $snapshot
-        Invoke-PerfReport @($snapshot)
+        Run-GameCapture
+        Invoke-PerfReport @((Join-Path $LogDir "performance.log"))
     }
     "report" {
         $target = if ($Log) { $Log } else { Join-Path $LogDir "performance.log" }
@@ -84,7 +70,12 @@ switch ($Action) {
         if ($Baseline -and $Candidate) {
             Invoke-PerfReport @($Baseline, $Candidate)
         } else {
-            Invoke-PerfReport @("compare-latest", $LogDir)
+            $baseline = Join-Path $LogDir "performance.log.1"
+            $candidate = Join-Path $LogDir "performance.log"
+            if (-not (Test-Path $baseline)) {
+                throw "No previous performance log found: $baseline"
+            }
+            Invoke-PerfReport @($baseline, $candidate)
         }
     }
     "html" {
@@ -93,7 +84,13 @@ switch ($Action) {
         } elseif ($Log) {
             cargo run --bin perf_report -- html $Output $Log
         } else {
-            cargo run --bin perf_report -- html-latest $Output $LogDir
+            $baseline = Join-Path $LogDir "performance.log.1"
+            $candidate = Join-Path $LogDir "performance.log"
+            if (Test-Path $baseline) {
+                cargo run --bin perf_report -- html $Output $baseline $candidate
+            } else {
+                cargo run --bin perf_report -- html $Output $candidate
+            }
         }
         Write-Host "HTML report: $Output"
     }
