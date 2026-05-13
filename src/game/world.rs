@@ -728,7 +728,7 @@ impl Default for TerrainCollisionScheduler {
 
 type TerrainStreamResources<'w> = (
     Res<'w, AppConfig>,
-    ResMut<'w, FramePerformance>,
+    Res<'w, FramePerformance>,
     Res<'w, SessionMode>,
     Res<'w, WorldMap>,
     Res<'w, TerrainRuntimeMaterial>,
@@ -1907,7 +1907,7 @@ fn apply_region_streaming_rebuild(
 fn update_visible_chunks(
     mut commands: Commands,
     config: (Res<WorldMap>, Res<TerrainLodConfig>),
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     mut visibility_state: ResMut<ChunkVisibilityState>,
     mut queue: ResMut<TerrainStreamingQueue>,
     queries: ChunkVisibilityQueries<'_, '_>,
@@ -1981,7 +1981,7 @@ fn stream_terrain_chunks(
     let (mut queue, mut cache, mut scheduler) = stream_state;
     let (
         config,
-        mut performance,
+        performance,
         _session_mode,
         world_map,
         terrain_material,
@@ -2127,7 +2127,7 @@ fn stream_terrain_chunks(
 
 fn update_terrain_impostor(
     config: Res<AppConfig>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     resources: TerrainImpostorResources<'_>,
@@ -2192,7 +2192,7 @@ fn update_terrain_impostor(
 #[derive(SystemParam)]
 struct CollisionProxyParams<'w, 's> {
     config: Res<'w, AppConfig>,
-    performance: ResMut<'w, FramePerformance>,
+    performance: Res<'w, FramePerformance>,
     world_map: Res<'w, WorldMap>,
     collision_config: Res<'w, TerrainCollisionConfig>,
     collision_proxy: ResMut<'w, TerrainCollisionProxy>,

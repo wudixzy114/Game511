@@ -450,7 +450,7 @@ fn select_journey_target(
     places: Option<Res<MeaningfulPlaces>>,
     director: Option<Res<DirectorState>>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let Some(mut journey) = journey else {
         return;
@@ -497,7 +497,7 @@ fn select_journey_target(
             );
         }
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Journey, started_at.elapsed());
     }
 }
@@ -506,7 +506,7 @@ fn advance_journey_session(
     resources: JourneySessionResources<'_>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let (time, signs, village, regions, ecology, journey, mut notebook) = resources;
     let Some(mut journey) = journey else {
@@ -565,7 +565,7 @@ fn advance_journey_session(
             let _ = record_notebook_entry(notebook.as_deref_mut(), record);
         }
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Journey, started_at.elapsed());
     }
 }

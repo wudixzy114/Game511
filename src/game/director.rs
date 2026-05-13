@@ -204,7 +204,7 @@ fn poll_director_task(
     director: Option<ResMut<DirectorState>>,
     task_state: Option<ResMut<DirectorTaskState>>,
     resources: DirectorValidationResources<'_>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
 ) {
     let started_at = std::time::Instant::now();
     let Some(mut director) = director else {
@@ -259,7 +259,7 @@ fn submit_director_task(
     task_state: Option<ResMut<DirectorTaskState>>,
     resources: DirectorInputResources<'_>,
     player_query: Query<&Transform, With<WandererPrototype>>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
 ) {
     let started_at = std::time::Instant::now();
     let Some(mut director) = director else {

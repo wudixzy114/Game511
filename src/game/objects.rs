@@ -826,7 +826,7 @@ struct ObjectGallerySpawnParams<'w, 's> {
     codex_state: ResMut<'w, AssetCodexState>,
     meshes: ResMut<'w, Assets<Mesh>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
-    performance: ResMut<'w, FramePerformance>,
+    performance: Res<'w, FramePerformance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1468,7 +1468,7 @@ fn animate_procedural_tree_wind(
     time: Res<Time>,
     wind: Option<Res<WindField>>,
     mut animation: ResMut<ObjectWindAnimationState>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     mut query: Query<(&ProceduralTreeWindPart, &mut Transform)>,
 ) {
     let started_at = Instant::now();
@@ -1591,7 +1591,7 @@ fn process_object_gallery_export_queue(
     material_gallery_state: Option<Res<MaterialGalleryState>>,
     camera_query: Query<&Transform, With<WorldCamera>>,
     objects: Query<&ProceduralObjectInstance>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
 ) {
     let started_at = Instant::now();
     match state.export_queue.pending_stage.clone() {

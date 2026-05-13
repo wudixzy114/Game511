@@ -311,7 +311,7 @@ fn update_ecology_state(
     config: Res<AppConfig>,
     resources: EcologyStateResources<'_>,
     ecology: Option<ResMut<EcologyState>>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
 ) {
     let started_at = std::time::Instant::now();
     let Some(mut ecology) = ecology else {

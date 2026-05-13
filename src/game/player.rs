@@ -363,7 +363,7 @@ fn apply_mouse_look(
 
 fn move_player_body(
     resources: PlayerMoveResources<'_>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     state: Option<ResMut<FirstPersonState>>,
     bootstrap: Option<Res<FirstPersonBootstrap>>,
     regions: Option<Res<RegionGraphState>>,

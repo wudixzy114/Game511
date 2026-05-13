@@ -285,11 +285,11 @@ type EnvironmentSnapshotResources<'w> = (
     Option<Res<'w, JourneyState>>,
 );
 
-fn begin_environment_phase(mut performance: ResMut<FramePerformance>) {
+fn begin_environment_phase(performance: Res<FramePerformance>) {
     performance.begin_phase(PerformancePhase::Environment);
 }
 
-fn end_environment_phase(mut performance: ResMut<FramePerformance>) {
+fn end_environment_phase(performance: Res<FramePerformance>) {
     let _ = performance.end_phase(PerformancePhase::Environment);
 }
 

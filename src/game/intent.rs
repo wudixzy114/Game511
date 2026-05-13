@@ -441,7 +441,7 @@ fn sample_intent_from_world(
     journey: Option<Res<JourneyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let Some(mut intent) = intent else {
         return;
@@ -467,7 +467,7 @@ fn sample_intent_from_world(
             "dominant intent changed"
         );
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Intent, started_at.elapsed());
     }
 }
@@ -580,7 +580,7 @@ fn handle_perception_input(
     signs: Option<Res<SignState>>,
     journey: Option<Res<JourneyState>>,
     mut notebook: Option<ResMut<NotebookState>>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let Some(mut perception) = perception else {
         return;
@@ -608,7 +608,7 @@ fn handle_perception_input(
     );
 
     let Some(result) = result else {
-        if let Some(mut performance) = performance {
+        if let Some(performance) = performance {
             performance.record_phase_duration(PerformancePhase::Intent, started_at.elapsed());
         }
         return;
@@ -651,7 +651,7 @@ fn handle_perception_input(
             },
         );
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Intent, started_at.elapsed());
     }
 }

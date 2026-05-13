@@ -679,7 +679,7 @@ fn build_region_milestones(
 fn update_transition_gate_state(
     resources: GateUpdateResources<'_>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let (keys, graph, journey, intent, perception, mut notebook, time) = resources;
     let Some(mut graph) = graph else {
@@ -737,7 +737,7 @@ fn update_transition_gate_state(
             );
             graph.crossing = None;
         }
-        if let Some(mut performance) = performance {
+        if let Some(performance) = performance {
             performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
         }
         return;
@@ -902,7 +902,7 @@ fn update_transition_gate_state(
             );
         }
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
     }
 }
@@ -1252,7 +1252,7 @@ fn update_transition_gate_visuals(
         (&TransitionGateVisual, &mut Visibility, &mut Transform),
         Without<WandererPrototype>,
     >,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let Some(graph) = graph else {
         return;
@@ -1328,7 +1328,7 @@ fn update_transition_gate_visuals(
             transform.translation = visual.base_translation;
         }
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
     }
 }
@@ -1336,7 +1336,7 @@ fn update_transition_gate_visuals(
 fn update_region_outpost_visuals(
     graph: Option<Res<RegionGraphState>>,
     mut query: Query<(&RegionOutpostVisual, &mut Visibility), Without<WandererPrototype>>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let Some(graph) = graph else {
         return;
@@ -1366,7 +1366,7 @@ fn update_region_outpost_visuals(
             Visibility::Hidden
         };
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
     }
 }

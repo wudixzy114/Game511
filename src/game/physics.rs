@@ -428,7 +428,7 @@ fn sync_physics_debug_config(debug: Res<PhysicsDebugState>, mut store: ResMut<Gi
 fn ensure_player_body(
     config: Res<AppConfig>,
     mut telemetry: ResMut<PhysicsTelemetry>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     mut query: PlayerPhysicsBodyQuery<'_, '_>,
     mut commands: Commands,
 ) {
@@ -460,7 +460,7 @@ fn ensure_player_body(
 fn ensure_procedural_asset_colliders(
     mut commands: Commands,
     mut telemetry: ResMut<PhysicsTelemetry>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     query: ProceduralAssetPhysicsQuery<'_, '_>,
 ) {
     let started_at = Instant::now();
@@ -531,7 +531,7 @@ fn ensure_procedural_asset_colliders(
 fn ensure_village_collider_entities(
     mut commands: Commands,
     mut telemetry: ResMut<PhysicsTelemetry>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     colliders: Query<&VillageCollider>,
     existing: Query<Entity, With<DaoPhysicsVillageCollider>>,
 ) {
@@ -703,7 +703,7 @@ fn update_player_forward_query(
     spatial_query: SpatialQuery,
     debug: Res<PhysicsDebugState>,
     mut telemetry: ResMut<PhysicsTelemetry>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     mut gizmos: Gizmos,
     player_query: Query<(Entity, &Transform), With<DaoPhysicsPlayer>>,
     state: Option<Res<FirstPersonState>>,
@@ -747,7 +747,7 @@ fn record_physics_collision_events(
     mut starts: MessageReader<CollisionStart>,
     mut ends: MessageReader<CollisionEnd>,
     mut telemetry: ResMut<PhysicsTelemetry>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
 ) {
     let started_at = Instant::now();
     let start_count = starts.read().count() as u64;

@@ -370,7 +370,7 @@ struct MaterialGallerySpawnParams<'w, 's> {
     state: ResMut<'w, MaterialGalleryState>,
     export_state: ResMut<'w, MaterialGalleryExportState>,
     camera_state: ResMut<'w, MaterialGalleryCameraState>,
-    performance: ResMut<'w, FramePerformance>,
+    performance: Res<'w, FramePerformance>,
     meshes: ResMut<'w, Assets<Mesh>>,
     images: ResMut<'w, Assets<Image>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,

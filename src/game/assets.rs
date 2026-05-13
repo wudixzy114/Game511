@@ -2032,7 +2032,7 @@ pub fn stable_asset_seed(seed: u64, salt: u64) -> u64 {
 fn report_procedural_asset_runtime_stats(
     mut stats: ResMut<ProceduralAssetRuntimeStats>,
     query: Query<&ProceduralAsset>,
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
 ) {
     let started_at = std::time::Instant::now();
     let asset_count = query.iter().count();

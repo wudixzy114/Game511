@@ -174,7 +174,7 @@ type SignUpdateResources<'w> = (
     Option<Res<'w, PerceptionState>>,
     Option<Res<'w, DirectorState>>,
     Res<'w, WandererPresence>,
-    ResMut<'w, FramePerformance>,
+    Res<'w, FramePerformance>,
 );
 
 fn reset_sign_resources(mut signs: ResMut<SignState>, mut presence: ResMut<WandererPresence>) {
@@ -230,7 +230,7 @@ fn update_resonance(resources: SignUpdateResources<'_>, mut signs: ResMut<SignSt
         perception,
         director,
         presence,
-        mut performance,
+        performance,
     ) = resources;
     let started_at = std::time::Instant::now();
     let Some(tile) = presence.tile else {

@@ -482,7 +482,7 @@ fn update_village_atmosphere(
     wind_field: Res<WindField>,
     journey: Option<Res<JourneyState>>,
     mut atmosphere: ResMut<VillageAtmosphere>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let started_at = Instant::now();
     let dream_afterglow = journey
@@ -582,7 +582,7 @@ fn update_village_atmosphere(
         );
     }
     *atmosphere = next;
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -1371,13 +1371,13 @@ fn spawn_village_actors(
 
 fn sync_village_collider_centers(
     mut query: Query<(&Transform, &mut VillageCollider)>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let started_at = Instant::now();
     for (transform, mut collider) in &mut query {
         collider.center = Vec2::new(transform.translation.x, transform.translation.z);
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -1485,7 +1485,7 @@ fn update_village_actor_behavior(
     ecology: Option<Res<EcologyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut actor_query: Query<(&VillageActor, &mut Transform), Without<WandererPrototype>>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let Some(world_map) = world_map else {
         return;
@@ -1524,7 +1524,7 @@ fn update_village_actor_behavior(
             }
         }
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -1534,7 +1534,7 @@ fn animate_village_asset_parts(
     config: Res<crate::core::config::AppConfig>,
     atmosphere: Res<VillageAtmosphere>,
     mut part_query: Query<(&VillageAnimatedPart, &mut Transform)>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     if !config.assets.animate_placeholder_characters && !config.assets.animate_placeholder_ambience
     {
@@ -1616,7 +1616,7 @@ fn animate_village_asset_parts(
             | ProceduralAnimationRole::FishTail => {}
         }
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -1650,7 +1650,7 @@ fn ensure_village_material_overrides(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
     query: VillageVisualMaterialQuery<'_, '_>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let started_at = Instant::now();
     for (entity, material, override_tag) in &query {
@@ -1674,7 +1674,7 @@ fn ensure_village_material_overrides(
             .entity(entity)
             .remove::<VillageMaterialOverridePending>();
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -1683,7 +1683,7 @@ fn update_village_visual_materials(
     atmosphere: Res<VillageAtmosphere>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query: VillageVisualRuntimeMaterialQuery<'_, '_>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     if !atmosphere.is_changed() {
         return;
@@ -1766,7 +1766,7 @@ fn update_village_visual_materials(
             }
         }
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -1914,7 +1914,7 @@ fn update_village_interaction(
     resources: VillageInteractionResources<'_>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
     actor_query: Query<(&VillageActor, &Transform), Without<WandererPrototype>>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let (time, keys, village, ecology, mut intent, mut notebook) = resources;
     let Some(mut village) = village else {
@@ -1998,7 +1998,7 @@ fn update_village_interaction(
             "village light interaction completed"
         );
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -2300,7 +2300,7 @@ fn update_herding_state(
     ecology: Option<ResMut<EcologyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut notebook: Option<ResMut<NotebookState>>,
-    performance: Option<ResMut<FramePerformance>>,
+    performance: Option<Res<FramePerformance>>,
 ) {
     let (Some(mut village), Some(mut ecology)) = (village, ecology) else {
         return;
@@ -2393,7 +2393,7 @@ fn update_herding_state(
         }
         HerdingPhase::GrazingAtPatch | HerdingPhase::NotStarted | HerdingPhase::Prompted => {}
     }
-    if let Some(mut performance) = performance {
+    if let Some(performance) = performance {
         performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
@@ -2665,7 +2665,7 @@ mod tests {
              wind_field: Res<WindField>,
              journey: Option<Res<JourneyState>>,
              atmosphere: ResMut<VillageAtmosphere>,
-             performance: Option<ResMut<FramePerformance>>| {
+             performance: Option<Res<FramePerformance>>| {
                 update_village_atmosphere(
                     environment,
                     wind_field,

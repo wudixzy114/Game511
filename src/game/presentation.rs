@@ -241,7 +241,7 @@ type PresentationInitResources<'w> = (
 type PresentationDriveResources<'w> = (
     Res<'w, Time>,
     Res<'w, AppConfig>,
-    ResMut<'w, FramePerformance>,
+    Res<'w, FramePerformance>,
     Res<'w, WorldMap>,
     Option<ResMut<'w, PresentationDirector>>,
     Option<ResMut<'w, WorldPresentationControl>>,
@@ -439,7 +439,7 @@ fn advance_presentation_director(
     let (
         time,
         config,
-        mut performance,
+        performance,
         world_map,
         director,
         control,

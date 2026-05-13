@@ -1077,7 +1077,7 @@ fn toggle_pause_with_escape(
 }
 
 fn update_hud_control_text(
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     session_mode: Res<SessionMode>,
     ui_mode: Res<UiModeState>,
     mut controls_query: Query<&mut Text, With<HudControlText>>,
@@ -1111,7 +1111,7 @@ fn update_hud_control_text(
 }
 
 fn update_hud_stats_text(
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     ui_mode: Res<UiModeState>,
     resources: HudResources<'_>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
@@ -1293,7 +1293,7 @@ fn update_hud_stats_text(
 }
 
 fn update_hud_omen_text(
-    mut performance: ResMut<FramePerformance>,
+    performance: Res<FramePerformance>,
     signs: Option<Res<SignState>>,
     journey: Option<Res<JourneyState>>,
     perception: Option<Res<PerceptionState>>,

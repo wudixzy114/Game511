@@ -42,7 +42,7 @@ type LandmarkUpdateResources<'w> = (
     Option<Res<'w, PerceptionState>>,
     Option<ResMut<'w, NotebookState>>,
     Res<'w, Time>,
-    ResMut<'w, FramePerformance>,
+    Res<'w, FramePerformance>,
 );
 
 #[derive(Debug, Resource, Clone, PartialEq)]
@@ -207,7 +207,7 @@ fn update_landmark_visibility(
     >,
 ) {
     let started_at = std::time::Instant::now();
-    let (state, journey, signs, perception, mut notebook, time, mut performance) = resources;
+    let (state, journey, signs, perception, mut notebook, time, performance) = resources;
     let Some(mut state) = state else {
         return;
     };
