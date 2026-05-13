@@ -28,6 +28,14 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "wayland",
     "zstd_rust",
 ] }
+avian3d = { version = "0.6.1", default-features = false, features = [
+    "3d",
+    "f32",
+    "parry-f32",
+    "debug-plugin",
+    "collider-from-mesh",
+    "parallel",
+] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 toml = "0.9.8"

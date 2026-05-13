@@ -28,14 +28,18 @@ impl Plugin for CorePlugin {
             app.insert_resource(AutoExit(duration));
             app.add_systems(Update, auto_exit_after_duration);
         }
-        app.add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: config.window_title.clone(),
-                present_mode: bevy::window::PresentMode::AutoVsync,
-                ..Default::default()
-            }),
-            ..Default::default()
-        }));
+        app.add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: config.window_title.clone(),
+                        present_mode: bevy::window::PresentMode::AutoVsync,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .disable::<bevy::log::LogPlugin>(),
+        );
         app.add_message::<performance::PerformanceAlert>();
         app.add_systems(Startup, performance::announce_performance_session_start);
         app.add_systems(

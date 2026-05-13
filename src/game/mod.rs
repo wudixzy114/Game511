@@ -6,7 +6,9 @@ pub mod flow;
 pub mod intent;
 pub mod journey;
 pub mod landmarks;
+pub mod materials;
 pub mod notebook;
+pub mod physics;
 pub mod places;
 pub mod player;
 pub mod presentation;
@@ -43,6 +45,8 @@ impl Plugin for GamePlugin {
         app.insert_resource(PendingSessionLaunch(auto_start_mode));
 
         app.add_plugins(assets::ProceduralAssetPlugin);
+        app.add_plugins(physics::DaoPhysicsPlugin);
+        app.add_plugins(materials::MaterialGalleryPlugin);
         app.add_plugins(ui::UiPlugin);
         app.add_plugins(world::WorldPlugin);
         app.add_plugins(notebook::NotebookPlugin);

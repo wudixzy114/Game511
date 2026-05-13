@@ -65,6 +65,7 @@ enum ButtonTone {
 enum UiButtonAction {
     StartExploration,
     StartPresentation,
+    StartMaterialGallery,
     Resume,
     Restart,
     ReturnToMenu,
@@ -160,7 +161,7 @@ struct NotebookTitleText;
 struct NotebookBodyText;
 
 #[derive(Resource)]
-struct UiFontHandle(Handle<Font>);
+pub(crate) struct UiFontHandle(pub(crate) Handle<Font>);
 
 impl FromWorld for UiFontHandle {
     fn from_world(world: &mut World) -> Self {
@@ -417,6 +418,14 @@ fn spawn_main_menu(
                                 "展示场景",
                                 "自动巡游现有环境与征兆系统",
                                 UiButtonAction::StartPresentation,
+                                ButtonTone::Secondary,
+                            );
+                            spawn_action_button(
+                                parent,
+                                &font,
+                                "材质陈列馆",
+                                "审查程序化材质族与光照预设",
+                                UiButtonAction::StartMaterialGallery,
                                 ButtonTone::Secondary,
                             );
                             spawn_action_button(
@@ -932,6 +941,11 @@ fn handle_button_actions(
                 *active_session_mode = SessionMode::Presentation;
                 next_screen.set(AppScreen::InGame);
             }
+            UiButtonAction::StartMaterialGallery => {
+                pending_launch.0 = None;
+                *active_session_mode = SessionMode::MaterialGallery;
+                next_screen.set(AppScreen::InGame);
+            }
             UiButtonAction::Resume => {
                 if let Some(next_in_game) = next_in_game.as_deref_mut() {
                     next_in_game.set(InGameState::Running);
@@ -953,6 +967,7 @@ fn handle_button_actions(
 }
 
 fn handle_ui_mode_input(
+    session_mode: Res<SessionMode>,
     keys: Res<ButtonInput<KeyCode>>,
     mut ui_mode: ResMut<UiModeState>,
     mut notebook: Option<ResMut<NotebookState>>,
@@ -962,6 +977,10 @@ fn handle_ui_mode_input(
             HudMode::Formal => HudMode::Development,
             HudMode::Development => HudMode::Formal,
         };
+    }
+
+    if *session_mode != SessionMode::Exploration {
+        return;
     }
 
     if keys.just_pressed(KeyCode::KeyM) {
@@ -1405,6 +1424,7 @@ fn control_hint(session_mode: SessionMode) -> &'static str {
     match session_mode {
         SessionMode::Exploration => "WASD 移动  Shift 疾走  Space 跳跃  V 视角  Esc 暂停",
         SessionMode::Presentation => "自动巡游展示场景  Esc 暂停",
+        SessionMode::MaterialGallery => "材质陈列馆  1-4 光照  [ ] 分类  E 导出  Esc 暂停",
     }
 }
 

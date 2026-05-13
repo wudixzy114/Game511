@@ -10,6 +10,7 @@ use std::{
 
 use bevy::{
     asset::RenderAssetUsages,
+    ecs::system::SystemParam,
     math::primitives::{Capsule3d, Cone, Cuboid, Cylinder},
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::MeshMaterial3d,
@@ -24,6 +25,9 @@ use crate::core::{
 use crate::game::{
     environment::WeatherKind,
     flow::{AppScreen, InGameState, SessionMode, in_session_mode},
+    physics::{
+        DaoPhysicsTerrainCollider, spawn_terrain_heightfield_collider, unique_terrain_coords,
+    },
     player::FirstPersonState,
     regions::RegionGraphState,
 };
@@ -47,7 +51,13 @@ impl Plugin for WorldPlugin {
         );
         app.add_systems(
             OnEnter(AppScreen::InGame),
-            (spawn_camera, spawn_light, spawn_world).after(create_terrain_material_texture),
+            spawn_camera.after(create_terrain_material_texture),
+        );
+        app.add_systems(
+            OnEnter(AppScreen::InGame),
+            (spawn_light, spawn_world)
+                .after(create_terrain_material_texture)
+                .run_if(world_content_enabled),
         );
         app.add_systems(
             Update,
@@ -60,8 +70,9 @@ impl Plugin for WorldPlugin {
                     update_terrain_impostor,
                     update_collision_proxy.run_if(in_session_mode(SessionMode::Exploration)),
                 )
-                    .chain(),
-                animate_wanderer,
+                    .chain()
+                    .run_if(world_content_enabled),
+                animate_wanderer.run_if(world_content_enabled),
             )
                 .run_if(in_state(InGameState::Running)),
         );
@@ -141,6 +152,10 @@ pub struct WorldCamera;
 
 #[derive(Debug, Component)]
 pub(crate) struct SunLight;
+
+fn world_content_enabled(session_mode: Res<SessionMode>) -> bool {
+    *session_mode != SessionMode::MaterialGallery
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BiomeKind {
@@ -434,6 +449,45 @@ impl TerrainCollisionChunk {
         let hx1 = h01 + (h11 - h01) * tx;
         Some(hx0 + (hx1 - hx0) * tz)
     }
+
+    fn center(&self) -> Vec3 {
+        let width = (self.stride.saturating_sub(1)) as f32 * self.sample_step;
+        let depth = (self.depth.saturating_sub(1)) as f32 * self.sample_step;
+        Vec3::new(
+            self.origin.x + width * 0.5,
+            0.0,
+            self.origin.y + depth * 0.5,
+        )
+    }
+
+    fn scale(&self) -> Vec3 {
+        Vec3::new(
+            (self.stride.saturating_sub(1)) as f32 * self.sample_step,
+            1.0,
+            (self.depth.saturating_sub(1)) as f32 * self.sample_step,
+        )
+    }
+
+    fn samples(&self) -> Vec<Vec<TerrainCollisionSample>> {
+        let mut rows = Vec::with_capacity(self.depth);
+        for z in 0..self.depth {
+            let mut row = Vec::with_capacity(self.stride);
+            for x in 0..self.stride {
+                let height = self.heights[z * self.stride + x];
+                let left = self.heights[z * self.stride + x.saturating_sub(1)];
+                let right = self.heights[z * self.stride + (x + 1).min(self.stride - 1)];
+                let down = self.heights[z.saturating_sub(1) * self.stride + x];
+                let up = self.heights[(z + 1).min(self.depth - 1) * self.stride + x];
+                row.push(TerrainCollisionSample {
+                    height,
+                    normal: normal_from_neighbor_heights(left, right, down, up, self.sample_step),
+                    slope: ((right - left).hypot(up - down) / (self.sample_step * 2.0)).min(3.0),
+                });
+            }
+            rows.push(row);
+        }
+        rows
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -695,6 +749,8 @@ type TerrainStreamState<'w> = (
     ResMut<'w, TerrainGenerationScheduler>,
 );
 
+type TerrainPhysicsMirror<'w, 's> = Query<'w, 's, (Entity, &'static DaoPhysicsTerrainCollider)>;
+
 type WorldSpawnResources<'w> = (
     Res<'w, AppConfig>,
     Res<'w, WorldMap>,
@@ -741,6 +797,7 @@ type RegionRebuildQueries<'w, 's> = (
     Query<'w, 's, (Entity, &'static TerrainDetailEntity)>,
     Query<'w, 's, Entity, With<TerrainImpostorEntity>>,
     Query<'w, 's, &'static Transform, With<WandererPrototype>>,
+    TerrainPhysicsMirror<'w, 's>,
 );
 
 #[derive(Debug, Component, Clone, Copy, PartialEq, Eq)]
@@ -1775,7 +1832,7 @@ fn apply_region_streaming_rebuild(
         mut impostor_state,
         mut meshes,
     ) = resources;
-    let (chunks, details, impostors, player_query) = queries;
+    let (chunks, details, impostors, player_query, terrain_physics) = queries;
     let (Some(regions), Some(anchor)) = (regions, anchor) else {
         return;
     };
@@ -1796,6 +1853,9 @@ fn apply_region_streaming_rebuild(
         commands.entity(entity).despawn();
     }
     for entity in &impostors {
+        commands.entity(entity).despawn();
+    }
+    for (entity, _) in &terrain_physics {
         commands.entity(entity).despawn();
     }
 
@@ -2129,57 +2189,65 @@ fn update_terrain_impostor(
     performance.record_phase_duration(PerformancePhase::WorldImpostor, phase_started_at.elapsed());
 }
 
-fn update_collision_proxy(
-    config: Res<AppConfig>,
-    mut performance: ResMut<FramePerformance>,
-    world_map: Res<WorldMap>,
-    collision_config: Res<TerrainCollisionConfig>,
-    mut collision_proxy: ResMut<TerrainCollisionProxy>,
-    mut collision_scheduler: ResMut<TerrainCollisionScheduler>,
-    anchors: Query<&Transform, With<WandererPrototype>>,
-) {
+#[derive(SystemParam)]
+struct CollisionProxyParams<'w, 's> {
+    config: Res<'w, AppConfig>,
+    performance: ResMut<'w, FramePerformance>,
+    world_map: Res<'w, WorldMap>,
+    collision_config: Res<'w, TerrainCollisionConfig>,
+    collision_proxy: ResMut<'w, TerrainCollisionProxy>,
+    collision_scheduler: ResMut<'w, TerrainCollisionScheduler>,
+    anchors: Query<'w, 's, &'static Transform, With<WandererPrototype>>,
+    terrain_physics: TerrainPhysicsMirror<'w, 's>,
+    commands: Commands<'w, 's>,
+}
+
+fn update_collision_proxy(mut params: CollisionProxyParams) {
     let phase_started_at = Instant::now();
-    let Some(anchor_transform) = anchors.iter().next() else {
+    let Some(anchor_transform) = params.anchors.iter().next() else {
         return;
     };
-    let Some(anchor) = world_map.chunk_coord_at(
+    let Some(anchor) = params.world_map.chunk_coord_at(
         anchor_transform.translation.x,
         anchor_transform.translation.z,
     ) else {
         return;
     };
 
-    if collision_proxy.anchor != Some(anchor) {
+    if params.collision_proxy.anchor != Some(anchor) {
         let targets = collision_chunk_coords_for_position(
-            &world_map,
+            &params.world_map,
             anchor_transform.translation,
-            collision_config.active_radius,
+            params.collision_config.active_radius,
         );
         let active_set: HashSet<WorldChunkCoord> = targets.iter().copied().collect();
         let existing_set: HashSet<WorldChunkCoord> =
-            collision_proxy.chunks.keys().copied().collect();
-        collision_proxy.retain_active(&active_set);
-        collision_proxy.enqueue_missing(targets.iter().copied(), &existing_set);
-        collision_proxy.anchor = Some(anchor);
-        collision_proxy.active = targets;
+            params.collision_proxy.chunks.keys().copied().collect();
+        params.collision_proxy.retain_active(&active_set);
+        params
+            .collision_proxy
+            .enqueue_missing(targets.iter().copied(), &existing_set);
+        params.collision_proxy.anchor = Some(anchor);
+        params.collision_proxy.active = targets;
     }
 
     let started_at = Instant::now();
-    let frame_budget_ms = config.quality.frame_time_budget_ms.max(1.0);
+    let frame_budget_ms = params.config.quality.frame_time_budget_ms.max(1.0);
     let integrate_budget = adaptive_budget(
-        collision_config.integrate_budget_per_frame,
+        params.collision_config.integrate_budget_per_frame,
         1,
-        frame_load_ratio(&performance, frame_budget_ms),
+        frame_load_ratio(&params.performance, frame_budget_ms),
     );
     let build_budget = adaptive_budget(
-        collision_config.build_budget_per_frame,
+        params.collision_config.build_budget_per_frame,
         1,
-        frame_load_ratio(&performance, frame_budget_ms),
+        frame_load_ratio(&params.performance, frame_budget_ms),
     );
     let mut integrated = 0_usize;
     while integrated < integrate_budget {
         let result = {
-            let receiver = collision_scheduler
+            let receiver = params
+                .collision_scheduler
                 .receiver
                 .lock()
                 .expect("terrain collision receiver should lock");
@@ -2188,55 +2256,111 @@ fn update_collision_proxy(
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         };
-        collision_scheduler.in_flight.remove(&result.coord);
-        if !collision_proxy.active.contains(&result.coord) {
+        params.collision_scheduler.in_flight.remove(&result.coord);
+        if !params.collision_proxy.active.contains(&result.coord) {
             continue;
         }
-        collision_proxy.insert_chunk(result.coord, result.chunk);
+        params
+            .collision_proxy
+            .insert_chunk(result.coord, result.chunk);
         integrated += 1;
     }
 
     let mut scheduled = 0_usize;
     while scheduled < build_budget {
-        let Some(coord) = collision_proxy.pop_next() else {
+        let Some(coord) = params.collision_proxy.pop_next() else {
             break;
         };
-        if collision_proxy.chunks.contains_key(&coord)
-            || collision_scheduler.in_flight.contains(&coord)
+        if params.collision_proxy.chunks.contains_key(&coord)
+            || params.collision_scheduler.in_flight.contains(&coord)
         {
             continue;
         }
-        if collision_scheduler
+        if params
+            .collision_scheduler
             .sender
             .send(TerrainCollisionRequest {
                 coord,
-                world_map: world_map.clone(),
-                subdivisions: collision_config.subdivisions,
+                world_map: params.world_map.clone(),
+                subdivisions: params.collision_config.subdivisions,
             })
             .is_ok()
         {
-            collision_scheduler.in_flight.insert(coord);
+            params.collision_scheduler.in_flight.insert(coord);
             scheduled += 1;
         }
     }
 
-    let active_set: HashSet<WorldChunkCoord> = collision_proxy.active.iter().copied().collect();
-    let evicted = collision_proxy.evict_inactive(collision_config.cache_capacity, &active_set);
+    let active_set: HashSet<WorldChunkCoord> =
+        params.collision_proxy.active.iter().copied().collect();
+    let evicted = params
+        .collision_proxy
+        .evict_inactive(params.collision_config.cache_capacity, &active_set);
+    let physics_synced = sync_terrain_physics_colliders(
+        &mut params.commands,
+        &mut params.terrain_physics,
+        &params.collision_proxy,
+        &active_set,
+    );
 
-    if integrated > 0 || scheduled > 0 || evicted > 0 {
+    if integrated > 0 || scheduled > 0 || evicted > 0 || physics_synced > 0 {
         tracing::debug!(
             target: "dao_game::world::collision",
             integrated_chunks = integrated,
             scheduled_chunks = scheduled,
-            pending_chunks = collision_proxy.pending.len(),
-            inflight_chunks = collision_scheduler.in_flight.len(),
-            cached_chunks = collision_proxy.len(),
+            physics_synced_chunks = physics_synced,
+            pending_chunks = params.collision_proxy.pending.len(),
+            inflight_chunks = params.collision_scheduler.in_flight.len(),
+            cached_chunks = params.collision_proxy.len(),
             evicted_chunks = evicted,
             generation_ms = started_at.elapsed().as_secs_f32() * 1000.0,
             "terrain collision proxy advanced"
         );
     }
-    performance.record_phase_duration(PerformancePhase::WorldCollision, phase_started_at.elapsed());
+    params
+        .performance
+        .record_phase_duration(PerformancePhase::WorldCollision, phase_started_at.elapsed());
+}
+
+fn sync_terrain_physics_colliders(
+    commands: &mut Commands,
+    terrain_physics: &mut TerrainPhysicsMirror<'_, '_>,
+    collision_proxy: &TerrainCollisionProxy,
+    active_set: &HashSet<WorldChunkCoord>,
+) -> usize {
+    let existing = unique_terrain_coords(terrain_physics.iter().map(|(_, collider)| collider));
+    for (entity, collider) in terrain_physics.iter_mut() {
+        if !active_set.contains(&WorldChunkCoord {
+            x: collider.x,
+            z: collider.z,
+        }) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    let mut spawned = 0_usize;
+    for coord in active_set {
+        if existing.contains(&(coord.x, coord.z)) {
+            continue;
+        }
+        let Some(cached) = collision_proxy.chunks.get(coord) else {
+            continue;
+        };
+        let samples = cached.chunk.samples();
+        if spawn_terrain_heightfield_collider(
+            commands,
+            coord.x,
+            coord.z,
+            cached.chunk.center(),
+            &samples,
+            cached.chunk.scale(),
+        )
+        .is_some()
+        {
+            spawned += 1;
+        }
+    }
+    spawned
 }
 
 fn advance_world_cycle(

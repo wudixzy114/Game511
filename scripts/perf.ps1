@@ -2,7 +2,7 @@ param(
     [ValidateSet("auto", "capture", "report", "compare", "html")]
     [string]$Action = "auto",
     [double]$Seconds = 12.0,
-    [ValidateSet("presentation", "exploration")]
+    [ValidateSet("presentation", "exploration", "material-gallery")]
     [string]$Mode = "presentation",
     [string]$Log = "",
     [string]$Baseline = "",

@@ -23,6 +23,7 @@ pub enum SessionMode {
     #[default]
     Exploration,
     Presentation,
+    MaterialGallery,
 }
 
 impl SessionMode {
@@ -30,6 +31,7 @@ impl SessionMode {
         match self {
             Self::Exploration => "探索",
             Self::Presentation => "展示",
+            Self::MaterialGallery => "材质陈列馆",
         }
     }
 }
@@ -71,6 +73,9 @@ fn parse_auto_start_mode(raw: &str) -> Option<SessionMode> {
             Some(SessionMode::Exploration)
         }
         "presentation" | "present" | "showcase" | "demo" => Some(SessionMode::Presentation),
+        "material" | "materials" | "gallery" | "material-gallery" | "material_gallery" => {
+            Some(SessionMode::MaterialGallery)
+        }
         unknown => {
             tracing::warn!(
                 value = unknown,
@@ -242,6 +247,10 @@ mod tests {
         assert_eq!(
             parse_auto_start_mode("presentation"),
             Some(SessionMode::Presentation)
+        );
+        assert_eq!(
+            parse_auto_start_mode("material-gallery"),
+            Some(SessionMode::MaterialGallery)
         );
         assert_eq!(parse_auto_start_mode("menu"), None);
         assert_eq!(

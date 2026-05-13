@@ -35,6 +35,14 @@ pub enum PerformancePhase {
     Ecology,
     Environment,
     Landmarks,
+    MaterialGallery,
+    MaterialGeneration,
+    MaterialUpload,
+    PhysicsBroadPhase,
+    PhysicsColliderStreaming,
+    PhysicsNarrowPhase,
+    PhysicsQuery,
+    PhysicsSolver,
     Presentation,
     Player,
     Signs,
@@ -46,12 +54,20 @@ pub enum PerformancePhase {
 }
 
 impl PerformancePhase {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 21] = [
         Self::Assets,
         Self::Director,
         Self::Ecology,
         Self::Environment,
         Self::Landmarks,
+        Self::MaterialGallery,
+        Self::MaterialGeneration,
+        Self::MaterialUpload,
+        Self::PhysicsBroadPhase,
+        Self::PhysicsColliderStreaming,
+        Self::PhysicsNarrowPhase,
+        Self::PhysicsQuery,
+        Self::PhysicsSolver,
         Self::Presentation,
         Self::Player,
         Self::Signs,
@@ -69,6 +85,14 @@ impl PerformancePhase {
             Self::Ecology => "ecology",
             Self::Environment => "environment",
             Self::Landmarks => "landmarks",
+            Self::MaterialGallery => "material_gallery",
+            Self::MaterialGeneration => "material_generation",
+            Self::MaterialUpload => "material_upload",
+            Self::PhysicsBroadPhase => "physics_broad_phase",
+            Self::PhysicsColliderStreaming => "physics_collider_streaming",
+            Self::PhysicsNarrowPhase => "physics_narrow_phase",
+            Self::PhysicsQuery => "physics_query",
+            Self::PhysicsSolver => "physics_solver",
             Self::Presentation => "presentation",
             Self::Player => "player",
             Self::Signs => "signs",
@@ -265,6 +289,21 @@ pub fn track_frame_timing(
         let director_ms = performance.previous_frame_phase_ms(PerformancePhase::Director);
         let ecology_ms = performance.previous_frame_phase_ms(PerformancePhase::Ecology);
         let landmarks_ms = performance.previous_frame_phase_ms(PerformancePhase::Landmarks);
+        let material_gallery_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::MaterialGallery);
+        let material_generation_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::MaterialGeneration);
+        let material_upload_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::MaterialUpload);
+        let physics_broad_phase_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::PhysicsBroadPhase);
+        let physics_collider_streaming_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::PhysicsColliderStreaming);
+        let physics_narrow_phase_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::PhysicsNarrowPhase);
+        let physics_query_ms = performance.previous_frame_phase_ms(PerformancePhase::PhysicsQuery);
+        let physics_solver_ms =
+            performance.previous_frame_phase_ms(PerformancePhase::PhysicsSolver);
         let presentation_ms = performance.previous_frame_phase_ms(PerformancePhase::Presentation);
         let player_ms = performance.previous_frame_phase_ms(PerformancePhase::Player);
         let signs_ms = performance.previous_frame_phase_ms(PerformancePhase::Signs);
@@ -295,6 +334,14 @@ pub fn track_frame_timing(
             ecology_ms = ecology_ms,
             environment_ms = environment_ms,
             landmarks_ms = landmarks_ms,
+            material_gallery_ms = material_gallery_ms,
+            material_generation_ms = material_generation_ms,
+            material_upload_ms = material_upload_ms,
+            physics_broad_phase_ms = physics_broad_phase_ms,
+            physics_collider_streaming_ms = physics_collider_streaming_ms,
+            physics_narrow_phase_ms = physics_narrow_phase_ms,
+            physics_query_ms = physics_query_ms,
+            physics_solver_ms = physics_solver_ms,
             presentation_ms = presentation_ms,
             player_ms = player_ms,
             signs_ms = signs_ms,
