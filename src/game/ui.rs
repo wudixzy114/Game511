@@ -1090,7 +1090,7 @@ fn update_hud_control_text(
     let detail_hint = match *session_mode {
         SessionMode::MaterialGallery => {
             format!(
-                "-/= 对象焦点  O 导出对象图鉴  Shift+O 连带截图  E 导出材质馆  F3 {}",
+                ",/. 家族  -/= 样本  O 导出对象图鉴  Shift+O 连带截图  E 导出材质馆  F3 {}",
                 ui_mode.hud_mode.label()
             )
         }
@@ -1513,7 +1513,7 @@ fn control_hint(session_mode: SessionMode) -> &'static str {
         SessionMode::Exploration => "WASD 移动  Shift 疾走  Space 跳跃  V 视角  Esc 暂停",
         SessionMode::Presentation => "自动巡游展示场景  Esc 暂停",
         SessionMode::MaterialGallery => {
-            "材质陈列馆/图鉴  WASD/鼠标 移动  Space/Ctrl 升降  Shift 加速  1-4 光照  [ ] 分类  -/= 对象焦点  E/O 导出"
+            "材质陈列馆/图鉴  WASD/鼠标 移动  Space/Ctrl 升降  Shift 加速  1-4 光照  [ ] 分类  ,/. 家族  -/= 样本  E/O 导出"
         }
     }
 }

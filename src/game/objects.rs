@@ -313,6 +313,11 @@ pub enum ObjectMaterialSlot {
     RockWet = 8,
     RockMoss = 9,
     RockShadow = 10,
+    RuinCore = 11,
+    RuinEdge = 12,
+    RuinDust = 13,
+    RuinMoss = 14,
+    RuinShadow = 15,
 }
 
 impl ObjectMaterialSlot {
@@ -329,6 +334,11 @@ impl ObjectMaterialSlot {
             Self::RockWet => "rock_wet",
             Self::RockMoss => "rock_moss",
             Self::RockShadow => "rock_shadow",
+            Self::RuinCore => "ruin_core",
+            Self::RuinEdge => "ruin_edge",
+            Self::RuinDust => "ruin_dust",
+            Self::RuinMoss => "ruin_moss",
+            Self::RuinShadow => "ruin_shadow",
         }
     }
 }
@@ -386,6 +396,7 @@ pub struct ObjectFamilyDefinition {
 enum ObjectFamilyGeneratorKind {
     Tree,
     Rock,
+    RuinFragment,
     Placeholder,
 }
 
@@ -398,6 +409,7 @@ impl ObjectFamilyGeneratorKind {
         match self {
             Self::Tree => families::tree::generate_asset(request, family),
             Self::Rock => families::rock::generate_asset(request, family),
+            Self::RuinFragment => families::ruin_fragment::generate_asset(request, family),
             Self::Placeholder => generate_placeholder_asset(request, family),
         }
     }
@@ -435,13 +447,9 @@ impl Default for ProceduralObjectRegistry {
                     families::rock::definition(),
                     ObjectFamilyGeneratorKind::Rock,
                 ),
-                simple_family(
-                    ObjectKind::RuinFragment,
-                    vec![
-                        ObjectSemantic::Stone,
-                        ObjectSemantic::Ruin,
-                        ObjectSemantic::Omen,
-                    ],
+                RegisteredObjectFamily::new(
+                    families::ruin_fragment::definition(),
+                    ObjectFamilyGeneratorKind::RuinFragment,
                 ),
                 simple_family(
                     ObjectKind::VillageProp,
@@ -537,6 +545,20 @@ impl ObjectGenerationRequest {
             mode: ObjectGenerationMode::Gallery,
         }
     }
+
+    pub fn ruin_fragment(seed: u64, lod: ObjectLod, transform: Transform) -> Self {
+        Self {
+            kind: ObjectKind::RuinFragment,
+            seed,
+            lod,
+            transform,
+            biome: ObjectBiomeContext::RuinEdge,
+            weather: ObjectWeatherState::Clear,
+            material_variant: ObjectMaterialVariant::Dusty,
+            collision_mode: ObjectCollisionMode::TrunkAndRoots,
+            mode: ObjectGenerationMode::Gallery,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize)]
@@ -590,10 +612,30 @@ pub struct ProceduralRockProfile {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct ProceduralRuinFragmentProfile {
+    pub seed: u64,
+    pub biome: ObjectBiomeContext,
+    pub width: f32,
+    pub depth: f32,
+    pub height: f32,
+    pub tilt: Vec2,
+    pub fracture: f32,
+    pub erosion: f32,
+    pub sand_cover: f32,
+    pub moss_ratio: f32,
+    pub relic_ratio: f32,
+    pub column_count: usize,
+    pub debris_count: usize,
+    pub collider_radius: f32,
+    pub collider_height: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GeneratedObjectProfile {
     Tree(ProceduralTreeProfile),
     Rock(ProceduralRockProfile),
+    RuinFragment(ProceduralRuinFragmentProfile),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -706,6 +748,7 @@ struct ProceduralTreeWindPart {
 #[derive(Debug, Resource, Clone, PartialEq)]
 struct ObjectGalleryState {
     export_queue: GalleryExportQueue,
+    family_index: usize,
     focus_index: usize,
 }
 
@@ -716,6 +759,7 @@ impl Default for ObjectGalleryState {
                 "logs/object-gallery-manifest.json",
                 "logs/object-gallery.png",
             ),
+            family_index: 0,
             focus_index: 0,
         }
     }
@@ -759,6 +803,11 @@ struct ObjectSlotMaterials {
     rock_wet: Handle<StandardMaterial>,
     rock_moss: Handle<StandardMaterial>,
     rock_shadow: Handle<StandardMaterial>,
+    ruin_core: Handle<StandardMaterial>,
+    ruin_edge: Handle<StandardMaterial>,
+    ruin_dust: Handle<StandardMaterial>,
+    ruin_moss: Handle<StandardMaterial>,
+    ruin_shadow: Handle<StandardMaterial>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -853,10 +902,23 @@ enum ObjectGalleryExportProfile {
         moss_ratio: f32,
         shard_count: usize,
     },
+    RuinFragment {
+        width: f32,
+        depth: f32,
+        height: f32,
+        fracture: f32,
+        erosion: f32,
+        sand_cover: f32,
+        moss_ratio: f32,
+        relic_ratio: f32,
+        column_count: usize,
+        debris_count: usize,
+    },
 }
 
 const TREE_SAMPLE_COUNT_PER_LOD: usize = 6;
 const ROCK_SAMPLE_COUNT_PER_LOD: usize = 5;
+const RUIN_SAMPLE_COUNT_PER_LOD: usize = 4;
 const OBJECT_EXPORT_COOLDOWN_SECONDS: f32 = 0.55;
 
 fn simple_family(kind: ObjectKind, semantics: Vec<ObjectSemantic>) -> RegisteredObjectFamily {
@@ -889,6 +951,7 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
         "logs/object-gallery-manifest.json",
         "logs/object-gallery.png",
     );
+    params.gallery_state.family_index = 0;
     params.gallery_state.focus_index = 0;
     params.codex_state.reset();
     let floor_material = params.materials.add(StandardMaterial {
@@ -900,7 +963,7 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
     let object_meshes = ObjectMeshHandles {
         floor: params
             .meshes
-            .add(Mesh::from(Plane3d::new(Vec3::Y, Vec2::new(72.0, 28.0)))),
+            .add(Mesh::from(Plane3d::new(Vec3::Y, Vec2::new(112.0, 30.0)))),
         cylinder: params.meshes.add(Mesh::from(Cylinder::new(1.0, 1.0))),
         sphere: params.meshes.add(Sphere::new(1.0).mesh().uv(20, 14)),
         cuboid: params.meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0))),
@@ -921,7 +984,7 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
                 Name::new("ProceduralObjectGalleryFloor"),
                 Mesh3d(object_meshes.floor.clone()),
                 MeshMaterial3d(floor_material),
-                Transform::from_xyz(34.0, -0.04, -15.0),
+                Transform::from_xyz(50.0, -0.04, -15.0),
             ));
             for request in object_gallery_requests() {
                 if params.registry.family(request.kind).is_some() {
@@ -939,7 +1002,9 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
 
     tracing::info!(
         target: "dao_game::objects::gallery",
-        samples = TREE_SAMPLE_COUNT_PER_LOD * 3 + ROCK_SAMPLE_COUNT_PER_LOD * 3,
+        samples = TREE_SAMPLE_COUNT_PER_LOD * 3
+            + ROCK_SAMPLE_COUNT_PER_LOD * 3
+            + RUIN_SAMPLE_COUNT_PER_LOD * 3,
         family_count = params.registry.families().count(),
         "procedural object gallery spawned with near/mid/far multi-family samples"
     );
@@ -949,10 +1014,14 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
 }
 
 fn object_gallery_requests() -> Vec<ObjectGenerationRequest> {
-    let mut requests =
-        Vec::with_capacity(TREE_SAMPLE_COUNT_PER_LOD * 3 + ROCK_SAMPLE_COUNT_PER_LOD * 3);
+    let mut requests = Vec::with_capacity(
+        TREE_SAMPLE_COUNT_PER_LOD * 3
+            + ROCK_SAMPLE_COUNT_PER_LOD * 3
+            + RUIN_SAMPLE_COUNT_PER_LOD * 3,
+    );
     requests.extend(tree_gallery_requests());
     requests.extend(rock_gallery_requests());
+    requests.extend(ruin_fragment_gallery_requests());
     requests
 }
 
@@ -1057,6 +1126,54 @@ fn rock_gallery_requests() -> Vec<ObjectGenerationRequest> {
             if request.weather == ObjectWeatherState::DreamTint {
                 request.material_variant = ObjectMaterialVariant::Mossy;
             }
+            requests.push(request);
+        }
+    }
+
+    requests
+}
+
+fn ruin_fragment_gallery_requests() -> Vec<ObjectGenerationRequest> {
+    let mut requests = Vec::with_capacity(RUIN_SAMPLE_COUNT_PER_LOD * 3);
+    let biomes = [
+        ObjectBiomeContext::RuinEdge,
+        ObjectBiomeContext::DesertWind,
+        ObjectBiomeContext::Wetland,
+        ObjectBiomeContext::Ridge,
+    ];
+    let weather = [
+        ObjectWeatherState::Clear,
+        ObjectWeatherState::DryWind,
+        ObjectWeatherState::RainSoaked,
+        ObjectWeatherState::DreamTint,
+    ];
+    let material_variant = [
+        ObjectMaterialVariant::Dusty,
+        ObjectMaterialVariant::Default,
+        ObjectMaterialVariant::Mossy,
+        ObjectMaterialVariant::Dream,
+    ];
+    let lod_rows = [ObjectLod::Near, ObjectLod::Mid, ObjectLod::Far];
+
+    for (lod_row, lod) in lod_rows.into_iter().enumerate() {
+        for column in 0..RUIN_SAMPLE_COUNT_PER_LOD {
+            let seed = families::ruin_fragment::GALLERY_BASE_SEED
+                .wrapping_add((lod_row as u64 + 1) * 0xD6E8_FD9D)
+                .wrapping_add(column as u64 * 0x94D0_49BB);
+            let mut request = ObjectGenerationRequest::ruin_fragment(
+                seed,
+                lod,
+                Transform::from_xyz(78.0 + column as f32 * 6.6, 0.0, -6.0 - lod_row as f32 * 8.0),
+            );
+            request.biome = biomes[(column + lod_row) % biomes.len()];
+            request.weather = weather[(column + lod_row * 2) % weather.len()];
+            request.material_variant =
+                material_variant[(column + lod_row) % material_variant.len()];
+            request.collision_mode = match lod {
+                ObjectLod::Near => ObjectCollisionMode::Full,
+                ObjectLod::Mid => ObjectCollisionMode::TrunkAndRoots,
+                ObjectLod::Far => ObjectCollisionMode::VisualOnly,
+            };
             requests.push(request);
         }
     }
@@ -1261,6 +1378,7 @@ fn tree_wind_profile(profile: &GeneratedObjectProfile) -> Option<ProceduralTreeP
     match profile {
         GeneratedObjectProfile::Tree(profile) => Some(*profile),
         GeneratedObjectProfile::Rock(_) => None,
+        GeneratedObjectProfile::RuinFragment(_) => None,
     }
 }
 
@@ -1288,6 +1406,11 @@ fn material_for_slot(
         ObjectMaterialSlot::RockWet => materials.rock_wet.clone(),
         ObjectMaterialSlot::RockMoss => materials.rock_moss.clone(),
         ObjectMaterialSlot::RockShadow => materials.rock_shadow.clone(),
+        ObjectMaterialSlot::RuinCore => materials.ruin_core.clone(),
+        ObjectMaterialSlot::RuinEdge => materials.ruin_edge.clone(),
+        ObjectMaterialSlot::RuinDust => materials.ruin_dust.clone(),
+        ObjectMaterialSlot::RuinMoss => materials.ruin_moss.clone(),
+        ObjectMaterialSlot::RuinShadow => materials.ruin_shadow.clone(),
     }
 }
 
@@ -1304,6 +1427,11 @@ fn object_slot_materials(materials: &ProceduralAssetMaterials) -> ObjectSlotMate
         rock_wet: materials.handle_for_family(ProceduralMaterialFamily::Water),
         rock_moss: materials.handle_for_family(ProceduralMaterialFamily::GroveLeaf),
         rock_shadow: materials.handle_for_family(ProceduralMaterialFamily::Shadow),
+        ruin_core: materials.handle_for_family(ProceduralMaterialFamily::OldStone),
+        ruin_edge: materials.handle_for_family(ProceduralMaterialFamily::Relic),
+        ruin_dust: materials.handle_for_family(ProceduralMaterialFamily::Sand),
+        ruin_moss: materials.handle_for_family(ProceduralMaterialFamily::GroveLeaf),
+        ruin_shadow: materials.handle_for_family(ProceduralMaterialFamily::Shadow),
     }
 }
 
@@ -1415,7 +1543,13 @@ fn handle_object_gallery_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<ObjectGalleryState>,
 ) {
-    if keys.just_pressed(KeyCode::Minus) {
+    if keys.just_pressed(KeyCode::Comma) {
+        state.family_index = state.family_index.saturating_sub(1);
+        state.focus_index = 0;
+    } else if keys.just_pressed(KeyCode::Period) {
+        state.family_index = state.family_index.saturating_add(1);
+        state.focus_index = 0;
+    } else if keys.just_pressed(KeyCode::Minus) {
         state.focus_index = state.focus_index.saturating_sub(1);
     } else if keys.just_pressed(KeyCode::Equal) {
         state.focus_index = state.focus_index.saturating_add(1);
@@ -1616,24 +1750,42 @@ fn refresh_object_gallery_codex(
     }
 
     instances.sort_by_key(|instance| (instance.kind as u8, instance.stable_id));
-    let max_index = instances.len().saturating_sub(1);
-    gallery_state.focus_index = gallery_state.focus_index.min(max_index);
-    let sample = instances[gallery_state.focus_index];
+    let visible_kinds = visible_gallery_kinds(&instances);
+    gallery_state.family_index = gallery_state
+        .family_index
+        .min(visible_kinds.len().saturating_sub(1));
+    let current_kind = visible_kinds[gallery_state.family_index];
     let family_definitions: Vec<_> = registry.families().collect();
     let current_family_samples: Vec<_> = instances
         .iter()
         .copied()
-        .filter(|instance| instance.kind == sample.kind)
+        .filter(|instance| instance.kind == current_kind)
         .collect();
-    let near_count = instances
+    gallery_state.focus_index = gallery_state
+        .focus_index
+        .min(current_family_samples.len().saturating_sub(1));
+    let sample = current_family_samples[gallery_state.focus_index];
+    let total_near_count = instances
         .iter()
         .filter(|instance| instance.lod == ObjectLod::Near)
         .count();
-    let mid_count = instances
+    let total_mid_count = instances
         .iter()
         .filter(|instance| instance.lod == ObjectLod::Mid)
         .count();
-    let far_count = instances
+    let total_far_count = instances
+        .iter()
+        .filter(|instance| instance.lod == ObjectLod::Far)
+        .count();
+    let near_count = current_family_samples
+        .iter()
+        .filter(|instance| instance.lod == ObjectLod::Near)
+        .count();
+    let mid_count = current_family_samples
+        .iter()
+        .filter(|instance| instance.lod == ObjectLod::Mid)
+        .count();
+    let far_count = current_family_samples
         .iter()
         .filter(|instance| instance.lod == ObjectLod::Far)
         .count();
@@ -1667,14 +1819,23 @@ fn refresh_object_gallery_codex(
 
     let summary_lines = vec![
         format!(
-            "家族：{}  样本：{}  近/中/远：{}/{}/{}  焦点：{}/{}",
+            "家族：{}  家族页：{}/{}  家族样本：{}  总样本：{}",
             sample.kind.label(),
-            instances.len(),
+            gallery_state.family_index + 1,
+            visible_kinds.len(),
+            current_family_samples.len(),
+            instances.len()
+        ),
+        format!(
+            "当前家族近/中/远：{}/{}/{}  全展区近/中/远：{}/{}/{}  焦点：{}/{}",
             near_count,
             mid_count,
             far_count,
+            total_near_count,
+            total_mid_count,
+            total_far_count,
             gallery_state.focus_index + 1,
-            instances.len()
+            current_family_samples.len()
         ),
         format!(
             "焦点 Seed：{}  StableId：{}  审核：{}",
@@ -1732,14 +1893,29 @@ fn refresh_object_gallery_codex(
             profile.moss_ratio * 100.0,
             profile.shard_count
         )),
+        GeneratedObjectProfile::RuinFragment(profile) => inspector_lines.push(format!(
+            "遗迹参数：宽 {:.2}m  深 {:.2}m  高 {:.2}m  裂损 {:.0}%  侵蚀 {:.0}%  覆沙 {:.0}%  苔藓 {:.0}%  遗物 {:.0}%  立柱 {}  碎块 {}",
+            profile.width,
+            profile.depth,
+            profile.height,
+            profile.fracture * 100.0,
+            profile.erosion * 100.0,
+            profile.sand_cover * 100.0,
+            profile.moss_ratio * 100.0,
+            profile.relic_ratio * 100.0,
+            profile.column_count,
+            profile.debris_count
+        )),
     }
 
-    let approval_lines = vec![approval_distribution_line(&instances)];
+    let approval_lines = vec![approval_distribution_line(&current_family_samples)];
     let browser_lines = build_seed_browser_lines(&current_family_samples);
     let family_lines = build_family_summary_lines(
         &family_definitions,
+        &visible_kinds,
         sample.kind,
         &golden_seeds,
+        gallery_state.family_index,
         current_family_samples.len(),
     );
     let slot_lines = build_slot_lines(&sample.material_slots);
@@ -1749,7 +1925,7 @@ fn refresh_object_gallery_codex(
             "截图：{}",
             gallery_state.export_queue.screenshot_path.display()
         ),
-        "操作：- / = 切换焦点样本  O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单"
+        "操作：, / . 切换家族  - / = 切换样本  O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单"
             .to_string(),
     ];
     let overview_lines = summary_lines.clone();
@@ -1794,7 +1970,8 @@ fn refresh_object_gallery_codex(
         },
     ];
     codex_state.controls_hint =
-        "- / = 切换焦点样本  O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单".to_string();
+        ", / . 切换家族  - / = 切换样本  O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单"
+            .to_string();
     codex_state.export_manifest_path = gallery_state.export_queue.export_path.display().to_string();
     codex_state.screenshot_path = gallery_state
         .export_queue
@@ -1835,6 +2012,17 @@ fn approval_distribution_line(instances: &[&ProceduralObjectInstance]) -> String
     )
 }
 
+fn visible_gallery_kinds(instances: &[&ProceduralObjectInstance]) -> Vec<ObjectKind> {
+    let mut kinds = Vec::new();
+    for instance in instances {
+        if !kinds.contains(&instance.kind) {
+            kinds.push(instance.kind);
+        }
+    }
+    kinds.sort_by_key(|kind| *kind as u8);
+    kinds
+}
+
 fn build_seed_browser_lines(instances: &[&ProceduralObjectInstance]) -> Vec<String> {
     if instances.is_empty() {
         return vec!["当前家族还没有可见样本".to_string()];
@@ -1857,8 +2045,10 @@ fn build_seed_browser_lines(instances: &[&ProceduralObjectInstance]) -> Vec<Stri
 
 fn build_family_summary_lines(
     families: &[&ObjectFamilyDefinition],
+    visible_kinds: &[ObjectKind],
     current_kind: ObjectKind,
     golden_seeds: &[u64],
+    family_index: usize,
     visible_sample_count: usize,
 ) -> Vec<String> {
     let current_family = families
@@ -1866,8 +2056,9 @@ fn build_family_summary_lines(
         .copied()
         .find(|family| family.kind == current_kind);
     let mut lines = vec![format!(
-        "已注册 {} 个家族  当前可见样本 {}  当前语义 {}",
+        "已注册 {} 个家族  已生成 {} 个家族  当前可见样本 {}  当前语义 {}",
         families.len(),
+        visible_kinds.len(),
         visible_sample_count,
         current_family
             .map(|family| format_semantics(&family.semantics))
@@ -1885,12 +2076,19 @@ fn build_family_summary_lines(
         ));
     }
     lines.push(format!(
+        "浏览：家族 {}/{}  样本切换使用 - / =",
+        family_index + 1,
+        visible_kinds.len()
+    ));
+    lines.push(format!(
         "家族索引：{}",
         families
             .iter()
             .map(|family| {
                 let marker = if family.kind == current_kind {
                     ">"
+                } else if visible_kinds.contains(&family.kind) {
+                    "+"
                 } else {
                     "-"
                 };
@@ -1953,6 +2151,18 @@ fn export_profile(profile: &GeneratedObjectProfile) -> ObjectGalleryExportProfil
             wet_line: profile.wet_line,
             moss_ratio: profile.moss_ratio,
             shard_count: profile.shard_count,
+        },
+        GeneratedObjectProfile::RuinFragment(profile) => ObjectGalleryExportProfile::RuinFragment {
+            width: profile.width,
+            depth: profile.depth,
+            height: profile.height,
+            fracture: profile.fracture,
+            erosion: profile.erosion,
+            sand_cover: profile.sand_cover,
+            moss_ratio: profile.moss_ratio,
+            relic_ratio: profile.relic_ratio,
+            column_count: profile.column_count,
+            debris_count: profile.debris_count,
         },
     }
 }
@@ -2021,6 +2231,15 @@ fn approval_for_object(asset: &ObjectGeneratedAsset) -> ObjectApprovalState {
                 || profile.crack_density > 0.9
                 || (matches!(asset.request.material_variant, ObjectMaterialVariant::Wet)
                     && profile.wet_line < 0.18)
+            {
+                return ObjectApprovalState::NeedsRevision;
+            }
+        }
+        GeneratedObjectProfile::RuinFragment(profile) => {
+            if profile.fracture > 0.94
+                || profile.height < 0.9
+                || (matches!(asset.request.material_variant, ObjectMaterialVariant::Dream)
+                    && profile.relic_ratio < 0.22)
             {
                 return ObjectApprovalState::NeedsRevision;
             }
@@ -2270,6 +2489,44 @@ mod tests {
         let generated = super::families::rock::generate_asset(request, &family);
         assert!(matches!(generated.profile, GeneratedObjectProfile::Rock(_)));
         assert!(generated.stats.part_count >= 4);
+        assert!(generated.collision.trunk.is_some());
+        assert!(!generated.material_slots.is_empty());
+    }
+
+    #[test]
+    fn ruin_fragment_family_declares_golden_seeds_and_versions() {
+        let family = super::families::ruin_fragment::definition();
+        assert_eq!(
+            family.profile_version,
+            super::families::ruin_fragment::PROFILE_VERSION
+        );
+        assert_eq!(
+            family.geometry_version,
+            super::families::ruin_fragment::GEOMETRY_VERSION
+        );
+        assert_eq!(family.kind, ObjectKind::RuinFragment);
+        assert!(family.golden_seeds.len() >= 3);
+    }
+
+    #[test]
+    fn ruin_fragment_generation_contains_parts_and_collision() {
+        let family = super::families::ruin_fragment::definition();
+        let mut request = ObjectGenerationRequest::ruin_fragment(
+            super::families::ruin_fragment::GALLERY_BASE_SEED,
+            ObjectLod::Near,
+            Transform::default(),
+        );
+        request.biome = ObjectBiomeContext::RuinEdge;
+        request.weather = ObjectWeatherState::DryWind;
+        request.material_variant = super::ObjectMaterialVariant::Dusty;
+        request.collision_mode = ObjectCollisionMode::Full;
+
+        let generated = super::families::ruin_fragment::generate_asset(request, &family);
+        assert!(matches!(
+            generated.profile,
+            GeneratedObjectProfile::RuinFragment(_)
+        ));
+        assert!(generated.stats.part_count >= 5);
         assert!(generated.collision.trunk.is_some());
         assert!(!generated.material_slots.is_empty());
     }
