@@ -610,7 +610,7 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                     padding: UiRect::axes(px(16), px(14)),
                     border: UiRect::all(px(1)),
                     border_radius: BorderRadius::all(px(8)),
-                    width: px(440),
+                    width: px(520),
                     flex_direction: FlexDirection::Column,
                     row_gap: px(8),
                     ..Default::default()
@@ -622,13 +622,13 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                 children![
                     (
                         Text::new("AssetCodex"),
-                        ui_text_font(&font, 18.0),
+                        ui_text_font(&font, 19.0),
                         TextColor(TEXT_ACCENT),
                         AssetCodexTitleText,
                     ),
                     (
                         Text::new("图鉴样本载入中"),
-                        ui_text_font(&font, 13.5),
+                        ui_text_font(&font, 12.5),
                         TextColor(TEXT_MUTED),
                         AssetCodexBodyText,
                     )

@@ -118,6 +118,12 @@ pub struct AssetCodexSlot {
     pub material_id: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetCodexSection {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
 #[derive(Debug, Resource, Clone, Default, PartialEq)]
 pub struct AssetCodexState {
     pub visible: bool,
@@ -125,6 +131,7 @@ pub struct AssetCodexState {
     pub subtitle: String,
     pub summary_lines: Vec<String>,
     pub slots: Vec<AssetCodexSlot>,
+    pub sections: Vec<AssetCodexSection>,
     pub controls_hint: String,
     pub export_manifest_path: String,
     pub screenshot_path: String,
@@ -136,32 +143,71 @@ impl AssetCodexState {
     }
 
     pub fn panel_body(&self) -> String {
-        let mut lines = self.summary_lines.clone();
-        if !self.slots.is_empty() {
-            lines.push("材质槽：".to_string());
-            lines.extend(self.slots.iter().map(|slot| {
-                format!(
-                    "{} -> {} / {}",
-                    slot.slot, slot.material_family, slot.material_id
-                )
-            }));
-        }
-        if !self.export_manifest_path.is_empty() {
-            lines.push(format!("清单：{}", self.export_manifest_path));
-        }
-        if !self.screenshot_path.is_empty() {
-            lines.push(format!("截图：{}", self.screenshot_path));
-        }
-        if !self.controls_hint.is_empty() {
-            lines.push(format!("操作：{}", self.controls_hint));
+        let sections = if self.sections.is_empty() {
+            self.legacy_sections()
+        } else {
+            self.sections.clone()
+        };
+        let mut lines = Vec::new();
+        for (index, section) in sections.iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+            }
+            lines.push(format!("【{}】", section.title));
+            lines.extend(section.lines.iter().cloned());
         }
         lines.join("\n")
+    }
+
+    fn legacy_sections(&self) -> Vec<AssetCodexSection> {
+        let mut sections = Vec::new();
+        if !self.summary_lines.is_empty() {
+            sections.push(AssetCodexSection {
+                title: "概览".to_string(),
+                lines: self.summary_lines.clone(),
+            });
+        }
+        if !self.slots.is_empty() {
+            sections.push(AssetCodexSection {
+                title: "材质槽".to_string(),
+                lines: self
+                    .slots
+                    .iter()
+                    .map(|slot| {
+                        format!(
+                            "{} -> {} / {}",
+                            slot.slot, slot.material_family, slot.material_id
+                        )
+                    })
+                    .collect(),
+            });
+        }
+        let mut export_lines = Vec::new();
+        if !self.export_manifest_path.is_empty() {
+            export_lines.push(format!("清单：{}", self.export_manifest_path));
+        }
+        if !self.screenshot_path.is_empty() {
+            export_lines.push(format!("截图：{}", self.screenshot_path));
+        }
+        if !self.controls_hint.is_empty() {
+            export_lines.push(format!("操作：{}", self.controls_hint));
+        }
+        if !export_lines.is_empty() {
+            sections.push(AssetCodexSection {
+                title: "导出".to_string(),
+                lines: export_lines,
+            });
+        }
+        sections
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GalleryExportMode, GalleryExportQueue, GalleryExportStage};
+    use super::{
+        AssetCodexSection, AssetCodexState, GalleryExportMode, GalleryExportQueue,
+        GalleryExportStage,
+    };
 
     #[test]
     fn export_queue_transitions_from_manifest_to_screenshot() {
@@ -186,5 +232,28 @@ mod tests {
 
         queue.reset();
         assert!(matches!(queue.pending_stage, GalleryExportStage::Idle));
+    }
+
+    #[test]
+    fn codex_panel_renders_sections_when_available() {
+        let state = AssetCodexState {
+            title: "AssetCodex".to_string(),
+            sections: vec![
+                AssetCodexSection {
+                    title: "概览".to_string(),
+                    lines: vec!["样本：18".to_string()],
+                },
+                AssetCodexSection {
+                    title: "导出".to_string(),
+                    lines: vec!["清单：logs/object-gallery.json".to_string()],
+                },
+            ],
+            ..Default::default()
+        };
+
+        let body = state.panel_body();
+        assert!(body.contains("【概览】"));
+        assert!(body.contains("样本：18"));
+        assert!(body.contains("【导出】"));
     }
 }

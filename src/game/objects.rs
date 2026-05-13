@@ -14,6 +14,8 @@ use bevy::{
 };
 use serde::Serialize;
 
+mod families;
+
 use crate::{
     core::performance::{FramePerformance, PerformancePhase},
     game::{
@@ -21,8 +23,8 @@ use crate::{
         environment::WindField,
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
         gallery::{
-            AssetCodexSlot, AssetCodexState, GalleryExportMode, GalleryExportQueue,
-            GalleryExportStage, prepare_export_path,
+            AssetCodexSection, AssetCodexSlot, AssetCodexState, GalleryExportMode,
+            GalleryExportQueue, GalleryExportStage, prepare_export_path,
         },
         materials::MaterialGalleryState,
         physics::{
@@ -113,6 +115,21 @@ pub enum ObjectSemantic {
     Ecology = 5,
     Interaction = 6,
     Omen = 7,
+}
+
+impl ObjectSemantic {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Vegetation => "植被",
+            Self::Stone => "石质",
+            Self::Ruin => "遗迹",
+            Self::Village => "村庄",
+            Self::Waterside => "水岸",
+            Self::Ecology => "生态",
+            Self::Interaction => "交互",
+            Self::Omen => "征兆",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize)]
@@ -352,18 +369,56 @@ pub struct ObjectFamilyDefinition {
     pub geometry_version: u32,
     pub semantics: Vec<ObjectSemantic>,
     pub material_slots: Vec<ObjectMaterialBinding>,
+    pub golden_seeds: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ObjectFamilyGeneratorKind {
+    Tree,
+    Placeholder,
+}
+
+impl ObjectFamilyGeneratorKind {
+    fn generate(
+        self,
+        request: ObjectGenerationRequest,
+        family: &ObjectFamilyDefinition,
+    ) -> ObjectGeneratedAsset {
+        match self {
+            Self::Tree => families::tree::generate_asset(request, family),
+            Self::Placeholder => generate_placeholder_asset(request, family),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RegisteredObjectFamily {
+    definition: ObjectFamilyDefinition,
+    generator: ObjectFamilyGeneratorKind,
+}
+
+impl RegisteredObjectFamily {
+    fn new(definition: ObjectFamilyDefinition, generator: ObjectFamilyGeneratorKind) -> Self {
+        Self {
+            definition,
+            generator,
+        }
+    }
 }
 
 #[derive(Debug, Resource, Clone, PartialEq)]
 pub struct ProceduralObjectRegistry {
-    families: Vec<ObjectFamilyDefinition>,
+    families: Vec<RegisteredObjectFamily>,
 }
 
 impl Default for ProceduralObjectRegistry {
     fn default() -> Self {
         Self {
             families: vec![
-                tree_family_definition(),
+                RegisteredObjectFamily::new(
+                    families::tree::definition(),
+                    ObjectFamilyGeneratorKind::Tree,
+                ),
                 simple_family(
                     ObjectKind::Rock,
                     vec![ObjectSemantic::Stone, ObjectSemantic::Waterside],
@@ -402,19 +457,30 @@ impl Default for ProceduralObjectRegistry {
 }
 
 impl ProceduralObjectRegistry {
-    pub fn families(&self) -> &[ObjectFamilyDefinition] {
-        &self.families
+    pub fn families(&self) -> impl Iterator<Item = &ObjectFamilyDefinition> {
+        self.families.iter().map(|family| &family.definition)
     }
 
     pub fn family(&self, kind: ObjectKind) -> Option<&ObjectFamilyDefinition> {
-        self.families.iter().find(|family| family.kind == kind)
+        self.families
+            .iter()
+            .find(|family| family.definition.kind == kind)
+            .map(|family| &family.definition)
     }
 
     pub fn by_semantic(&self, semantic: ObjectSemantic) -> Vec<&ObjectFamilyDefinition> {
         self.families
             .iter()
-            .filter(|family| family.semantics.contains(&semantic))
+            .filter(|family| family.definition.semantics.contains(&semantic))
+            .map(|family| &family.definition)
             .collect()
+    }
+
+    pub fn generate(&self, request: ObjectGenerationRequest) -> Option<ObjectGeneratedAsset> {
+        self.families
+            .iter()
+            .find(|family| family.definition.kind == request.kind)
+            .map(|family| family.generator.generate(request, &family.definition))
     }
 }
 
@@ -724,65 +790,31 @@ enum ObjectGalleryExportProfile {
     },
 }
 
-const TREE_PROFILE_VERSION: u32 = 2;
-const TREE_GEOMETRY_VERSION: u32 = 2;
 const TREE_SAMPLE_COUNT_PER_LOD: usize = 6;
-const TREE_GALLERY_BASE_SEED: u64 = 0xA11C_EE05_13AA_700D;
 const OBJECT_EXPORT_COOLDOWN_SECONDS: f32 = 0.55;
 
-fn tree_family_definition() -> ObjectFamilyDefinition {
-    ObjectFamilyDefinition {
-        kind: ObjectKind::Tree,
-        profile_version: TREE_PROFILE_VERSION,
-        geometry_version: TREE_GEOMETRY_VERSION,
-        semantics: vec![
-            ObjectSemantic::Vegetation,
-            ObjectSemantic::Ecology,
-            ObjectSemantic::Waterside,
-        ],
-        material_slots: vec![
-            ObjectMaterialBinding {
-                slot: ObjectMaterialSlot::BarkPrimary,
-                material_family: ProceduralMaterialFamily::Wood,
-                material_id: "dao/mat/old-wood/v1",
-            },
-            ObjectMaterialBinding {
-                slot: ObjectMaterialSlot::BarkWornEdge,
-                material_family: ProceduralMaterialFamily::OldStone,
-                material_id: "dao/mat/ruin-stone/v1",
-            },
-            ObjectMaterialBinding {
-                slot: ObjectMaterialSlot::LeafPrimary,
-                material_family: ProceduralMaterialFamily::GroveLeaf,
-                material_id: "dao/mat/meadow/v1",
-            },
-            ObjectMaterialBinding {
-                slot: ObjectMaterialSlot::LeafSecondary,
-                material_family: ProceduralMaterialFamily::GroveLeaf,
-                material_id: "dao/mat/reed/v1",
-            },
-            ObjectMaterialBinding {
-                slot: ObjectMaterialSlot::LeafDry,
-                material_family: ProceduralMaterialFamily::Sand,
-                material_id: "dao/mat/dry-sand/v1",
-            },
-            ObjectMaterialBinding {
-                slot: ObjectMaterialSlot::RootShadow,
-                material_family: ProceduralMaterialFamily::Shadow,
-                material_id: "dao/mat/object-shadow/v1",
-            },
-        ],
-    }
+fn simple_family(kind: ObjectKind, semantics: Vec<ObjectSemantic>) -> RegisteredObjectFamily {
+    RegisteredObjectFamily::new(
+        ObjectFamilyDefinition {
+            kind,
+            profile_version: 1,
+            geometry_version: 1,
+            semantics,
+            material_slots: Vec::new(),
+            golden_seeds: default_family_golden_seeds(kind),
+        },
+        ObjectFamilyGeneratorKind::Placeholder,
+    )
 }
 
-fn simple_family(kind: ObjectKind, semantics: Vec<ObjectSemantic>) -> ObjectFamilyDefinition {
-    ObjectFamilyDefinition {
-        kind,
-        profile_version: 1,
-        geometry_version: 1,
-        semantics,
-        material_slots: Vec::new(),
-    }
+fn default_family_golden_seeds(kind: ObjectKind) -> Vec<u64> {
+    (0..3_u64)
+        .map(|index| {
+            families::tree::GALLERY_BASE_SEED
+                .wrapping_add((kind as u64 + 1) * 0x9E37_79B9)
+                .wrapping_add(index * 0xBF58_476D)
+        })
+        .collect()
 }
 
 fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
@@ -825,8 +857,8 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
                 Transform::from_xyz(16.0, -0.04, -15.0),
             ));
             for request in tree_gallery_requests() {
-                if let Some(family) = params.registry.family(request.kind) {
-                    let asset = generate_object_asset(request, family);
+                if params.registry.family(request.kind).is_some() {
+                    let asset = generate_object_asset(request, &params.registry);
                     spawn_generated_object(
                         parent,
                         &object_meshes,
@@ -841,8 +873,8 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
     tracing::info!(
         target: "dao_game::objects::gallery",
         samples = TREE_SAMPLE_COUNT_PER_LOD * 3,
-        profile_version = TREE_PROFILE_VERSION,
-        geometry_version = TREE_GEOMETRY_VERSION,
+        profile_version = families::tree::PROFILE_VERSION,
+        geometry_version = families::tree::GEOMETRY_VERSION,
         "procedural object gallery spawned with near/mid/far tree samples"
     );
     params
@@ -877,7 +909,7 @@ fn tree_gallery_requests() -> Vec<ObjectGenerationRequest> {
 
     for (lod_row, lod) in lod_rows.into_iter().enumerate() {
         for column in 0..TREE_SAMPLE_COUNT_PER_LOD {
-            let seed = TREE_GALLERY_BASE_SEED
+            let seed = families::tree::GALLERY_BASE_SEED
                 .wrapping_add((lod_row as u64 + 1) * 0x9E37_79B9)
                 .wrapping_add(column as u64 * 0xBF58_476D);
             let mut request = ObjectGenerationRequest::tree(
@@ -902,106 +934,23 @@ fn tree_gallery_requests() -> Vec<ObjectGenerationRequest> {
 
 fn generate_object_asset(
     request: ObjectGenerationRequest,
-    family: &ObjectFamilyDefinition,
+    registry: &ProceduralObjectRegistry,
 ) -> ObjectGeneratedAsset {
-    match request.kind {
-        ObjectKind::Tree => generate_tree_asset(request, family),
-        _ => {
-            let stable_id = stable_object_id(
-                request.kind,
-                request.seed,
-                family.profile_version,
-                family.geometry_version,
-            );
-            ObjectGeneratedAsset {
-                kind: request.kind,
-                seed: request.seed,
-                stable_id,
-                lod: request.lod,
-                profile_version: family.profile_version,
-                geometry_version: family.geometry_version,
-                request,
-                profile: GeneratedObjectProfile::Tree(procedural_tree_profile(
-                    &ObjectGenerationRequest::tree(0, ObjectLod::Far, Transform::default()),
-                )),
-                material_slots: family.material_slots.clone(),
-                parts: Vec::new(),
-                collision: ObjectCollisionRecipe {
-                    trunk: None,
-                    root_blockers: Vec::new(),
-                    sensor: None,
-                },
-                animation: ObjectAnimationRecipe {
-                    trunk_parts: 0,
-                    branch_parts: 0,
-                    leaf_parts: 0,
-                    uses_gust_response: false,
-                },
-                stats: GeneratedObjectStats {
-                    part_count: 0,
-                    mesh_count: 0,
-                    vertex_estimate: 0,
-                    collider_count: 0,
-                    generation_ms: 0.0,
-                },
-            }
-        }
-    }
+    registry
+        .generate(request)
+        .expect("object family should be registered")
 }
 
-fn generate_tree_asset(
+fn generate_placeholder_asset(
     request: ObjectGenerationRequest,
     family: &ObjectFamilyDefinition,
 ) -> ObjectGeneratedAsset {
-    let started_at = Instant::now();
-    let profile = procedural_tree_profile(&request);
-    let mut parts = generate_tree_parts(&request, profile);
-    let collision = tree_collision_recipe(&request, profile);
-
-    let trunk_parts = parts
-        .iter()
-        .filter(|part| part.wind_band == Some(TreeWindBand::Trunk))
-        .count();
-    let branch_parts = parts
-        .iter()
-        .filter(|part| part.wind_band == Some(TreeWindBand::Branch))
-        .count();
-    let leaf_parts = parts
-        .iter()
-        .filter(|part| part.wind_band == Some(TreeWindBand::Leaf))
-        .count();
-    let vertex_estimate = parts
-        .iter()
-        .map(|part| match part.recipe {
-            ObjectMeshRecipe::Cylinder => 44_usize,
-            ObjectMeshRecipe::Sphere => 282_usize,
-            ObjectMeshRecipe::Cuboid => 36_usize,
-        })
-        .sum();
-    let stats = GeneratedObjectStats {
-        part_count: parts.len(),
-        mesh_count: parts.len(),
-        vertex_estimate,
-        collider_count: collision.trunk.iter().count()
-            + collision.root_blockers.len()
-            + collision.sensor.iter().count(),
-        generation_ms: started_at.elapsed().as_secs_f32() * 1000.0,
-    };
-
     let stable_id = stable_object_id(
         request.kind,
         request.seed,
         family.profile_version,
         family.geometry_version,
     );
-    let animation = ObjectAnimationRecipe {
-        trunk_parts,
-        branch_parts,
-        leaf_parts,
-        uses_gust_response: request.lod != ObjectLod::Far,
-    };
-
-    parts.shrink_to_fit();
     ObjectGeneratedAsset {
         kind: request.kind,
         seed: request.seed,
@@ -1010,621 +959,29 @@ fn generate_tree_asset(
         profile_version: family.profile_version,
         geometry_version: family.geometry_version,
         request,
-        profile: GeneratedObjectProfile::Tree(profile),
+        profile: GeneratedObjectProfile::Tree(families::tree::build_profile(
+            &ObjectGenerationRequest::tree(0, ObjectLod::Far, Transform::default()),
+        )),
         material_slots: family.material_slots.clone(),
-        parts,
-        collision,
-        animation,
-        stats,
-    }
-}
-
-fn procedural_tree_profile(request: &ObjectGenerationRequest) -> ProceduralTreeProfile {
-    let seed = request.seed;
-    let age_years = lerp(16.0, 132.0, seeded_unit(seed, 11));
-    let biome_height_boost = match request.biome {
-        ObjectBiomeContext::Meadow => 1.0,
-        ObjectBiomeContext::Wetland => 1.08,
-        ObjectBiomeContext::Ridge => 0.9,
-        ObjectBiomeContext::VillageCourtyard => 0.84,
-        ObjectBiomeContext::RuinEdge => 0.78,
-        ObjectBiomeContext::DesertWind => 0.72,
-    };
-    let weather_health_bias = match request.weather {
-        ObjectWeatherState::Clear => 0.05,
-        ObjectWeatherState::RainSoaked => 0.12,
-        ObjectWeatherState::DryWind => -0.16,
-        ObjectWeatherState::DreamTint => -0.04,
-    };
-    let height = lerp(5.2, 10.8, seeded_unit(seed, 13)) * biome_height_boost;
-    let trunk_base_radius = lerp(0.22, 0.58, seeded_unit(seed, 17)) * (0.85 + age_years / 220.0);
-    let lean_angle = seeded_signed(seed, 19) * 0.52;
-    let lean_distance = lerp(0.08, 0.34, seeded_unit(seed, 23)) * height;
-    let biome_wind_bias = match request.biome {
-        ObjectBiomeContext::Ridge | ObjectBiomeContext::DesertWind => 1.25,
-        ObjectBiomeContext::Wetland => 0.86,
-        _ => 1.0,
-    };
-    let lean = Vec2::new(lean_angle.cos(), lean_angle.sin()) * lean_distance * biome_wind_bias;
-    let branch_count = 6 + (seeded_unit(seed, 29) * 7.0).floor() as usize;
-    let branch_tiers = if seeded_unit(seed, 31) > 0.56 { 3 } else { 2 };
-    let canopy_radius = lerp(1.85, 3.55, seeded_unit(seed, 37))
-        * (0.72 + seeded_unit(seed, 41) * 0.45)
-        * match request.biome {
-            ObjectBiomeContext::VillageCourtyard => 0.86,
-            ObjectBiomeContext::Wetland => 1.14,
-            ObjectBiomeContext::DesertWind => 0.74,
-            _ => 1.0,
-        };
-    let canopy_eccentricity = Vec2::new(
-        seeded_signed(seed, 43) * canopy_radius * 0.34,
-        seeded_signed(seed, 47) * canopy_radius * 0.34,
-    );
-    let leaf_density = lerp(0.48, 1.34, seeded_unit(seed, 53))
-        * match request.weather {
-            ObjectWeatherState::RainSoaked => 1.12,
-            ObjectWeatherState::DryWind => 0.76,
-            _ => 1.0,
-        };
-    let leaf_cluster_count = (branch_count as f32
-        * lerp(1.24, 2.05, seeded_unit(seed, 59))
-        * leaf_density.clamp(0.55, 1.28))
-    .round()
-    .max(8.0) as usize;
-    let health = (lerp(0.38, 0.96, seeded_unit(seed, 61)) + weather_health_bias).clamp(0.15, 0.98);
-    let dead_branch_ratio = (lerp(0.04, 0.36, seeded_unit(seed, 67))
-        + (1.0 - health) * 0.38
-        + match request.weather {
-            ObjectWeatherState::DryWind => 0.16,
-            _ => 0.0,
-        })
-    .clamp(0.02, 0.76);
-    let root_exposure = lerp(0.1, 0.74, seeded_unit(seed, 71))
-        * match request.biome {
-            ObjectBiomeContext::Ridge | ObjectBiomeContext::RuinEdge => 1.22,
-            ObjectBiomeContext::Wetland => 0.62,
-            _ => 1.0,
-        };
-    let moss_ratio = (lerp(0.02, 0.62, seeded_unit(seed, 73))
-        + match request.biome {
-            ObjectBiomeContext::Wetland => 0.24,
-            ObjectBiomeContext::DesertWind => -0.28,
-            _ => 0.0,
-        })
-    .clamp(0.0, 0.72);
-    let dryness = match request.weather {
-        ObjectWeatherState::DryWind => 0.86,
-        ObjectWeatherState::RainSoaked => 0.22,
-        ObjectWeatherState::DreamTint => 0.52,
-        ObjectWeatherState::Clear => 0.42,
-    };
-    let dream_shift = if request.weather == ObjectWeatherState::DreamTint {
-        0.08
-    } else {
-        0.0
-    };
-    let leaf_color = [
-        (0.16 + seeded_unit(seed, 79) * 0.12 + dryness * 0.12 + dream_shift).clamp(0.08, 0.42),
-        (0.38 + seeded_unit(seed, 83) * 0.28 - dryness * 0.15 - dream_shift * 0.4)
-            .clamp(0.14, 0.72),
-        (0.12 + seeded_unit(seed, 89) * 0.14 - dryness * 0.08 + dream_shift).clamp(0.05, 0.44),
-    ];
-    let bark_color = [
-        (0.2 + seeded_unit(seed, 97) * 0.18 + moss_ratio * 0.08).clamp(0.14, 0.46),
-        (0.14 + seeded_unit(seed, 101) * 0.11 + moss_ratio * 0.07).clamp(0.08, 0.34),
-        (0.08 + seeded_unit(seed, 103) * 0.08 + moss_ratio * 0.04).clamp(0.04, 0.26),
-    ];
-    let wind_flex = (lerp(0.48, 1.35, seeded_unit(seed, 107))
-        * match request.biome {
-            ObjectBiomeContext::Ridge | ObjectBiomeContext::DesertWind => 1.24,
-            ObjectBiomeContext::VillageCourtyard => 0.84,
-            _ => 1.0,
-        })
-    .clamp(0.34, 1.7);
-
-    ProceduralTreeProfile {
-        seed,
-        biome: request.biome,
-        age_years,
-        health,
-        height,
-        trunk_base_radius,
-        lean,
-        branch_count,
-        branch_tiers,
-        leaf_cluster_count,
-        canopy_radius,
-        canopy_eccentricity,
-        leaf_density,
-        dead_branch_ratio,
-        root_exposure,
-        moss_ratio,
-        leaf_color,
-        bark_color,
-        wind_flex,
-    }
-}
-
-fn generate_tree_parts(
-    request: &ObjectGenerationRequest,
-    profile: ProceduralTreeProfile,
-) -> Vec<GeneratedObjectPart> {
-    let mut parts = Vec::new();
-    if request.lod == ObjectLod::Far {
-        generate_far_tree_parts(&mut parts, profile);
-        return parts;
-    }
-
-    let trunk_points = trunk_points(profile, request.lod);
-    append_trunk_parts(&mut parts, profile, &trunk_points);
-    let branch_tips = append_branch_parts(&mut parts, profile, request.lod, &trunk_points);
-    append_leaf_parts(&mut parts, profile, request.lod, &branch_tips);
-    append_root_parts(&mut parts, profile, request.lod);
-    parts
-}
-
-fn generate_far_tree_parts(parts: &mut Vec<GeneratedObjectPart>, profile: ProceduralTreeProfile) {
-    let trunk = TreeSegment {
-        start: Vec3::new(0.0, profile.trunk_base_radius * 0.4, 0.0),
-        end: Vec3::new(
-            profile.lean.x * 0.6,
-            profile.height * 0.62,
-            profile.lean.y * 0.6,
-        ),
-        radius: profile.trunk_base_radius * 0.84,
-    };
-    parts.push(GeneratedObjectPart {
-        name: "TreeFarTrunk".to_string(),
-        recipe: ObjectMeshRecipe::Cylinder,
-        slot: ObjectMaterialSlot::BarkPrimary,
-        local_transform: transform_for_segment(trunk),
-        wind_band: Some(TreeWindBand::Trunk),
-    });
-    parts.push(GeneratedObjectPart {
-        name: "TreeFarCanopyMain".to_string(),
-        recipe: ObjectMeshRecipe::Sphere,
-        slot: ObjectMaterialSlot::LeafPrimary,
-        local_transform: Transform::from_xyz(
-            profile.lean.x * 0.58 + profile.canopy_eccentricity.x * 0.12,
-            profile.height * 0.72,
-            profile.lean.y * 0.58 + profile.canopy_eccentricity.y * 0.12,
-        )
-        .with_scale(Vec3::new(
-            profile.canopy_radius * 1.1,
-            profile.canopy_radius * 0.92,
-            profile.canopy_radius * 1.06,
-        )),
-        wind_band: Some(TreeWindBand::Leaf),
-    });
-    parts.push(GeneratedObjectPart {
-        name: "TreeFarCanopySecondary".to_string(),
-        recipe: ObjectMeshRecipe::Sphere,
-        slot: ObjectMaterialSlot::LeafSecondary,
-        local_transform: Transform::from_xyz(
-            profile.lean.x * 0.55 - profile.canopy_eccentricity.x * 0.09,
-            profile.height * 0.66,
-            profile.lean.y * 0.55 - profile.canopy_eccentricity.y * 0.09,
-        )
-        .with_scale(Vec3::new(
-            profile.canopy_radius * 0.84,
-            profile.canopy_radius * 0.72,
-            profile.canopy_radius * 0.76,
-        )),
-        wind_band: Some(TreeWindBand::Leaf),
-    });
-}
-
-fn trunk_points(profile: ProceduralTreeProfile, lod: ObjectLod) -> Vec<Vec3> {
-    let segment_count = match lod {
-        ObjectLod::Near => 7,
-        ObjectLod::Mid => 4,
-        ObjectLod::Far => 2,
-    };
-    let mut points = Vec::with_capacity(segment_count + 1);
-    for index in 0..=segment_count {
-        let t = index as f32 / segment_count as f32;
-        let bend = Vec2::new(
-            seeded_signed(profile.seed, 201 + index as u64 * 3),
-            seeded_signed(profile.seed, 203 + index as u64 * 3),
-        ) * profile.trunk_base_radius
-            * lerp(0.05, 0.34, t)
-            * (1.0 - t * 0.55);
-        let point = Vec3::new(
-            profile.lean.x * t + profile.canopy_eccentricity.x * t * t * 0.18 + bend.x,
-            profile.height * t,
-            profile.lean.y * t + profile.canopy_eccentricity.y * t * t * 0.18 + bend.y,
-        );
-        points.push(point);
-    }
-    points
-}
-
-fn append_trunk_parts(
-    parts: &mut Vec<GeneratedObjectPart>,
-    profile: ProceduralTreeProfile,
-    trunk_points: &[Vec3],
-) {
-    for index in 0..trunk_points.len().saturating_sub(1) {
-        let start = trunk_points[index];
-        let end = trunk_points[index + 1];
-        let t0 = index as f32 / (trunk_points.len() - 1) as f32;
-        let t1 = (index + 1) as f32 / (trunk_points.len() - 1) as f32;
-        let radius = profile.trunk_base_radius
-            * lerp(1.04, 0.24, ((t0 + t1) * 0.5).powf(0.95))
-            * (1.0 + seeded_signed(profile.seed, 251 + index as u64) * 0.08);
-        let segment = TreeSegment {
-            start,
-            end,
-            radius: radius.max(profile.trunk_base_radius * 0.18),
-        };
-        parts.push(GeneratedObjectPart {
-            name: format!("TreeTrunkSegment{index:02}"),
-            recipe: ObjectMeshRecipe::Cylinder,
-            slot: if index % 2 == 0 && profile.moss_ratio > 0.32 {
-                ObjectMaterialSlot::BarkWornEdge
-            } else {
-                ObjectMaterialSlot::BarkPrimary
-            },
-            local_transform: transform_for_segment(segment),
-            wind_band: Some(TreeWindBand::Trunk),
-        });
-    }
-}
-
-fn append_branch_parts(
-    parts: &mut Vec<GeneratedObjectPart>,
-    profile: ProceduralTreeProfile,
-    lod: ObjectLod,
-    trunk_points: &[Vec3],
-) -> Vec<Vec3> {
-    let mut tips = vec![*trunk_points.last().unwrap_or(&Vec3::Y)];
-    let primary_count = match lod {
-        ObjectLod::Near => profile.branch_count,
-        ObjectLod::Mid => (profile.branch_count as f32 * 0.64).round() as usize,
-        ObjectLod::Far => 2,
-    }
-    .max(4);
-    let tier_limit = match lod {
-        ObjectLod::Near => profile.branch_tiers,
-        ObjectLod::Mid => profile.branch_tiers.min(2),
-        ObjectLod::Far => 1,
-    };
-    for branch_index in 0..primary_count {
-        let primary = primary_branch_segment(profile, branch_index, trunk_points);
-        tips.push(primary.end);
-        parts.push(GeneratedObjectPart {
-            name: format!("TreePrimaryBranch{branch_index:02}"),
-            recipe: ObjectMeshRecipe::Cylinder,
-            slot: if seeded_unit(profile.seed, 301 + branch_index as u64)
-                < profile.dead_branch_ratio
-            {
-                ObjectMaterialSlot::BarkWornEdge
-            } else {
-                ObjectMaterialSlot::BarkPrimary
-            },
-            local_transform: transform_for_segment(primary),
-            wind_band: Some(TreeWindBand::Branch),
-        });
-
-        if tier_limit < 2 {
-            continue;
-        }
-
-        let secondary_count = if seeded_unit(profile.seed, 307 + branch_index as u64) > 0.56 {
-            2
-        } else {
-            1
-        };
-        for secondary_index in 0..secondary_count {
-            let secondary =
-                secondary_branch_segment(profile, branch_index, secondary_index, primary);
-            tips.push(secondary.end);
-            parts.push(GeneratedObjectPart {
-                name: format!("TreeSecondaryBranch{branch_index:02}_{secondary_index}"),
-                recipe: ObjectMeshRecipe::Cylinder,
-                slot: ObjectMaterialSlot::BarkPrimary,
-                local_transform: transform_for_segment(secondary),
-                wind_band: Some(TreeWindBand::Branch),
-            });
-
-            if tier_limit < 3 || seeded_unit(profile.seed, 313 + secondary_index as u64) < 0.42 {
-                continue;
-            }
-            let tertiary =
-                tertiary_branch_segment(profile, branch_index, secondary_index, secondary);
-            tips.push(tertiary.end);
-            parts.push(GeneratedObjectPart {
-                name: format!("TreeTertiaryBranch{branch_index:02}_{secondary_index}"),
-                recipe: ObjectMeshRecipe::Cylinder,
-                slot: ObjectMaterialSlot::BarkWornEdge,
-                local_transform: transform_for_segment(tertiary),
-                wind_band: Some(TreeWindBand::Branch),
-            });
-        }
-    }
-    tips
-}
-
-fn primary_branch_segment(
-    profile: ProceduralTreeProfile,
-    branch_index: usize,
-    trunk_points: &[Vec3],
-) -> TreeSegment {
-    let seed = profile.seed.wrapping_add(branch_index as u64 * 977);
-    let t = lerp(0.28, 0.9, seeded_unit(seed, 401));
-    let point_index = ((trunk_points.len() as f32 - 1.0) * t).floor() as usize;
-    let start = trunk_points[point_index.min(trunk_points.len() - 1)];
-    let angle = branch_index as f32 * 2.399_963 + seeded_signed(seed, 403) * 0.58;
-    let radial = Vec3::new(angle.cos(), 0.0, angle.sin());
-    let length = profile.canopy_radius * lerp(0.7, 1.2, seeded_unit(seed, 409));
-    let rise = profile.height * lerp(0.06, 0.22, seeded_unit(seed, 419));
-    let end = start
-        + radial * length
-        + Vec3::Y * rise
-        + Vec3::new(
-            profile.canopy_eccentricity.x,
-            0.0,
-            profile.canopy_eccentricity.y,
-        ) * 0.12;
-    TreeSegment {
-        start,
-        end,
-        radius: profile.trunk_base_radius
-            * lerp(0.24, 0.46, seeded_unit(seed, 421))
-            * (1.0 - t * 0.32),
-    }
-}
-
-fn secondary_branch_segment(
-    profile: ProceduralTreeProfile,
-    branch_index: usize,
-    secondary_index: usize,
-    primary: TreeSegment,
-) -> TreeSegment {
-    let seed = profile
-        .seed
-        .wrapping_add(branch_index as u64 * 379)
-        .wrapping_add(secondary_index as u64 * 47);
-    let primary_axis = (primary.end - primary.start).normalize_or_zero();
-    let side = Vec3::new(-primary_axis.z, 0.0, primary_axis.x).normalize_or_zero();
-    let start =
-        primary.start + (primary.end - primary.start) * lerp(0.52, 0.84, seeded_unit(seed, 433));
-    let direction = (primary_axis * 0.42
-        + side * seeded_signed(seed, 439) * 0.78
-        + Vec3::Y * lerp(0.42, 0.82, seeded_unit(seed, 443)))
-    .normalize_or_zero();
-    let length = primary.length() * lerp(0.32, 0.54, seeded_unit(seed, 449));
-    let end = start + direction * length;
-    TreeSegment {
-        start,
-        end,
-        radius: (primary.radius * lerp(0.48, 0.7, seeded_unit(seed, 457))).max(0.04),
-    }
-}
-
-fn tertiary_branch_segment(
-    profile: ProceduralTreeProfile,
-    branch_index: usize,
-    secondary_index: usize,
-    secondary: TreeSegment,
-) -> TreeSegment {
-    let seed = profile
-        .seed
-        .wrapping_add(branch_index as u64 * 887)
-        .wrapping_add(secondary_index as u64 * 131);
-    let axis = (secondary.end - secondary.start).normalize_or_zero();
-    let side = Vec3::new(axis.z, 0.0, -axis.x).normalize_or_zero();
-    let start = secondary.start
-        + (secondary.end - secondary.start) * lerp(0.62, 0.9, seeded_unit(seed, 463));
-    let end = start
-        + (axis * 0.38
-            + side * seeded_signed(seed, 467) * 0.52
-            + Vec3::Y * lerp(0.32, 0.62, seeded_unit(seed, 479)))
-        .normalize_or_zero()
-            * secondary.length()
-            * lerp(0.38, 0.58, seeded_unit(seed, 487));
-    TreeSegment {
-        start,
-        end,
-        radius: (secondary.radius * lerp(0.42, 0.66, seeded_unit(seed, 491))).max(0.025),
-    }
-}
-
-fn append_leaf_parts(
-    parts: &mut Vec<GeneratedObjectPart>,
-    profile: ProceduralTreeProfile,
-    lod: ObjectLod,
-    branch_tips: &[Vec3],
-) {
-    let cluster_scale = match lod {
-        ObjectLod::Near => 1.0,
-        ObjectLod::Mid => 0.56,
-        ObjectLod::Far => 0.3,
-    };
-    let cluster_count = ((profile.leaf_cluster_count as f32) * cluster_scale).round() as usize;
-    let cluster_count = cluster_count.max(6);
-    for cluster_index in 0..cluster_count {
-        let seed = profile.seed.wrapping_add(cluster_index as u64 * 2_653);
-        let anchor = branch_tips[cluster_index % branch_tips.len()];
-        let angle = cluster_index as f32 * 1.713 + seeded_signed(seed, 501) * 0.72;
-        let outward = Vec3::new(angle.cos(), seeded_signed(seed, 503) * 0.26, angle.sin());
-        let offset = outward
-            * profile.canopy_radius
-            * lerp(0.1, 0.48, seeded_unit(seed, 509))
-            * profile.leaf_density.clamp(0.62, 1.34);
-        let center = anchor + offset;
-
-        let lobe_count = match lod {
-            ObjectLod::Near => {
-                if seeded_unit(seed, 521) > 0.64 {
-                    3
-                } else {
-                    2
-                }
-            }
-            ObjectLod::Mid => 1,
-            ObjectLod::Far => 1,
-        };
-        for lobe in 0..lobe_count {
-            let lobe_seed = seed.wrapping_add(lobe as u64 * 37);
-            let lobe_offset = Vec3::new(
-                seeded_signed(lobe_seed, 523) * profile.canopy_radius * 0.24,
-                seeded_signed(lobe_seed, 541) * profile.canopy_radius * 0.18,
-                seeded_signed(lobe_seed, 547) * profile.canopy_radius * 0.24,
-            );
-            let scale = Vec3::new(
-                profile.canopy_radius * lerp(0.26, 0.72, seeded_unit(lobe_seed, 557)),
-                profile.canopy_radius * lerp(0.18, 0.48, seeded_unit(lobe_seed, 563)),
-                profile.canopy_radius * lerp(0.24, 0.68, seeded_unit(lobe_seed, 569)),
-            );
-            let dryness = profile.dead_branch_ratio + seeded_unit(lobe_seed, 571) * 0.24;
-            let slot = if dryness > 0.68 {
-                ObjectMaterialSlot::LeafDry
-            } else if lobe % 3 == 0 {
-                ObjectMaterialSlot::LeafSecondary
-            } else {
-                ObjectMaterialSlot::LeafPrimary
-            };
-            parts.push(GeneratedObjectPart {
-                name: format!("TreeLeafLobe{cluster_index:03}_{lobe}"),
-                recipe: if lobe % 2 == 0 {
-                    ObjectMeshRecipe::Sphere
-                } else {
-                    ObjectMeshRecipe::Cuboid
-                },
-                slot,
-                local_transform: Transform::from_translation(center + lobe_offset)
-                    .with_rotation(Quat::from_euler(
-                        EulerRot::XYZ,
-                        seeded_signed(lobe_seed, 577) * 0.4,
-                        angle + seeded_signed(lobe_seed, 587) * 0.22,
-                        seeded_signed(lobe_seed, 593) * 0.3,
-                    ))
-                    .with_scale(scale),
-                wind_band: Some(TreeWindBand::Leaf),
-            });
-        }
-    }
-}
-
-fn append_root_parts(
-    parts: &mut Vec<GeneratedObjectPart>,
-    profile: ProceduralTreeProfile,
-    lod: ObjectLod,
-) {
-    let root_count = match lod {
-        ObjectLod::Near => (3.0 + profile.root_exposure * 4.0).round() as usize,
-        ObjectLod::Mid => 2,
-        ObjectLod::Far => 1,
-    }
-    .max(1);
-    for root_index in 0..root_count {
-        let seed = profile.seed.wrapping_add(root_index as u64 * 631);
-        let angle = root_index as f32 * (std::f32::consts::TAU / root_count as f32)
-            + seeded_signed(seed, 601) * 0.38;
-        let start = Vec3::new(
-            angle.cos(),
-            0.16 + profile.root_exposure * 0.14,
-            angle.sin(),
-        ) * profile.trunk_base_radius
-            * 0.72;
-        let end = Vec3::new(
-            angle.cos() * profile.canopy_radius * lerp(0.16, 0.34, seeded_unit(seed, 607)),
-            0.02,
-            angle.sin() * profile.canopy_radius * lerp(0.16, 0.34, seeded_unit(seed, 613)),
-        );
-        let segment = TreeSegment {
-            start,
-            end,
-            radius: profile.trunk_base_radius
-                * lerp(0.22, 0.38, seeded_unit(seed, 617))
-                * profile.root_exposure.clamp(0.35, 1.1),
-        };
-        parts.push(GeneratedObjectPart {
-            name: format!("TreeRoot{root_index:02}"),
-            recipe: ObjectMeshRecipe::Cylinder,
-            slot: ObjectMaterialSlot::BarkWornEdge,
-            local_transform: transform_for_segment(segment),
-            wind_band: None,
-        });
-    }
-    parts.push(GeneratedObjectPart {
-        name: "TreeRootShadow".to_string(),
-        recipe: ObjectMeshRecipe::Sphere,
-        slot: ObjectMaterialSlot::RootShadow,
-        local_transform: Transform::from_xyz(profile.lean.x * 0.14, 0.03, profile.lean.y * 0.14)
-            .with_scale(Vec3::new(
-                profile.canopy_radius * 0.94,
-                0.05,
-                profile.canopy_radius * 0.78,
-            )),
-        wind_band: None,
-    });
-}
-
-fn tree_collision_recipe(
-    request: &ObjectGenerationRequest,
-    profile: ProceduralTreeProfile,
-) -> ObjectCollisionRecipe {
-    if request.lod == ObjectLod::Far || request.collision_mode == ObjectCollisionMode::VisualOnly {
-        return ObjectCollisionRecipe {
+        parts: Vec::new(),
+        collision: ObjectCollisionRecipe {
             trunk: None,
             root_blockers: Vec::new(),
             sensor: None,
-        };
-    }
-    let trunk = Some(TreeTrunkColliderRecipe {
-        radius: (profile.trunk_base_radius * 0.82).max(0.2),
-        height: (profile.height * 0.82).max(2.4),
-    });
-    let root_blockers = if request.collision_mode == ObjectCollisionMode::TrunkOnly {
-        Vec::new()
-    } else {
-        let root_count = if request.collision_mode == ObjectCollisionMode::Full {
-            4
-        } else {
-            2
-        };
-        (0..root_count)
-            .map(|index| {
-                let angle = index as f32 * (std::f32::consts::TAU / root_count as f32)
-                    + seeded_signed(profile.seed, 701 + index as u64) * 0.32;
-                TreeRootBlockerRecipe {
-                    center: Vec3::new(
-                        angle.cos() * profile.canopy_radius * 0.24,
-                        0.32,
-                        angle.sin() * profile.canopy_radius * 0.24,
-                    ),
-                    half_extents: Vec3::new(
-                        (profile.trunk_base_radius * 0.46).max(0.16),
-                        0.34,
-                        (profile.trunk_base_radius * 0.34).max(0.12),
-                    ),
-                    yaw: angle,
-                }
-            })
-            .collect()
-    };
-    let sensor = if request.collision_mode == ObjectCollisionMode::Full {
-        Some(TreeSensorRecipe {
-            center: Vec3::new(
-                profile.lean.x * 0.35,
-                profile.height * 0.58,
-                profile.lean.y * 0.35,
-            ),
-            half_extents: Vec3::new(
-                profile.canopy_radius * 0.72,
-                profile.height * 0.28,
-                profile.canopy_radius * 0.72,
-            ),
-        })
-    } else {
-        None
-    };
-    ObjectCollisionRecipe {
-        trunk,
-        root_blockers,
-        sensor,
+        },
+        animation: ObjectAnimationRecipe {
+            trunk_parts: 0,
+            branch_parts: 0,
+            leaf_parts: 0,
+            uses_gust_response: false,
+        },
+        stats: GeneratedObjectStats {
+            part_count: 0,
+            mesh_count: 0,
+            vertex_estimate: 0,
+            collider_count: 0,
+            generation_ms: 0.0,
+        },
     }
 }
 
@@ -2106,6 +1463,12 @@ fn refresh_object_gallery_codex(
 
     instances.sort_by_key(|instance| (instance.kind as u8, instance.stable_id));
     let sample = instances[0];
+    let family_definitions: Vec<_> = registry.families().collect();
+    let current_family_samples: Vec<_> = instances
+        .iter()
+        .copied()
+        .filter(|instance| instance.kind == sample.kind)
+        .collect();
     let near_count = instances
         .iter()
         .filter(|instance| instance.lod == ObjectLod::Near)
@@ -2127,22 +1490,26 @@ fn refresh_object_gallery_codex(
         .and_then(|state| state.selected_category)
         .map(|category| category.label())
         .unwrap_or("全部");
-    let (profile_version, geometry_version, slot_count) = registry
+    let (profile_version, geometry_version, slot_count, golden_seeds, semantics) = registry
         .family(sample.kind)
         .map(|family| {
             (
                 family.profile_version,
                 family.geometry_version,
                 family.material_slots.len(),
+                family.golden_seeds.clone(),
+                family.semantics.clone(),
             )
         })
         .unwrap_or((
             sample.profile_version,
             sample.geometry_version,
             sample.material_slots.len(),
+            Vec::new(),
+            Vec::new(),
         ));
 
-    let mut summary_lines = vec![
+    let summary_lines = vec![
         format!(
             "家族：{}  样本：{}  近/中/远：{}/{}/{}",
             sample.kind.label(),
@@ -2177,10 +1544,17 @@ fn refresh_object_gallery_codex(
             lighting_label,
             selected_category
         ),
+        format!(
+            "版本：profile v{}  geometry v{}  语义：{}",
+            profile_version,
+            geometry_version,
+            format_semantics(&semantics)
+        ),
     ];
 
+    let mut inspector_lines = Vec::new();
     match sample.profile {
-        GeneratedObjectProfile::Tree(profile) => summary_lines.push(format!(
+        GeneratedObjectProfile::Tree(profile) => inspector_lines.push(format!(
             "树参数：年龄 {:.0}y  高度 {:.1}m  健康 {:.0}%  叶密 {:.0}%  根暴露 {:.0}%  风柔性 {:.0}%",
             profile.age_years,
             profile.height,
@@ -2191,9 +1565,28 @@ fn refresh_object_gallery_codex(
         )),
     }
 
+    let approval_lines = vec![approval_distribution_line(&instances)];
+    let browser_lines = build_seed_browser_lines(&current_family_samples);
+    let family_lines = build_family_summary_lines(
+        &family_definitions,
+        sample.kind,
+        &golden_seeds,
+        current_family_samples.len(),
+    );
+    let slot_lines = build_slot_lines(&sample.material_slots);
+    let export_lines = vec![
+        format!("清单：{}", gallery_state.export_queue.export_path.display()),
+        format!(
+            "截图：{}",
+            gallery_state.export_queue.screenshot_path.display()
+        ),
+        "操作：O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单".to_string(),
+    ];
+    let overview_lines = summary_lines.clone();
+
     codex_state.visible = true;
     codex_state.title = "AssetCodex".to_string();
-    codex_state.subtitle = "图鉴展列区骨架".to_string();
+    codex_state.subtitle = "正式图鉴预览".to_string();
     codex_state.summary_lines = summary_lines;
     codex_state.slots = sample
         .material_slots
@@ -2204,6 +1597,32 @@ fn refresh_object_gallery_codex(
             material_id: slot.material_id.to_string(),
         })
         .collect();
+    codex_state.sections = vec![
+        AssetCodexSection {
+            title: "审查概览".to_string(),
+            lines: overview_lines,
+        },
+        AssetCodexSection {
+            title: "参数 Inspector".to_string(),
+            lines: inspector_lines,
+        },
+        AssetCodexSection {
+            title: "Seed 浏览".to_string(),
+            lines: browser_lines,
+        },
+        AssetCodexSection {
+            title: "家族注册".to_string(),
+            lines: family_lines.into_iter().chain(approval_lines).collect(),
+        },
+        AssetCodexSection {
+            title: "材质槽".to_string(),
+            lines: slot_lines,
+        },
+        AssetCodexSection {
+            title: "导出".to_string(),
+            lines: export_lines,
+        },
+    ];
     codex_state.controls_hint =
         "O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单".to_string();
     codex_state.export_manifest_path = gallery_state.export_queue.export_path.display().to_string();
@@ -2212,6 +1631,128 @@ fn refresh_object_gallery_codex(
         .screenshot_path
         .display()
         .to_string();
+}
+
+fn format_semantics(semantics: &[ObjectSemantic]) -> String {
+    if semantics.is_empty() {
+        return "未声明".to_string();
+    }
+    semantics
+        .iter()
+        .map(|semantic| semantic.label())
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+fn approval_distribution_line(instances: &[&ProceduralObjectInstance]) -> String {
+    let mut satisfied = 0;
+    let mut needs_revision = 0;
+    let mut performance_risk = 0;
+    let mut waiting_material = 0;
+    let mut disabled = 0;
+    for instance in instances {
+        match instance.approval {
+            ObjectApprovalState::Satisfied => satisfied += 1,
+            ObjectApprovalState::NeedsRevision => needs_revision += 1,
+            ObjectApprovalState::PerformanceRisk => performance_risk += 1,
+            ObjectApprovalState::WaitingMaterial => waiting_material += 1,
+            ObjectApprovalState::Disabled => disabled += 1,
+        }
+    }
+    format!(
+        "审核分布：满意 {}  需改 {}  性能风险 {}  待材质 {}  禁用 {}",
+        satisfied, needs_revision, performance_risk, waiting_material, disabled
+    )
+}
+
+fn build_seed_browser_lines(instances: &[&ProceduralObjectInstance]) -> Vec<String> {
+    if instances.is_empty() {
+        return vec!["当前家族还没有可见样本".to_string()];
+    }
+
+    let mut lines = Vec::new();
+    for lod in [ObjectLod::Near, ObjectLod::Mid, ObjectLod::Far] {
+        let seeds: Vec<_> = instances
+            .iter()
+            .filter(|instance| instance.lod == lod)
+            .take(4)
+            .map(|instance| format!("{}#{:04x}", lod.export_label(), instance.seed & 0xFFFF))
+            .collect();
+        if !seeds.is_empty() {
+            lines.push(seeds.join("  "));
+        }
+    }
+    lines
+}
+
+fn build_family_summary_lines(
+    families: &[&ObjectFamilyDefinition],
+    current_kind: ObjectKind,
+    golden_seeds: &[u64],
+    visible_sample_count: usize,
+) -> Vec<String> {
+    let current_family = families
+        .iter()
+        .copied()
+        .find(|family| family.kind == current_kind);
+    let mut lines = vec![format!(
+        "已注册 {} 个家族  当前可见样本 {}  当前语义 {}",
+        families.len(),
+        visible_sample_count,
+        current_family
+            .map(|family| format_semantics(&family.semantics))
+            .unwrap_or_else(|| "未声明".to_string())
+    )];
+    if !golden_seeds.is_empty() {
+        lines.push(format!(
+            "Golden Seeds：{}",
+            golden_seeds
+                .iter()
+                .take(4)
+                .map(|seed| format!("{seed:#014x}"))
+                .collect::<Vec<_>>()
+                .join("  ")
+        ));
+    }
+    lines.push(format!(
+        "家族索引：{}",
+        families
+            .iter()
+            .map(|family| {
+                let marker = if family.kind == current_kind {
+                    ">"
+                } else {
+                    "-"
+                };
+                format!(
+                    "{marker}{} v{}/{}",
+                    family.kind.label(),
+                    family.profile_version,
+                    family.geometry_version
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    ));
+    lines
+}
+
+fn build_slot_lines(slots: &[ObjectMaterialBinding]) -> Vec<String> {
+    if slots.is_empty() {
+        return vec!["当前家族没有材质槽声明".to_string()];
+    }
+
+    slots
+        .iter()
+        .map(|slot| {
+            format!(
+                "{} -> {} / {}",
+                slot.slot.export_label(),
+                material_family_label(slot.material_family),
+                slot.material_id
+            )
+        })
+        .collect()
 }
 
 fn export_profile(profile: &GeneratedObjectProfile) -> ObjectGalleryExportProfile {
@@ -2346,9 +1887,7 @@ mod tests {
     use super::{
         GeneratedObjectProfile, ObjectBiomeContext, ObjectCollisionMode, ObjectGalleryExport,
         ObjectGenerationRequest, ObjectKind, ObjectLod, ObjectSemantic, ObjectWeatherState,
-        ProceduralObjectRegistry, TREE_GALLERY_BASE_SEED, TREE_GEOMETRY_VERSION,
-        TREE_PROFILE_VERSION, generate_tree_asset, procedural_tree_profile, stable_object_id,
-        tree_family_definition,
+        ProceduralObjectRegistry, stable_object_id,
     };
     use crate::game::gallery::GalleryExportMode;
     use bevy::prelude::Transform;
@@ -2357,7 +1896,7 @@ mod tests {
     fn tree_profile_is_deterministic_for_same_request() {
         let request = ObjectGenerationRequest {
             kind: ObjectKind::Tree,
-            seed: TREE_GALLERY_BASE_SEED,
+            seed: super::families::tree::GALLERY_BASE_SEED,
             lod: ObjectLod::Near,
             transform: Transform::default(),
             biome: ObjectBiomeContext::Meadow,
@@ -2366,23 +1905,23 @@ mod tests {
             collision_mode: ObjectCollisionMode::Full,
             mode: super::ObjectGenerationMode::Gallery,
         };
-        let first = procedural_tree_profile(&request);
-        let second = procedural_tree_profile(&request);
+        let first = super::families::tree::build_profile(&request);
+        let second = super::families::tree::build_profile(&request);
         assert_eq!(first, second);
     }
 
     #[test]
     fn tree_profile_changes_with_seed_and_context() {
         let mut request = ObjectGenerationRequest::tree(
-            TREE_GALLERY_BASE_SEED,
+            super::families::tree::GALLERY_BASE_SEED,
             ObjectLod::Near,
             Transform::default(),
         );
-        let first = procedural_tree_profile(&request);
-        request.seed = TREE_GALLERY_BASE_SEED + 97;
+        let first = super::families::tree::build_profile(&request);
+        request.seed = super::families::tree::GALLERY_BASE_SEED + 97;
         request.biome = ObjectBiomeContext::Wetland;
         request.weather = ObjectWeatherState::DryWind;
-        let second = procedural_tree_profile(&request);
+        let second = super::families::tree::build_profile(&request);
 
         assert_ne!(first.height, second.height);
         assert_ne!(first.leaf_color, second.leaf_color);
@@ -2393,7 +1932,7 @@ mod tests {
     fn tree_profile_bounds_stay_reviewable() {
         for index in 0..48_u64 {
             let mut request = ObjectGenerationRequest::tree(
-                TREE_GALLERY_BASE_SEED + index,
+                super::families::tree::GALLERY_BASE_SEED + index,
                 ObjectLod::Near,
                 Transform::default(),
             );
@@ -2405,7 +1944,7 @@ mod tests {
                 4 => ObjectBiomeContext::RuinEdge,
                 _ => ObjectBiomeContext::DesertWind,
             };
-            let profile = procedural_tree_profile(&request);
+            let profile = super::families::tree::build_profile(&request);
 
             assert!((4.0..=12.0).contains(&profile.height));
             assert!((0.18..=0.9).contains(&profile.trunk_base_radius));
@@ -2421,32 +1960,32 @@ mod tests {
         let a = stable_object_id(
             ObjectKind::Tree,
             42,
-            TREE_PROFILE_VERSION,
-            TREE_GEOMETRY_VERSION,
+            super::families::tree::PROFILE_VERSION,
+            super::families::tree::GEOMETRY_VERSION,
         );
         let b = stable_object_id(
             ObjectKind::Tree,
             42,
-            TREE_PROFILE_VERSION,
-            TREE_GEOMETRY_VERSION,
+            super::families::tree::PROFILE_VERSION,
+            super::families::tree::GEOMETRY_VERSION,
         );
         let c = stable_object_id(
             ObjectKind::Tree,
             43,
-            TREE_PROFILE_VERSION,
-            TREE_GEOMETRY_VERSION,
+            super::families::tree::PROFILE_VERSION,
+            super::families::tree::GEOMETRY_VERSION,
         );
         let d = stable_object_id(
             ObjectKind::Rock,
             42,
-            TREE_PROFILE_VERSION,
-            TREE_GEOMETRY_VERSION,
+            super::families::tree::PROFILE_VERSION,
+            super::families::tree::GEOMETRY_VERSION,
         );
         let e = stable_object_id(
             ObjectKind::Tree,
             42,
-            TREE_PROFILE_VERSION + 1,
-            TREE_GEOMETRY_VERSION,
+            super::families::tree::PROFILE_VERSION + 1,
+            super::families::tree::GEOMETRY_VERSION,
         );
 
         assert_eq!(a, b);
@@ -2475,19 +2014,33 @@ mod tests {
 
     #[test]
     fn near_tree_generation_contains_more_detail_than_far() {
-        let family = tree_family_definition();
+        let family = super::families::tree::definition();
         let near_request =
             ObjectGenerationRequest::tree(0xABC, ObjectLod::Near, Transform::default());
         let far_request =
             ObjectGenerationRequest::tree(0xABC, ObjectLod::Far, Transform::default());
 
-        let near = generate_tree_asset(near_request, &family);
-        let far = generate_tree_asset(far_request, &family);
+        let near = super::families::tree::generate_asset(near_request, &family);
+        let far = super::families::tree::generate_asset(far_request, &family);
 
         assert!(near.stats.part_count > far.stats.part_count);
         assert!(near.stats.vertex_estimate > far.stats.vertex_estimate);
         assert!(near.stats.collider_count >= far.stats.collider_count);
         assert!(matches!(near.profile, GeneratedObjectProfile::Tree(_)));
+    }
+
+    #[test]
+    fn tree_family_declares_golden_seeds_and_versions() {
+        let family = super::families::tree::definition();
+        assert_eq!(
+            family.profile_version,
+            super::families::tree::PROFILE_VERSION
+        );
+        assert_eq!(
+            family.geometry_version,
+            super::families::tree::GEOMETRY_VERSION
+        );
+        assert!(family.golden_seeds.len() >= 3);
     }
 
     #[test]
