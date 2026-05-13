@@ -259,6 +259,10 @@ impl ProceduralAssetMaterials {
         }
     }
 
+    pub fn handle_for_family(&self, family: ProceduralMaterialFamily) -> Handle<StandardMaterial> {
+        self.family(family)
+    }
+
     fn warm_light(&self) -> Handle<StandardMaterial> {
         self.warm_light.clone()
     }

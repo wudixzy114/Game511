@@ -177,6 +177,7 @@ pub enum DaoColliderSource {
     ProceduralAsset,
     VillageProxy,
     MaterialGallery,
+    ObjectGallery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
