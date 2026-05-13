@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs::{self, File},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -9,6 +10,9 @@ use tracing_subscriber::{
     fmt::{self, writer::BoxMakeWriter},
     layer::SubscriberExt,
 };
+
+#[cfg(feature = "tracy-profile")]
+use tracing_tracy::TracyLayer;
 
 use super::{config::AppConfig, error::DaoError};
 
@@ -98,12 +102,32 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
             metadata.target().starts_with("dao_game::performance")
         }));
 
-    tracing::subscriber::set_global_default(
-        Registry::default()
-            .with(app_layer)
-            .with(error_layer)
-            .with(perf_layer),
-    )?;
+    let subscriber = Registry::default()
+        .with(app_layer)
+        .with(error_layer)
+        .with(perf_layer);
+
+    if tracy_enabled() {
+        #[cfg(feature = "tracy-profile")]
+        {
+        tracing::subscriber::set_global_default(subscriber.with(TracyLayer::default()))?;
+        tracing::info!(
+            target: "dao_game::bootstrap",
+            "tracy profiling enabled"
+        );
+        }
+
+        #[cfg(not(feature = "tracy-profile"))]
+        {
+            tracing::subscriber::set_global_default(subscriber)?;
+            tracing::warn!(
+                target: "dao_game::bootstrap",
+                "DAO_PROFILE_TRACY was set but binary was built without tracy-profile feature"
+            );
+        }
+    } else {
+        tracing::subscriber::set_global_default(subscriber)?;
+    }
 
     LOG_GUARDS
         .set(vec![app_guard, error_guard, perf_guard])
@@ -111,6 +135,13 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
 
     tracing::info!(target: "dao_game::bootstrap", log_file = %app_log.display(), "logging initialized");
     Ok(())
+}
+
+fn tracy_enabled() -> bool {
+    matches!(
+        env::var("DAO_PROFILE_TRACY").ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "on" | "ON")
+    )
 }
 
 fn active_log_path(directory: &Path, file_name: &str) -> PathBuf {
