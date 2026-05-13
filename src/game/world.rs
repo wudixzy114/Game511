@@ -1571,50 +1571,51 @@ fn spawn_world(
     });
     let detail_materials = DetailMaterials {
         grove: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.17, 0.4, 0.21),
-            perceptual_roughness: 0.9,
+            base_color: Color::srgb(0.14, 0.36, 0.18),
+            perceptual_roughness: 0.94,
             ..Default::default()
         }),
         meadow: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.41, 0.48, 0.27),
-            perceptual_roughness: 0.95,
-            ..Default::default()
-        }),
-        steppe: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.56, 0.47, 0.28),
+            base_color: Color::srgb(0.38, 0.45, 0.24),
             perceptual_roughness: 0.98,
             ..Default::default()
         }),
+        steppe: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.48, 0.41, 0.26),
+            perceptual_roughness: 0.98,
+            reflectance: 0.05,
+            ..Default::default()
+        }),
         ridge: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.46, 0.44, 0.43),
+            base_color: Color::srgb(0.42, 0.41, 0.4),
             perceptual_roughness: 0.99,
             ..Default::default()
         }),
         sand: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.74, 0.62, 0.38),
+            base_color: Color::srgb(0.69, 0.58, 0.36),
             perceptual_roughness: 1.0,
             reflectance: 0.05,
             ..Default::default()
         }),
         oasis: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.22, 0.43, 0.29),
-            perceptual_roughness: 0.92,
+            base_color: Color::srgb(0.19, 0.39, 0.27),
+            perceptual_roughness: 0.95,
             ..Default::default()
         }),
         wetland: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.25, 0.34, 0.25),
-            perceptual_roughness: 0.72,
-            reflectance: 0.16,
+            base_color: Color::srgb(0.22, 0.29, 0.22),
+            perceptual_roughness: 0.84,
+            reflectance: 0.1,
             ..Default::default()
         }),
     };
     let detail_mesh_blueprints = DetailMeshBlueprints {
-        meadow: detail_mesh_blueprint(Mesh::from(Capsule3d::new(0.09, 0.6)), 0.35),
-        grove: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.18, 1.8)), 0.92),
-        steppe: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.28, 0.42)), 0.18),
-        ridge: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.16, 2.4)), 1.15),
-        sand: detail_mesh_blueprint(Mesh::from(Cuboid::new(1.25, 0.035, 0.16)), 0.035),
-        oasis: detail_mesh_blueprint(Mesh::from(Cone::new(0.42, 1.4)), 0.68),
+        meadow: detail_mesh_blueprint(Mesh::from(Capsule3d::new(0.075, 0.78)), 0.42),
+        grove: detail_mesh_blueprint(Mesh::from(Cylinder::new(0.2, 2.1)), 1.08),
+        steppe: detail_mesh_blueprint(Mesh::from(Cuboid::new(0.32, 0.18, 0.2)), 0.08),
+        ridge: detail_mesh_blueprint(Mesh::from(Cuboid::new(0.18, 1.9, 0.24)), 0.9),
+        sand: detail_mesh_blueprint(Mesh::from(Cuboid::new(1.65, 0.028, 0.12)), 0.028),
+        oasis: detail_mesh_blueprint(Mesh::from(Cone::new(0.36, 1.8)), 0.9),
     };
     let detail_config = TerrainDetailConfig {
         density: config.world.detail_density.clamp(0.0, 2.0),
@@ -2742,13 +2743,13 @@ fn collect_scatter_placements_for_key(
 
             let detail_factor = scatter_noise(context.seed, tile_x, tile_z, 37);
             let threshold = match tile.biome() {
-                BiomeKind::Meadow => 0.34 - tile.river() * 0.08,
+                BiomeKind::Meadow => 0.28 - tile.river() * 0.12 - tile.moisture() * 0.05,
                 BiomeKind::Grove => 0.18,
-                BiomeKind::Steppe => 0.52 + tile.erosion() * 0.08,
-                BiomeKind::Ridge => 0.4 - tile.erosion() * 0.06,
-                BiomeKind::DesertSand => 0.78,
-                BiomeKind::Gobi => 0.54,
-                BiomeKind::Oasis => 0.18,
+                BiomeKind::Steppe => 0.48 + tile.erosion() * 0.1,
+                BiomeKind::Ridge => 0.36 - tile.erosion() * 0.05,
+                BiomeKind::DesertSand => 0.7 - tile.river() * 0.06 - tile.moisture() * 0.04,
+                BiomeKind::Gobi => 0.46,
+                BiomeKind::Oasis => 0.14 - tile.moisture() * 0.04,
                 BiomeKind::Water => 1.0,
             };
             let should_spawn = match tile.biome() {
@@ -2773,7 +2774,7 @@ fn collect_scatter_placements_for_key(
             let placement = ScatterPlacement {
                 position: Vec3::new(world_x, height, world_z),
                 biome: tile.biome(),
-                scale: 0.72
+                scale: 0.58
                     + scatter_noise(context.seed, tile_x, tile_z, 89) * 0.8
                     + tile.river() * 0.18
                     - tile.erosion() * 0.1
@@ -2792,11 +2793,13 @@ fn scatter_threshold_for_density(base_threshold: f32, density: f32) -> f32 {
 fn biome_scatter_scale_bias(biome: BiomeKind) -> f32 {
     match biome {
         BiomeKind::DesertSand => 0.28,
-        BiomeKind::Gobi => 0.12,
-        BiomeKind::Oasis => 0.32,
-        BiomeKind::Ridge => 0.18,
+        BiomeKind::Gobi => 0.08,
+        BiomeKind::Oasis => 0.38,
+        BiomeKind::Ridge => 0.22,
         BiomeKind::Water => 0.0,
-        BiomeKind::Meadow | BiomeKind::Grove | BiomeKind::Steppe => 0.0,
+        BiomeKind::Meadow => 0.08,
+        BiomeKind::Grove => 0.14,
+        BiomeKind::Steppe => -0.04,
     }
 }
 
@@ -3213,22 +3216,44 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
     let wet = (sample.river * 0.75 + sample.moisture * 0.25).clamp(0.0, 1.0);
     let sediment = sample.sediment.clamp(0.0, 1.0);
     let grain = terrain_grain(sample);
-    let sand_ripple = if sample.biome == BiomeKind::DesertSand {
-        ((sample.world_x * 0.23 + sample.world_z * 0.06).sin() * 0.5 + 0.5) * 0.12
+    let dust = ((1.0 - wet) * (0.45 + sample.temperature * 0.35) + rocky * 0.18).clamp(0.0, 1.0);
+    let shore_blend = shoreline_factor(sample, water_level);
+    let wet_edge = wet * shore_blend * 0.22;
+    let wind_alignment = directional_wind_pattern(sample.world_x, sample.world_z);
+    let sand_ripple = match sample.biome {
+        BiomeKind::DesertSand => wind_alignment * (0.09 + dust * 0.08),
+        BiomeKind::Gobi => wind_alignment * (0.04 + rocky * 0.03),
+        _ => 0.0,
+    };
+    let mineral_breakup = layered_micro_breakup(sample.world_x, sample.world_z);
+    let grass_variation = biome_grass_variation(sample);
+    let pebble_shadow = if rocky > 0.42 {
+        mineral_breakup * rocky * 0.06
     } else {
         0.0
     };
-    let wet_edge = if sample.height <= water_level + 0.28 || sample.river > 0.35 {
-        wet * 0.14
-    } else {
-        0.0
-    };
+    let cool_wet_tint = wet_edge * 0.14 + shore_blend * 0.04;
+    let warm_dust_tint = dust * 0.05 + sand_ripple * 0.04;
     Color::linear_rgba(
-        (r + sediment * 0.08 - rocky * 0.06 + grain * 0.04 + sand_ripple * 0.05 - wet_edge * 0.06)
+        (r + sediment * 0.08 - rocky * 0.06
+            + grain * 0.03
+            + mineral_breakup * 0.03
+            + sand_ripple * 0.06
+            + grass_variation.x
+            - cool_wet_tint
+            + warm_dust_tint
+            - pebble_shadow)
             .clamp(0.0, 1.0),
-        (g + wet * 0.04 - rocky * 0.04 + grain * 0.025 + sand_ripple * 0.03 - wet_edge * 0.04)
+        (g + wet * 0.04 - rocky * 0.04 + grain * 0.02 + grass_variation.y + sand_ripple * 0.035
+            - wet_edge * 0.035
+            - dust * 0.018)
             .clamp(0.0, 1.0),
-        (b + wet * 0.06 + rocky * 0.03 - grain * 0.025 - sand_ripple * 0.02 + wet_edge * 0.08)
+        (b + wet * 0.06 + rocky * 0.03 - grain * 0.03
+            + mineral_breakup * 0.015
+            + grass_variation.z
+            - sand_ripple * 0.025
+            + cool_wet_tint
+            - dust * 0.012)
             .clamp(0.0, 1.0),
         1.0,
     )
@@ -3239,6 +3264,38 @@ fn terrain_grain(sample: &TerrainVertexSample) -> f32 {
         + (sample.world_z * 0.41).cos() * 0.35
         + ((sample.world_x + sample.world_z) * 0.17).sin() * 0.1;
     value.clamp(-1.0, 1.0)
+}
+
+fn layered_micro_breakup(world_x: f32, world_z: f32) -> f32 {
+    let broad = (world_x * 0.11).sin() * 0.45 + (world_z * 0.09).cos() * 0.35;
+    let fine = ((world_x + world_z) * 0.43).sin() * 0.16
+        + ((world_x * 0.77) - world_z * 0.52).cos() * 0.12;
+    (broad + fine).clamp(-1.0, 1.0)
+}
+
+fn directional_wind_pattern(world_x: f32, world_z: f32) -> f32 {
+    let ridge = (world_x * 0.19 + world_z * 0.05).sin() * 0.5 + 0.5;
+    let secondary = ((world_x * 0.07) - world_z * 0.13).cos() * 0.5 + 0.5;
+    (ridge * 0.68 + secondary * 0.32).clamp(0.0, 1.0)
+}
+
+fn shoreline_factor(sample: &TerrainVertexSample, water_level: f32) -> f32 {
+    if sample.height <= water_level + 0.08 {
+        return 1.0;
+    }
+    let height_band = (1.0 - ((sample.height - water_level - 0.08) / 0.42)).clamp(0.0, 1.0);
+    let river_band = ((sample.river - 0.18) / 0.42).clamp(0.0, 1.0);
+    (height_band.max(river_band) * (0.55 + sample.moisture * 0.45)).clamp(0.0, 1.0)
+}
+
+fn biome_grass_variation(sample: &TerrainVertexSample) -> Vec3 {
+    match sample.biome {
+        BiomeKind::Meadow => Vec3::new(0.0, terrain_grain(sample) * 0.035, -sample.slope * 0.01),
+        BiomeKind::Grove => Vec3::new(-0.01, terrain_grain(sample) * 0.045, 0.0),
+        BiomeKind::Steppe => Vec3::new(0.018, 0.008, -0.008),
+        BiomeKind::Oasis => Vec3::new(-0.005, 0.05, 0.015),
+        _ => Vec3::ZERO,
+    }
 }
 
 fn detail_visuals_for_biome(
@@ -3399,7 +3456,7 @@ mod tests {
 
     use bevy::{
         math::primitives::Capsule3d,
-        prelude::{Assets, Mesh, Vec3},
+        prelude::{Assets, ColorToComponents, Mesh, Vec3},
     };
 
     use crate::core::config::{
@@ -4008,6 +4065,67 @@ mod tests {
 
         assert!(reduced > base);
         assert!(boosted < base);
+    }
+
+    #[test]
+    fn shoreline_factor_is_stronger_near_water_than_far_from_water() {
+        let near = super::TerrainVertexSample {
+            world_x: 0.0,
+            world_z: 0.0,
+            height: 0.06,
+            moisture: 0.8,
+            temperature: 0.6,
+            slope: 0.08,
+            river: 0.42,
+            erosion: 0.1,
+            sediment: 0.22,
+            biome: BiomeKind::Meadow,
+        };
+        let far = super::TerrainVertexSample {
+            height: 1.2,
+            river: 0.0,
+            ..near
+        };
+
+        assert!(super::shoreline_factor(&near, 0.0) > super::shoreline_factor(&far, 0.0));
+    }
+
+    #[test]
+    fn terrain_texture_color_separates_meadow_from_desert_surface() {
+        let meadow = super::TerrainVertexSample {
+            world_x: 12.0,
+            world_z: -8.0,
+            height: 1.0,
+            moisture: 0.74,
+            temperature: 0.62,
+            slope: 0.14,
+            river: 0.12,
+            erosion: 0.08,
+            sediment: 0.18,
+            biome: BiomeKind::Meadow,
+        };
+        let desert = super::TerrainVertexSample {
+            moisture: 0.18,
+            temperature: 0.86,
+            slope: 0.1,
+            river: 0.0,
+            erosion: 0.16,
+            sediment: 0.26,
+            biome: BiomeKind::DesertSand,
+            ..meadow
+        };
+
+        let meadow_color = super::terrain_texture_color(&meadow, 0.0)
+            .to_linear()
+            .to_f32_array();
+        let desert_color = super::terrain_texture_color(&desert, 0.0)
+            .to_linear()
+            .to_f32_array();
+
+        let meadow_balance = meadow_color[1] - meadow_color[0];
+        let desert_balance = desert_color[1] - desert_color[0];
+        assert!(meadow_balance > desert_balance);
+        assert!(desert_color[0] > meadow_color[0] * 0.9);
     }
 
     #[test]
