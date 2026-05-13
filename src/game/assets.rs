@@ -494,17 +494,13 @@ pub fn preferred_recipe_path(kind: ProceduralAssetKind) -> Option<&'static str> 
     }
 }
 
-pub fn default_placeholder_enabled(config: &AssetConfig, kind: ProceduralAssetKind) -> bool {
+pub fn default_placeholder_enabled(config: &AssetConfig, _kind: ProceduralAssetKind) -> bool {
     if !config.foundation_proxy_mode {
         return true;
     }
-    match asset_foundation_class(kind) {
-        AssetFoundationClass::CharacterActor => config.animate_placeholder_characters,
-        AssetFoundationClass::EnvironmentStructure | AssetFoundationClass::EnvironmentAccent => {
-            config.animate_placeholder_ambience
-        }
-        AssetFoundationClass::LandmarkHero => true,
-    }
+    // Proxy mode selects simplified procedural stand-ins, but it should not hide them.
+    // Placeholder animation remains independently controlled by the animate_* flags.
+    true
 }
 
 fn asset_presentation_anchor(
@@ -2371,9 +2367,10 @@ fn fallback_spec(kind: ProceduralAssetKind) -> ProceduralAssetSpec {
 mod tests {
     use super::{
         ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetRegistry,
-        ProceduralLodStrategy, ProceduralSemantic, asset_blueprint, choose_lod, registered_spec,
-        stable_asset_id,
+        ProceduralLodStrategy, ProceduralSemantic, asset_blueprint, choose_lod,
+        default_placeholder_enabled, registered_spec, stable_asset_id,
     };
+    use crate::core::config::AssetConfig;
 
     #[test]
     fn registry_contains_first_visual_asset_families() {
@@ -2529,5 +2526,27 @@ mod tests {
         assert_eq!(choose_lod(&pyramid, 120.0), ProceduralAssetLod::Near);
         assert_eq!(choose_lod(&pyramid, 900.0), ProceduralAssetLod::Mid);
         assert_eq!(choose_lod(&pyramid, 1_800.0), ProceduralAssetLod::Far);
+    }
+
+    #[test]
+    fn proxy_mode_keeps_visual_placeholders_visible_even_when_animation_is_off() {
+        let config = AssetConfig {
+            color_saturation: 1.0,
+            warm_light_intensity: 1.0,
+            water_alpha: 0.64,
+            shadow_alpha: 0.58,
+            foundation_proxy_mode: true,
+            animate_placeholder_characters: false,
+            animate_placeholder_ambience: false,
+        };
+
+        assert!(default_placeholder_enabled(
+            &config,
+            ProceduralAssetKind::VillageHouse
+        ));
+        assert!(default_placeholder_enabled(
+            &config,
+            ProceduralAssetKind::Sheep
+        ));
     }
 }
