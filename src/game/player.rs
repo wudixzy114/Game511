@@ -11,6 +11,7 @@ use crate::{
     },
     game::{
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
+        regions::RegionGraphState,
         world::{
             TerrainCollisionProxy, TerrainCollisionSample, WandererPrototype, WorldCamera, WorldMap,
         },
@@ -364,6 +365,7 @@ fn move_player_body(
     mut performance: ResMut<FramePerformance>,
     state: Option<ResMut<FirstPersonState>>,
     bootstrap: Option<Res<FirstPersonBootstrap>>,
+    regions: Option<Res<RegionGraphState>>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
     let started_at = std::time::Instant::now();
@@ -372,6 +374,12 @@ fn move_player_body(
         return;
     };
     if bootstrap.pending {
+        return;
+    }
+    if regions
+        .as_deref()
+        .is_some_and(|regions| regions.crossing.is_some())
+    {
         return;
     }
     let Some(mut state) = state else {

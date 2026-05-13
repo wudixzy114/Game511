@@ -43,6 +43,7 @@ pub struct RegionGraphState {
     pub current_region: RegionId,
     pub nearest_gate: Option<GateProximity>,
     pub discovered_gates: Vec<u64>,
+    pub crossing: Option<GateCrossingState>,
 }
 
 impl RegionGraphState {
@@ -196,6 +197,17 @@ pub struct GateProximity {
     pub open: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateCrossingState {
+    pub gate_id: u64,
+    pub gate_kind: TransitionGateKind,
+    pub to_region: RegionId,
+    pub elapsed_seconds: f32,
+    pub duration_seconds: f32,
+    pub start_position: Vec3,
+    pub destination: Vec3,
+}
+
 #[derive(Debug, Component)]
 struct TransitionGateVisual {
     gate_id: u64,
@@ -208,6 +220,7 @@ struct RegionMaterials {
 }
 
 const GATE_INTERACTION_RADIUS: f32 = 8.0;
+const GATE_CROSSING_SECONDS: f32 = 1.8;
 
 type GateUpdateResources<'w> = (
     Res<'w, ButtonInput<KeyCode>>,
@@ -447,6 +460,7 @@ pub fn build_region_graph(
         current_region: village_region,
         nearest_gate: None,
         discovered_gates: Vec::new(),
+        crossing: None,
     }
 }
 
@@ -461,6 +475,51 @@ fn update_transition_gate_state(
     let Some(player_transform) = player_query.iter().next() else {
         return;
     };
+    if let Some(crossing) = graph.crossing.as_mut() {
+        crossing.elapsed_seconds += time.delta_secs();
+        let t = (crossing.elapsed_seconds / crossing.duration_seconds.max(0.01)).clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t);
+        let lifted = crossing.start_position.lerp(crossing.destination, eased)
+            + Vec3::Y * (0.6 * (1.0 - (2.0 * t - 1.0).abs()));
+        if let Some(mut player_transform) = player_query.iter_mut().next() {
+            player_transform.translation = lifted;
+        }
+        if t >= 1.0 {
+            let gate_id = crossing.gate_id;
+            let gate_kind = crossing.gate_kind;
+            graph.current_region = crossing.to_region;
+            if let Some(gate) = graph.gates.iter_mut().find(|gate| gate.id == gate_id) {
+                gate.state = TransitionGateState::Crossed;
+            }
+            let region_label = graph
+                .region(graph.current_region)
+                .map(|region| region.kind.label());
+            let _ = record_notebook_entry(
+                notebook.as_deref_mut(),
+                NotebookRecord {
+                    kind: NotebookEntryKind::Place,
+                    at_seconds: time.elapsed_secs(),
+                    location: region_label.map(str::to_string),
+                    source: NotebookSource::PlaceArrival,
+                    title: format!("穿过{}", gate_kind.label()),
+                    body:
+                        "你真正从旧边界走了过去。雾、水声和脚下的地面一起变了，村庄已经留在身后。"
+                            .to_string(),
+                    tags: vec![NotebookTag::Omen, NotebookTag::Memory],
+                },
+            );
+            tracing::info!(
+                target: "dao_game::regions::transition",
+                gate_id,
+                gate = gate_kind.label(),
+                to_region = region_label,
+                "natural boundary crossed"
+            );
+            graph.crossing = None;
+        }
+        return;
+    }
+
     let player_position = player_transform.translation;
     let mut nearest = None;
     let mut changed_gate_ids = Vec::new();
@@ -557,26 +616,38 @@ fn update_transition_gate_state(
         let gate_id = graph.gates[gate_index].id;
         let gate_kind = graph.gates[gate_index].kind;
         let to_region = graph.gates[gate_index].to;
-        graph.gates[gate_index].state = TransitionGateState::Crossed;
-        graph.current_region = to_region;
         let destination = graph
-            .region(graph.current_region)
+            .region(to_region)
             .map(|region| region.center + Vec3::Y * 1.2);
-        let region_label = graph
-            .region(graph.current_region)
-            .map(|region| region.kind.label());
-        if let (Some(destination), Some(mut player_transform)) =
-            (destination, player_query.iter_mut().next())
-        {
-            player_transform.translation = destination;
+        if let Some(destination) = destination {
+            graph.crossing = Some(GateCrossingState {
+                gate_id,
+                gate_kind,
+                to_region,
+                elapsed_seconds: 0.0,
+                duration_seconds: GATE_CROSSING_SECONDS,
+                start_position: player_position,
+                destination,
+            });
+            let _ = record_notebook_entry(
+                notebook.as_deref_mut(),
+                NotebookRecord {
+                    kind: NotebookEntryKind::Observation,
+                    at_seconds: time.elapsed_secs(),
+                    location: Some(gate_kind.label().to_string()),
+                    source: NotebookSource::Observation,
+                    title: format!("开始通过{}", gate_kind.label()),
+                    body: "你没有消失在一扇门里，而是真的向着雾和旧水声走了过去。".to_string(),
+                    tags: vec![NotebookTag::Omen, NotebookTag::Memory],
+                },
+            );
+            tracing::info!(
+                target: "dao_game::regions::transition",
+                gate_id,
+                gate = gate_kind.label(),
+                "natural boundary crossing started"
+            );
         }
-        tracing::info!(
-            target: "dao_game::regions::transition",
-            gate_id,
-            gate = gate_kind.label(),
-            to_region = region_label,
-            "natural boundary crossed"
-        );
     }
 }
 
@@ -597,7 +668,10 @@ fn update_transition_gate_visuals(
         let visible = matches!(
             gate.state,
             TransitionGateState::Hinted | TransitionGateState::Open | TransitionGateState::Crossed
-        );
+        ) || graph
+            .crossing
+            .as_ref()
+            .is_some_and(|crossing| crossing.gate_id == gate.id);
         *visibility = if visible {
             Visibility::Visible
         } else {
@@ -609,7 +683,16 @@ fn update_transition_gate_visuals(
             TransitionGateState::Hinted => 0.42,
             TransitionGateState::Hidden => 0.0,
         };
-        transform.scale = Vec3::splat(0.85 + pulse * 0.35);
+        let crossing_boost = if graph
+            .crossing
+            .as_ref()
+            .is_some_and(|crossing| crossing.gate_id == gate.id)
+        {
+            0.28
+        } else {
+            0.0
+        };
+        transform.scale = Vec3::splat(0.85 + pulse * 0.35 + crossing_boost);
     }
 }
 
@@ -857,6 +940,7 @@ mod tests {
             nearest_actor: None,
             interaction_prompt: None,
             player_was_bootstrapped: true,
+            herding: Default::default(),
         }
     }
 

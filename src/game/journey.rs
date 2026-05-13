@@ -11,7 +11,7 @@ use crate::game::{
     },
     places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance},
     signs::{OmenKind, SignState},
-    village::{VillageAreaKind, VillageState},
+    village::{HerdingPhase, VillageAreaKind, VillageState},
     world::{BiomeKind, WandererPrototype, WorldCamera, WorldGridCoord},
 };
 
@@ -321,6 +321,7 @@ pub struct JourneyAdvanceContext {
     pub current_omen: Option<OmenKind>,
     pub village_focus: bool,
     pub leaving_village: bool,
+    pub herding_completed: bool,
 }
 
 const DEFAULT_ARRIVAL_RADIUS: f32 = 13.5;
@@ -448,6 +449,9 @@ fn advance_journey_session(
             current_omen: sign_state.and_then(|signs| signs.current_omen),
             village_focus: village_context.0,
             leaving_village: village_context.1,
+            herding_completed: village
+                .as_deref()
+                .is_some_and(|village| village.herding.first_task_completed),
         },
     );
 
@@ -671,13 +675,18 @@ fn advance_story_arc_state(
             }
         }
         StoryArcStage::VillageLife => {
-            if state.story_elapsed >= VILLAGE_LIFE_SECONDS || state.village_day >= 2 {
+            if (context.herding_completed && state.story_elapsed >= 4.0)
+                || state.story_elapsed >= VILLAGE_LIFE_SECONDS
+                || state.village_day >= 2
+            {
                 transition_story_stage(state, StoryArcStage::DreamApproaching, events);
                 transition_dream_phase(state, DreamPhase::Ready, events);
             }
         }
         StoryArcStage::DreamApproaching => {
-            if state.dream.phase_elapsed >= DREAM_READY_SECONDS || context.leaving_village {
+            if state.dream.phase_elapsed >= DREAM_READY_SECONDS
+                || (context.leaving_village && context.herding_completed)
+            {
                 transition_story_stage(state, StoryArcStage::Dreaming, events);
                 transition_dream_phase(state, DreamPhase::InDream, events);
             }
@@ -1067,6 +1076,13 @@ fn village_context(village: Option<&VillageState>, player_position: Vec3) -> (bo
             )
         })
         .any(|area| planar_distance(player_position, area.position) <= area.radius);
+    let village_focus = village_focus
+        || matches!(
+            village.herding.phase,
+            HerdingPhase::FollowingToGrass
+                | HerdingPhase::GrazingAtPatch
+                | HerdingPhase::ReturningToPen
+        );
     let leaving_village = village
         .area(VillageAreaKind::OuterPath)
         .is_some_and(|area| planar_distance(player_position, area.position) <= area.radius);
@@ -1124,6 +1140,7 @@ mod tests {
             current_omen: omen_triggered.then_some(OmenKind::GroveWhisper),
             village_focus: false,
             leaving_village: false,
+            herding_completed: false,
         }
     }
 

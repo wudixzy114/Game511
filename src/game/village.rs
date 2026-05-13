@@ -6,6 +6,7 @@ use crate::game::{
         ProceduralAssetMaterials, ProceduralSpawnRequest, spawn_procedural_asset,
         spawn_procedural_asset_entity,
     },
+    ecology::{AnimalBehavior, AnimalFlockState, AnimalKind, EcologyState},
     environment::{EnvironmentSnapshot, WeatherKind, WindField},
     flow::{AppScreen, InGameState},
     intent::{IntentState, apply_village_dialogue_intent},
@@ -27,6 +28,15 @@ type VillageInitQueries<'w, 's> = (
 
 type VillageInitAssets<'w> = (ResMut<'w, Assets<Mesh>>, Res<'w, ProceduralAssetMaterials>);
 
+type VillageInteractionResources<'w> = (
+    Res<'w, Time>,
+    Res<'w, ButtonInput<KeyCode>>,
+    Option<ResMut<'w, VillageState>>,
+    Option<ResMut<'w, EcologyState>>,
+    Option<ResMut<'w, IntentState>>,
+    Option<ResMut<'w, NotebookState>>,
+);
+
 impl Plugin for VillagePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(VillageAtmosphere::default());
@@ -35,6 +45,7 @@ impl Plugin for VillagePlugin {
             (
                 initialize_village_session,
                 update_village_atmosphere,
+                update_herding_state,
                 update_village_actor_behavior,
                 animate_village_asset_parts,
                 update_village_interaction,
@@ -55,6 +66,7 @@ pub struct VillageState {
     pub nearest_actor: Option<VillageActorSnapshot>,
     pub interaction_prompt: Option<String>,
     pub player_was_bootstrapped: bool,
+    pub herding: HerdingState,
 }
 
 impl VillageState {
@@ -100,6 +112,64 @@ pub struct VillageActorState {
     pub home: Vec3,
     pub radius: f32,
     pub behavior: VillageBehavior,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HerdingState {
+    pub phase: HerdingPhase,
+    pub task_available: bool,
+    pub flock_following_player: bool,
+    pub known_grass_patch: Vec3,
+    pub active_grass_patch: Vec3,
+    pub return_pen_target: Vec3,
+    pub flock_center: Vec3,
+    pub player_has_seen_flock: bool,
+    pub grass_patch_reached: bool,
+    pub pen_returned: bool,
+    pub first_task_completed: bool,
+    pub phase_started_at: f32,
+}
+
+impl Default for HerdingState {
+    fn default() -> Self {
+        Self {
+            phase: HerdingPhase::NotStarted,
+            task_available: false,
+            flock_following_player: false,
+            known_grass_patch: Vec3::ZERO,
+            active_grass_patch: Vec3::ZERO,
+            return_pen_target: Vec3::ZERO,
+            flock_center: Vec3::ZERO,
+            player_has_seen_flock: false,
+            grass_patch_reached: false,
+            pen_returned: false,
+            first_task_completed: false,
+            phase_started_at: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum HerdingPhase {
+    NotStarted,
+    Prompted,
+    FollowingToGrass,
+    GrazingAtPatch,
+    ReturningToPen,
+    Completed,
+}
+
+impl HerdingPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotStarted => "未开始",
+            Self::Prompted => "准备放羊",
+            Self::FollowingToGrass => "带羊去草地",
+            Self::GrazingAtPatch => "羊群吃草",
+            Self::ReturningToPen => "带羊回圈",
+            Self::Completed => "第一次放羊完成",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -228,6 +298,9 @@ impl Default for VillageLayoutConfig {
 
 const PLAYER_SPAWN_OFFSET: Vec3 = Vec3::new(-7.0, 0.0, 7.0);
 const INTERACTION_RADIUS: f32 = 4.2;
+const HERDING_GRAZE_RADIUS: f32 = 9.5;
+const HERDING_RETURN_RADIUS: f32 = 11.0;
+const HERDING_NEAR_FLOCK_RADIUS: f32 = 15.0;
 
 fn initialize_village_session(
     mut commands: Commands,
@@ -280,6 +353,7 @@ fn initialize_village_session(
         "opening village generated"
     );
 
+    let herding = initialize_herding_state(&layout);
     let mut state = VillageState {
         origin: layout.origin,
         spawn_point: layout.spawn_point,
@@ -288,6 +362,7 @@ fn initialize_village_session(
         nearest_actor: None,
         interaction_prompt: None,
         player_was_bootstrapped: false,
+        herding,
     };
     bootstrap_player_to_village(&world_map, &mut state, &mut queries.0, &mut queries.1);
     commands.insert_resource(state);
@@ -398,6 +473,7 @@ pub fn build_village_layout(
     config: VillageLayoutConfig,
 ) -> VillageState {
     let layout = build_layout_internal(world_map, origin, config);
+    let herding = initialize_herding_state(&layout);
     VillageState {
         origin: layout.origin,
         spawn_point: layout.spawn_point,
@@ -406,6 +482,24 @@ pub fn build_village_layout(
         nearest_actor: None,
         interaction_prompt: None,
         player_was_bootstrapped: false,
+        herding,
+    }
+}
+
+fn initialize_herding_state(layout: &VillageLayout) -> HerdingState {
+    let sheep_pen = layout
+        .areas
+        .iter()
+        .find(|area| area.kind == VillageAreaKind::SheepPen)
+        .map(|area| area.position)
+        .unwrap_or(layout.origin + Vec3::new(19.0, 0.0, -13.0));
+    let grass_patch = layout.origin + Vec3::new(12.0, 0.0, -30.0);
+    HerdingState {
+        known_grass_patch: grass_patch,
+        active_grass_patch: grass_patch,
+        return_pen_target: sheep_pen,
+        flock_center: sheep_pen,
+        ..Default::default()
     }
 }
 
@@ -896,6 +990,8 @@ fn tag_village_ambient_parts(commands: &mut Commands, root: Entity) {
 fn update_village_actor_behavior(
     time: Res<Time>,
     world_map: Option<Res<WorldMap>>,
+    village: Option<Res<VillageState>>,
+    ecology: Option<Res<EcologyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut actor_query: Query<(&VillageActor, &mut Transform), Without<WandererPrototype>>,
 ) {
@@ -906,8 +1002,16 @@ fn update_village_actor_behavior(
         .iter()
         .next()
         .map(|transform| transform.translation);
+    let herding = village.as_deref().map(|village| village.herding);
+    let sheep_flock = ecology.as_deref().and_then(sheep_flock_state).cloned();
     for (actor, mut transform) in &mut actor_query {
-        let target = actor_target_position(actor, time.elapsed_secs());
+        let target = actor_target_position(
+            actor,
+            time.elapsed_secs(),
+            player_position,
+            herding,
+            sheep_flock.as_ref(),
+        );
         let target = ground_position(&world_map, target, actor_y_offset(actor.kind));
         let smoothing = 1.0 - (-actor_speed(actor.kind) * time.delta_secs()).exp();
         transform.translation = transform.translation.lerp(target, smoothing);
@@ -1032,9 +1136,43 @@ fn village_day_phase(daylight: f32) -> VillageDayPhase {
     }
 }
 
-fn actor_target_position(actor: &VillageActor, elapsed: f32) -> Vec3 {
+fn actor_target_position(
+    actor: &VillageActor,
+    elapsed: f32,
+    player_position: Option<Vec3>,
+    herding: Option<HerdingState>,
+    sheep_flock: Option<&AnimalFlockState>,
+) -> Vec3 {
     if actor.kind == VillageActorKind::Shepherd {
         return shepherd_schedule_position(actor.home, actor.radius, elapsed).target;
+    }
+    if actor.kind == VillageActorKind::Sheep
+        && let Some(herding) = herding
+        && herding.flock_following_player
+        && let Some(player_position) = player_position
+    {
+        let phase = elapsed * 0.56 + actor.seed as f32 * 0.021;
+        let radius = 3.6 + (actor.seed % 4) as f32 * 0.48;
+        let follow_anchor = player_position + Vec3::new(-2.4, 0.0, 1.6);
+        return follow_anchor
+            + Vec3::new(
+                phase.cos() * radius,
+                0.0,
+                (phase * 0.83).sin() * radius * 0.72,
+            );
+    }
+    if actor.kind == VillageActorKind::Sheep
+        && let Some(flock) = sheep_flock
+    {
+        let phase = elapsed * 0.42 + actor.seed as f32 * 0.019;
+        let restless = flock.behavior == AnimalBehavior::Scattering;
+        let radius = flock.radius * if restless { 0.68 } else { 0.42 };
+        return flock.center
+            + Vec3::new(
+                phase.cos() * radius + ((actor.id % 5) as f32 - 2.0) * 0.42,
+                0.0,
+                (phase * 0.71).sin() * radius + ((actor.id % 7) as f32 - 3.0) * 0.36,
+            );
     }
 
     let phase = elapsed * actor_motion_frequency(actor.kind) + actor.seed as f32 * 0.017;
@@ -1126,14 +1264,11 @@ fn actor_y_offset(kind: VillageActorKind) -> f32 {
 }
 
 fn update_village_interaction(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    village: Option<ResMut<VillageState>>,
+    resources: VillageInteractionResources<'_>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     actor_query: Query<(&VillageActor, &Transform), Without<WandererPrototype>>,
-    mut intent: Option<ResMut<IntentState>>,
-    mut notebook: Option<ResMut<NotebookState>>,
 ) {
+    let (time, keys, village, ecology, mut intent, mut notebook) = resources;
     let Some(mut village) = village else {
         return;
     };
@@ -1154,9 +1289,21 @@ fn update_village_interaction(
         .min_by(|a, b| a.distance.total_cmp(&b.distance));
 
     village.nearest_actor = nearest;
-    village.interaction_prompt = nearest.map(|actor| actor.kind.prompt().to_string());
+    village.interaction_prompt =
+        build_village_interaction_prompt(nearest, &village.herding, player_transform.translation);
 
     if !keys.just_pressed(KeyCode::KeyF) {
+        return;
+    }
+
+    if try_handle_herding_interaction(
+        &mut village,
+        ecology,
+        &mut intent,
+        notebook.as_deref_mut(),
+        player_transform.translation,
+        time.elapsed_secs(),
+    ) {
         return;
     }
 
@@ -1184,6 +1331,302 @@ fn update_village_interaction(
         distance = actor.distance,
         "village light interaction completed"
     );
+}
+
+fn build_village_interaction_prompt(
+    nearest: Option<VillageActorSnapshot>,
+    herding: &HerdingState,
+    player_position: Vec3,
+) -> Option<String> {
+    let herding_prompt = match herding.phase {
+        HerdingPhase::NotStarted | HerdingPhase::Prompted if herding.task_available => {
+            Some("可开始放羊".to_string())
+        }
+        HerdingPhase::FollowingToGrass
+            if planar_distance(player_position, herding.flock_center)
+                <= HERDING_NEAR_FLOCK_RADIUS =>
+        {
+            Some("可引羊去草地".to_string())
+        }
+        HerdingPhase::GrazingAtPatch
+            if planar_distance(player_position, herding.active_grass_patch)
+                <= HERDING_GRAZE_RADIUS + 3.0 =>
+        {
+            Some("可唤羊回圈".to_string())
+        }
+        HerdingPhase::ReturningToPen
+            if planar_distance(player_position, herding.flock_center)
+                <= HERDING_NEAR_FLOCK_RADIUS =>
+        {
+            Some("可引羊回圈".to_string())
+        }
+        _ => None,
+    };
+    herding_prompt.or_else(|| nearest.map(|actor| actor.kind.prompt().to_string()))
+}
+
+fn try_handle_herding_interaction(
+    village: &mut VillageState,
+    ecology: Option<ResMut<EcologyState>>,
+    intent: &mut Option<ResMut<IntentState>>,
+    notebook: Option<&mut NotebookState>,
+    player_position: Vec3,
+    at_seconds: f32,
+) -> bool {
+    let Some(mut ecology) = ecology else {
+        return false;
+    };
+    let Some(flock) = sheep_flock_state_mut(&mut ecology) else {
+        return false;
+    };
+    let near_flock = planar_distance(player_position, flock.center)
+        <= HERDING_NEAR_FLOCK_RADIUS.max(flock.radius);
+    match village.herding.phase {
+        HerdingPhase::NotStarted | HerdingPhase::Prompted if village.herding.task_available => {
+            village.herding.phase = HerdingPhase::FollowingToGrass;
+            village.herding.phase_started_at = at_seconds;
+            village.herding.flock_following_player = true;
+            flock.behavior = AnimalBehavior::Migrating;
+            flock.radius = 7.8;
+            let _ = record_notebook_entry(
+                notebook,
+                NotebookRecord {
+                    kind: NotebookEntryKind::Observation,
+                    at_seconds,
+                    location: Some("羊圈".to_string()),
+                    source: NotebookSource::Observation,
+                    title: "开始放羊".to_string(),
+                    body: "你拍了拍羊群边上的木栏，先带它们去村外有风和草的地方。".to_string(),
+                    tags: vec![
+                        NotebookTag::Village,
+                        NotebookTag::Flock,
+                        NotebookTag::Shepherd,
+                    ],
+                },
+            );
+            if let Some(intent) = intent.as_deref_mut() {
+                let _ = crate::game::intent::advance_intent_state(
+                    intent,
+                    0.0,
+                    at_seconds,
+                    [
+                        crate::game::intent::IntentSample {
+                            kind: crate::game::intent::IntentKind::Animals,
+                            source: crate::game::intent::IntentSource::Dialogue,
+                            amount: 1.1,
+                        },
+                        crate::game::intent::IntentSample {
+                            kind: crate::game::intent::IntentKind::BeyondVillage,
+                            source: crate::game::intent::IntentSource::Dialogue,
+                            amount: 0.8,
+                        },
+                    ],
+                );
+            }
+            tracing::info!(
+                target: "dao_game::village::herding",
+                phase = village.herding.phase.label(),
+                "opening herding task started"
+            );
+            true
+        }
+        HerdingPhase::FollowingToGrass if near_flock && village.herding.grass_patch_reached => {
+            village.herding.phase = HerdingPhase::ReturningToPen;
+            village.herding.phase_started_at = at_seconds;
+            village.herding.flock_following_player = true;
+            flock.behavior = AnimalBehavior::Migrating;
+            flock.radius = 7.2;
+            let _ = record_notebook_entry(
+                notebook,
+                NotebookRecord {
+                    kind: NotebookEntryKind::Observation,
+                    at_seconds,
+                    location: Some("村外草地".to_string()),
+                    source: NotebookSource::Observation,
+                    title: "羊群已经吃饱".to_string(),
+                    body: "风慢了些，羊群低头啃完这片草，开始愿意跟着你往回走。".to_string(),
+                    tags: vec![
+                        NotebookTag::Village,
+                        NotebookTag::Flock,
+                        NotebookTag::Memory,
+                    ],
+                },
+            );
+            tracing::info!(
+                target: "dao_game::village::herding",
+                phase = village.herding.phase.label(),
+                "herding task switched to return phase"
+            );
+            true
+        }
+        HerdingPhase::GrazingAtPatch if near_flock => {
+            village.herding.phase = HerdingPhase::ReturningToPen;
+            village.herding.phase_started_at = at_seconds;
+            village.herding.flock_following_player = true;
+            flock.behavior = AnimalBehavior::Migrating;
+            flock.radius = 7.2;
+            true
+        }
+        HerdingPhase::ReturningToPen if near_flock && village.herding.pen_returned => {
+            village.herding.phase = HerdingPhase::Completed;
+            village.herding.phase_started_at = at_seconds;
+            village.herding.flock_following_player = false;
+            village.herding.first_task_completed = true;
+            flock.behavior = AnimalBehavior::Grazing;
+            flock.home = village.herding.return_pen_target;
+            flock.center = village.herding.return_pen_target;
+            flock.radius = 10.8;
+            let _ = record_notebook_entry(
+                notebook,
+                NotebookRecord {
+                    kind: NotebookEntryKind::JourneyEcho,
+                    at_seconds,
+                    location: Some("羊圈".to_string()),
+                    source: NotebookSource::Journey,
+                    title: "第一次放羊结束".to_string(),
+                    body: "羊群重新安静下来。村庄没有催你，但你知道自己迟早会像它们一样，顺着风走出村外。".to_string(),
+                    tags: vec![
+                        NotebookTag::Village,
+                        NotebookTag::Flock,
+                        NotebookTag::Memory,
+                        NotebookTag::Omen,
+                    ],
+                },
+            );
+            if let Some(intent) = intent.as_deref_mut() {
+                let _ = crate::game::intent::advance_intent_state(
+                    intent,
+                    0.0,
+                    at_seconds,
+                    [crate::game::intent::IntentSample {
+                        kind: crate::game::intent::IntentKind::BeyondVillage,
+                        source: crate::game::intent::IntentSource::Dialogue,
+                        amount: 1.2,
+                    }],
+                );
+            }
+            tracing::info!(
+                target: "dao_game::village::herding",
+                phase = village.herding.phase.label(),
+                "opening herding task completed"
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn sheep_flock_state(ecology: &EcologyState) -> Option<&AnimalFlockState> {
+    ecology
+        .flocks
+        .iter()
+        .find(|flock| flock.kind == AnimalKind::SheepHerd)
+}
+
+fn sheep_flock_state_mut(ecology: &mut EcologyState) -> Option<&mut AnimalFlockState> {
+    ecology
+        .flocks
+        .iter_mut()
+        .find(|flock| flock.kind == AnimalKind::SheepHerd)
+}
+
+fn update_herding_state(
+    time: Res<Time>,
+    village: Option<ResMut<VillageState>>,
+    ecology: Option<ResMut<EcologyState>>,
+    player_query: Query<&Transform, With<WandererPrototype>>,
+    mut notebook: Option<ResMut<NotebookState>>,
+) {
+    let (Some(mut village), Some(mut ecology)) = (village, ecology) else {
+        return;
+    };
+    let Some(player_transform) = player_query.iter().next() else {
+        return;
+    };
+    let Some(flock) = sheep_flock_state_mut(&mut ecology) else {
+        return;
+    };
+    let sheep_pen = village
+        .area(VillageAreaKind::SheepPen)
+        .map(|area| area.position)
+        .unwrap_or(village.herding.return_pen_target);
+    if village.herding.return_pen_target == Vec3::ZERO {
+        village.herding.return_pen_target = sheep_pen;
+    }
+    village.herding.flock_center = flock.center;
+
+    let player_to_flock = planar_distance(player_transform.translation, flock.center);
+    if !village.herding.player_has_seen_flock && player_to_flock <= HERDING_NEAR_FLOCK_RADIUS {
+        village.herding.player_has_seen_flock = true;
+        village.herding.task_available = true;
+        village.herding.phase = HerdingPhase::Prompted;
+        village.herding.phase_started_at = time.elapsed_secs();
+        let _ = record_notebook_entry(
+            notebook.as_deref_mut(),
+            NotebookRecord {
+                kind: NotebookEntryKind::Observation,
+                at_seconds: time.elapsed_secs(),
+                location: Some("羊圈".to_string()),
+                source: NotebookSource::Observation,
+                title: "羊群在等你".to_string(),
+                body: "几只羊抬头看了你一眼，又看向村外有草和风的方向。".to_string(),
+                tags: vec![NotebookTag::Village, NotebookTag::Flock],
+            },
+        );
+    }
+
+    match village.herding.phase {
+        HerdingPhase::FollowingToGrass => {
+            flock.center = player_transform.translation + Vec3::new(-2.8, 0.0, 1.4);
+            if planar_distance(
+                player_transform.translation,
+                village.herding.active_grass_patch,
+            ) <= HERDING_GRAZE_RADIUS
+            {
+                village.herding.phase = HerdingPhase::GrazingAtPatch;
+                village.herding.phase_started_at = time.elapsed_secs();
+                village.herding.flock_following_player = false;
+                village.herding.grass_patch_reached = true;
+                flock.behavior = AnimalBehavior::Grazing;
+                flock.home = village.herding.active_grass_patch;
+                flock.center = village.herding.active_grass_patch;
+                flock.radius = 8.8;
+                let _ = record_notebook_entry(
+                    notebook.as_deref_mut(),
+                    NotebookRecord {
+                        kind: NotebookEntryKind::Observation,
+                        at_seconds: time.elapsed_secs(),
+                        location: Some("村外草地".to_string()),
+                        source: NotebookSource::Observation,
+                        title: "羊群找到草地".to_string(),
+                        body: "羊群自己散开去吃草，远处的风声也比村里更开阔。".to_string(),
+                        tags: vec![
+                            NotebookTag::Village,
+                            NotebookTag::Flock,
+                            NotebookTag::Memory,
+                        ],
+                    },
+                );
+            }
+        }
+        HerdingPhase::ReturningToPen => {
+            flock.center = player_transform.translation + Vec3::new(-2.4, 0.0, 1.3);
+            if planar_distance(
+                player_transform.translation,
+                village.herding.return_pen_target,
+            ) <= HERDING_RETURN_RADIUS
+            {
+                village.herding.pen_returned = true;
+                flock.center = village.herding.return_pen_target;
+                flock.home = village.herding.return_pen_target;
+            }
+        }
+        HerdingPhase::Completed => {
+            flock.behavior = AnimalBehavior::Grazing;
+            flock.home = village.herding.return_pen_target;
+        }
+        HerdingPhase::GrazingAtPatch | HerdingPhase::NotStarted | HerdingPhase::Prompted => {}
+    }
 }
 
 fn village_interaction_record(kind: VillageActorKind, at_seconds: f32) -> NotebookRecord {
@@ -1334,7 +1777,7 @@ mod tests {
             radius: 6.0,
             seed: 3,
         };
-        let target = actor_target_position(&actor, 12.0);
+        let target = actor_target_position(&actor, 12.0, None, None, None);
 
         assert!(target.distance(actor.home) <= actor.radius);
     }

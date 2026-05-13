@@ -1448,6 +1448,7 @@ fn presentation_context(
         },
         village_focus: false,
         leaving_village: false,
+        herding_completed: false,
     }
 }
 
