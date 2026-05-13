@@ -3,6 +3,7 @@ pub mod director;
 pub mod ecology;
 pub mod environment;
 pub mod flow;
+pub mod gallery;
 pub mod intent;
 pub mod journey;
 pub mod landmarks;
@@ -46,6 +47,7 @@ impl Plugin for GamePlugin {
         app.insert_resource(PendingSessionLaunch(auto_start_mode));
 
         app.add_plugins(assets::ProceduralAssetPlugin);
+        app.add_plugins(gallery::GalleryPlugin);
         app.add_plugins(physics::DaoPhysicsPlugin);
         app.add_plugins(materials::MaterialGalleryPlugin);
         app.add_plugins(objects::ProceduralObjectPlugin);

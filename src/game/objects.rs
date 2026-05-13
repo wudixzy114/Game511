@@ -1,12 +1,12 @@
 use std::{
     fs,
     path::Path,
-    path::PathBuf,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use avian3d::prelude::{Collider, CollisionEventsEnabled, RigidBody, Sensor};
 use bevy::{
+    ecs::system::SystemParam,
     math::primitives::{Cuboid, Cylinder, Plane3d, Sphere},
     pbr::MeshMaterial3d,
     prelude::*,
@@ -20,6 +20,10 @@ use crate::{
         assets::{ProceduralAssetMaterials, ProceduralMaterialFamily},
         environment::WindField,
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
+        gallery::{
+            AssetCodexSlot, AssetCodexState, GalleryExportMode, GalleryExportQueue,
+            GalleryExportStage, prepare_export_path,
+        },
         materials::MaterialGalleryState,
         physics::{
             DaoCollider, DaoColliderRole, DaoColliderSource, DaoPhysicsLayer, DaoPhysicsSensor,
@@ -43,9 +47,11 @@ impl Plugin for ProceduralObjectPlugin {
         app.add_systems(
             Update,
             (
+                advance_object_gallery_export_frame,
                 handle_object_gallery_input,
                 process_object_gallery_export_queue,
                 animate_procedural_tree_wind,
+                refresh_object_gallery_codex,
             )
                 .chain()
                 .run_if(in_state(InGameState::Running))
@@ -118,6 +124,14 @@ pub enum ObjectLod {
 }
 
 impl ObjectLod {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Near => "近景",
+            Self::Mid => "中景",
+            Self::Far => "远景",
+        }
+    }
+
     pub fn export_label(self) -> &'static str {
         match self {
             Self::Near => "near",
@@ -139,6 +153,17 @@ pub enum ObjectBiomeContext {
 }
 
 impl ObjectBiomeContext {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Meadow => "草甸",
+            Self::Wetland => "湿地",
+            Self::Ridge => "山脊",
+            Self::VillageCourtyard => "村院",
+            Self::RuinEdge => "遗迹边缘",
+            Self::DesertWind => "沙漠风口",
+        }
+    }
+
     pub fn export_label(self) -> &'static str {
         match self {
             Self::Meadow => "meadow",
@@ -161,6 +186,15 @@ pub enum ObjectWeatherState {
 }
 
 impl ObjectWeatherState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Clear => "晴朗",
+            Self::RainSoaked => "雨浸",
+            Self::DryWind => "干风",
+            Self::DreamTint => "梦境偏色",
+        }
+    }
+
     pub fn export_label(self) -> &'static str {
         match self {
             Self::Clear => "clear",
@@ -182,6 +216,16 @@ pub enum ObjectMaterialVariant {
 }
 
 impl ObjectMaterialVariant {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "默认",
+            Self::Wet => "湿润",
+            Self::Dusty => "浮尘",
+            Self::Mossy => "苔藓",
+            Self::Dream => "梦境",
+        }
+    }
+
     pub fn export_label(self) -> &'static str {
         match self {
             Self::Default => "default",
@@ -203,6 +247,15 @@ pub enum ObjectCollisionMode {
 }
 
 impl ObjectCollisionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::VisualOnly => "仅表现",
+            Self::TrunkOnly => "树干",
+            Self::TrunkAndRoots => "树干+根部",
+            Self::Full => "完整",
+        }
+    }
+
     pub fn export_label(self) -> &'static str {
         match self {
             Self::VisualOnly => "visual_only",
@@ -264,6 +317,16 @@ pub enum ObjectApprovalState {
 }
 
 impl ObjectApprovalState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Satisfied => "满意",
+            Self::NeedsRevision => "需要修改",
+            Self::Disabled => "禁用",
+            Self::PerformanceRisk => "性能风险",
+            Self::WaitingMaterial => "等待材质",
+        }
+    }
+
     pub fn export_label(self) -> &'static str {
         match self {
             Self::Satisfied => "satisfied",
@@ -530,42 +593,16 @@ struct ProceduralTreeWindPart {
 
 #[derive(Debug, Resource, Clone, PartialEq)]
 struct ObjectGalleryState {
-    export_manifest_path: PathBuf,
-    screenshot_path: PathBuf,
-    pending_stage: ObjectExportStage,
-    next_export_allowed_at: Option<Instant>,
+    export_queue: GalleryExportQueue,
 }
 
 impl Default for ObjectGalleryState {
     fn default() -> Self {
         Self {
-            export_manifest_path: PathBuf::from("logs/object-gallery-manifest.json"),
-            screenshot_path: PathBuf::from("logs/object-gallery.png"),
-            pending_stage: ObjectExportStage::Idle,
-            next_export_allowed_at: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum ObjectExportStage {
-    Idle,
-    ManifestQueued(ObjectGalleryExportMode),
-    ScreenshotQueued,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-#[repr(u8)]
-enum ObjectGalleryExportMode {
-    ManifestOnly = 0,
-    ManifestAndScreenshot = 1,
-}
-
-impl ObjectGalleryExportMode {
-    fn export_label(self) -> &'static str {
-        match self {
-            Self::ManifestOnly => "manifest_only",
-            Self::ManifestAndScreenshot => "manifest_and_screenshot",
+            export_queue: GalleryExportQueue::new(
+                "logs/object-gallery-manifest.json",
+                "logs/object-gallery.png",
+            ),
         }
     }
 }
@@ -610,6 +647,18 @@ struct TreeSegment {
     start: Vec3,
     end: Vec3,
     radius: f32,
+}
+
+#[derive(SystemParam)]
+struct ObjectGallerySpawnParams<'w, 's> {
+    commands: Commands<'w, 's>,
+    registry: Res<'w, ProceduralObjectRegistry>,
+    asset_materials: Res<'w, ProceduralAssetMaterials>,
+    gallery_state: ResMut<'w, ObjectGalleryState>,
+    codex_state: ResMut<'w, AssetCodexState>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    performance: ResMut<'w, FramePerformance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -736,30 +785,31 @@ fn simple_family(kind: ObjectKind, semantics: Vec<ObjectSemantic>) -> ObjectFami
     }
 }
 
-fn spawn_procedural_object_gallery(
-    mut commands: Commands,
-    registry: Res<ProceduralObjectRegistry>,
-    asset_materials: Res<ProceduralAssetMaterials>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut performance: ResMut<FramePerformance>,
-) {
+fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
     let started_at = Instant::now();
-    let floor_material = materials.add(StandardMaterial {
+    params.gallery_state.export_queue = GalleryExportQueue::new(
+        "logs/object-gallery-manifest.json",
+        "logs/object-gallery.png",
+    );
+    params.codex_state.reset();
+    let floor_material = params.materials.add(StandardMaterial {
         base_color: Color::srgb(0.095, 0.115, 0.1),
         perceptual_roughness: 0.93,
         metallic: 0.0,
         ..Default::default()
     });
     let object_meshes = ObjectMeshHandles {
-        floor: meshes.add(Mesh::from(Plane3d::new(Vec3::Y, Vec2::new(56.0, 24.0)))),
-        cylinder: meshes.add(Mesh::from(Cylinder::new(1.0, 1.0))),
-        sphere: meshes.add(Sphere::new(1.0).mesh().uv(20, 14)),
-        cuboid: meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0))),
+        floor: params
+            .meshes
+            .add(Mesh::from(Plane3d::new(Vec3::Y, Vec2::new(56.0, 24.0)))),
+        cylinder: params.meshes.add(Mesh::from(Cylinder::new(1.0, 1.0))),
+        sphere: params.meshes.add(Sphere::new(1.0).mesh().uv(20, 14)),
+        cuboid: params.meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0))),
     };
-    let slot_materials = tree_slot_materials(&asset_materials);
+    let slot_materials = tree_slot_materials(&params.asset_materials);
 
-    commands
+    params
+        .commands
         .spawn((
             Name::new("ProceduralObjectGallery"),
             DespawnOnExit(AppScreen::InGame),
@@ -775,7 +825,7 @@ fn spawn_procedural_object_gallery(
                 Transform::from_xyz(16.0, -0.04, -15.0),
             ));
             for request in tree_gallery_requests() {
-                if let Some(family) = registry.family(request.kind) {
+                if let Some(family) = params.registry.family(request.kind) {
                     let asset = generate_object_asset(request, family);
                     spawn_generated_object(
                         parent,
@@ -795,7 +845,9 @@ fn spawn_procedural_object_gallery(
         geometry_version = TREE_GEOMETRY_VERSION,
         "procedural object gallery spawned with near/mid/far tree samples"
     );
-    performance.record_phase_duration(PerformancePhase::Assets, started_at.elapsed());
+    params
+        .performance
+        .record_phase_duration(PerformancePhase::Assets, started_at.elapsed());
 }
 
 fn tree_gallery_requests() -> Vec<ObjectGenerationRequest> {
@@ -1850,6 +1902,10 @@ fn should_update_wind_part(frame_index: u64, lod: ObjectLod, band: TreeWindBand)
     frame_index.is_multiple_of(stride)
 }
 
+fn advance_object_gallery_export_frame(mut state: ResMut<ObjectGalleryState>) {
+    state.export_queue.advance_frame();
+}
+
 fn handle_object_gallery_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<ObjectGalleryState>,
@@ -1857,31 +1913,31 @@ fn handle_object_gallery_input(
     if !keys.just_pressed(KeyCode::KeyO) {
         return;
     }
-    let now = Instant::now();
-    if let Some(allowed_at) = state.next_export_allowed_at
-        && now < allowed_at
-    {
-        tracing::warn!(
-            target: "dao_game::objects::export",
-            cooldown_remaining_ms = (allowed_at - now).as_secs_f32() * 1000.0,
-            "object gallery export ignored during cooldown"
-        );
-        return;
-    }
     let with_screenshot = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let mode = if with_screenshot {
-        ObjectGalleryExportMode::ManifestAndScreenshot
+        GalleryExportMode::ManifestAndScreenshot
     } else {
-        ObjectGalleryExportMode::ManifestOnly
+        GalleryExportMode::ManifestOnly
     };
-    state.pending_stage = ObjectExportStage::ManifestQueued(mode);
-    state.next_export_allowed_at =
-        Some(now + std::time::Duration::from_secs_f32(OBJECT_EXPORT_COOLDOWN_SECONDS));
-    tracing::info!(
-        target: "dao_game::objects::export",
-        mode = mode.export_label(),
-        "object gallery export queued"
-    );
+    match state
+        .export_queue
+        .queue_export(mode, OBJECT_EXPORT_COOLDOWN_SECONDS)
+    {
+        Ok(()) => {
+            tracing::info!(
+                target: "dao_game::objects::export",
+                mode = mode.export_label(),
+                "object gallery export queued"
+            );
+        }
+        Err(cooldown_remaining_ms) => {
+            tracing::warn!(
+                target: "dao_game::objects::export",
+                cooldown_remaining_ms,
+                "object gallery export ignored during cooldown"
+            );
+        }
+    }
 }
 
 fn process_object_gallery_export_queue(
@@ -1893,12 +1949,16 @@ fn process_object_gallery_export_queue(
     mut performance: ResMut<FramePerformance>,
 ) {
     let started_at = Instant::now();
-    match state.pending_stage.clone() {
-        ObjectExportStage::Idle => {}
-        ObjectExportStage::ManifestQueued(mode) => {
+    match state.export_queue.pending_stage.clone() {
+        GalleryExportStage::Idle => {}
+        GalleryExportStage::ManifestQueued { mode, queued_frame } => {
+            if queued_frame == state.export_queue.frame_index {
+                performance.record_phase_duration(PerformancePhase::Assets, started_at.elapsed());
+                return;
+            }
             match export_object_gallery_manifest(
-                &state.export_manifest_path,
-                &state.screenshot_path,
+                &state.export_queue.export_path,
+                &state.export_queue.screenshot_path,
                 mode,
                 material_gallery_state.as_deref(),
                 camera_query.iter().next(),
@@ -1907,48 +1967,47 @@ fn process_object_gallery_export_queue(
                 Ok(count) => {
                     tracing::info!(
                         target: "dao_game::objects::export",
-                        path = %state.export_manifest_path.display(),
+                        path = %state.export_queue.export_path.display(),
                         mode = mode.export_label(),
                         sample_count = count,
                         "object gallery manifest exported"
                     );
-                    state.pending_stage = if mode == ObjectGalleryExportMode::ManifestAndScreenshot
-                    {
-                        ObjectExportStage::ScreenshotQueued
-                    } else {
-                        ObjectExportStage::Idle
-                    };
+                    state.export_queue.mark_manifest_exported(mode);
                 }
                 Err(error) => {
                     tracing::error!(
                         target: "dao_game::objects::export",
-                        path = %state.export_manifest_path.display(),
+                        path = %state.export_queue.export_path.display(),
                         error = %error,
                         "object gallery manifest export failed"
                     );
-                    state.pending_stage = ObjectExportStage::Idle;
+                    state.export_queue.reset();
                 }
             }
         }
-        ObjectExportStage::ScreenshotQueued => {
-            if let Err(error) = prepare_export_path(&state.screenshot_path) {
+        GalleryExportStage::ScreenshotQueued { queued_frame } => {
+            if queued_frame == state.export_queue.frame_index {
+                performance.record_phase_duration(PerformancePhase::Assets, started_at.elapsed());
+                return;
+            }
+            if let Err(error) = prepare_export_path(&state.export_queue.screenshot_path) {
                 tracing::error!(
                     target: "dao_game::objects::export",
-                    path = %state.screenshot_path.display(),
+                    path = %state.export_queue.screenshot_path.display(),
                     error = %error,
                     "object gallery screenshot path preparation failed"
                 );
             } else {
                 commands
                     .spawn(Screenshot::primary_window())
-                    .observe(save_to_disk(state.screenshot_path.clone()));
+                    .observe(save_to_disk(state.export_queue.screenshot_path.clone()));
                 tracing::info!(
                     target: "dao_game::objects::export",
-                    path = %state.screenshot_path.display(),
+                    path = %state.export_queue.screenshot_path.display(),
                     "object gallery screenshot requested"
                 );
             }
-            state.pending_stage = ObjectExportStage::Idle;
+            state.export_queue.reset();
         }
     }
     performance.record_phase_duration(PerformancePhase::Assets, started_at.elapsed());
@@ -1957,7 +2016,7 @@ fn process_object_gallery_export_queue(
 fn export_object_gallery_manifest(
     manifest_path: &Path,
     screenshot_path: &Path,
-    mode: ObjectGalleryExportMode,
+    mode: GalleryExportMode,
     material_gallery_state: Option<&MaterialGalleryState>,
     camera: Option<&Transform>,
     objects: &Query<&ProceduralObjectInstance>,
@@ -2032,15 +2091,127 @@ fn export_object_gallery_manifest(
     Ok(export.samples.len())
 }
 
-fn prepare_export_path(path: &Path) -> Result<(), String> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+fn refresh_object_gallery_codex(
+    registry: Res<ProceduralObjectRegistry>,
+    gallery_state: Res<ObjectGalleryState>,
+    material_gallery_state: Option<Res<MaterialGalleryState>>,
+    objects: Query<&ProceduralObjectInstance>,
+    mut codex_state: ResMut<AssetCodexState>,
+) {
+    let mut instances: Vec<_> = objects.iter().collect();
+    if instances.is_empty() {
+        codex_state.reset();
+        return;
     }
-    Ok(())
+
+    instances.sort_by_key(|instance| (instance.kind as u8, instance.stable_id));
+    let sample = instances[0];
+    let near_count = instances
+        .iter()
+        .filter(|instance| instance.lod == ObjectLod::Near)
+        .count();
+    let mid_count = instances
+        .iter()
+        .filter(|instance| instance.lod == ObjectLod::Mid)
+        .count();
+    let far_count = instances
+        .iter()
+        .filter(|instance| instance.lod == ObjectLod::Far)
+        .count();
+    let lighting_label = material_gallery_state
+        .as_deref()
+        .map(|state| state.lighting.label())
+        .unwrap_or("未连接");
+    let selected_category = material_gallery_state
+        .as_deref()
+        .and_then(|state| state.selected_category)
+        .map(|category| category.label())
+        .unwrap_or("全部");
+    let (profile_version, geometry_version, slot_count) = registry
+        .family(sample.kind)
+        .map(|family| {
+            (
+                family.profile_version,
+                family.geometry_version,
+                family.material_slots.len(),
+            )
+        })
+        .unwrap_or((
+            sample.profile_version,
+            sample.geometry_version,
+            sample.material_slots.len(),
+        ));
+
+    let mut summary_lines = vec![
+        format!(
+            "家族：{}  样本：{}  近/中/远：{}/{}/{}",
+            sample.kind.label(),
+            instances.len(),
+            near_count,
+            mid_count,
+            far_count
+        ),
+        format!(
+            "焦点 Seed：{}  StableId：{}  审核：{}",
+            sample.seed,
+            sample.stable_id,
+            sample.approval.label()
+        ),
+        format!(
+            "LOD：{}  碰撞：{}  部件：{}  网格：{}  顶点≈{}",
+            sample.lod.label(),
+            sample.request.collision_mode.label(),
+            sample.stats.part_count,
+            sample.stats.mesh_count,
+            sample.stats.vertex_estimate
+        ),
+        format!(
+            "版本：profile v{}  geometry v{}  材质槽：{}",
+            profile_version, geometry_version, slot_count
+        ),
+        format!(
+            "环境：{} / {} / {}  光照：{}  材质筛选：{}",
+            sample.request.biome.label(),
+            sample.request.weather.label(),
+            sample.request.material_variant.label(),
+            lighting_label,
+            selected_category
+        ),
+    ];
+
+    match sample.profile {
+        GeneratedObjectProfile::Tree(profile) => summary_lines.push(format!(
+            "树参数：年龄 {:.0}y  高度 {:.1}m  健康 {:.0}%  叶密 {:.0}%  根暴露 {:.0}%  风柔性 {:.0}%",
+            profile.age_years,
+            profile.height,
+            profile.health * 100.0,
+            profile.leaf_density * 100.0,
+            profile.root_exposure * 100.0,
+            profile.wind_flex * 100.0
+        )),
+    }
+
+    codex_state.visible = true;
+    codex_state.title = "AssetCodex".to_string();
+    codex_state.subtitle = "图鉴展列区骨架".to_string();
+    codex_state.summary_lines = summary_lines;
+    codex_state.slots = sample
+        .material_slots
+        .iter()
+        .map(|slot| AssetCodexSlot {
+            slot: slot.slot.export_label().to_string(),
+            material_family: material_family_label(slot.material_family).to_string(),
+            material_id: slot.material_id.to_string(),
+        })
+        .collect();
+    codex_state.controls_hint =
+        "O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单".to_string();
+    codex_state.export_manifest_path = gallery_state.export_queue.export_path.display().to_string();
+    codex_state.screenshot_path = gallery_state
+        .export_queue
+        .screenshot_path
+        .display()
+        .to_string();
 }
 
 fn export_profile(profile: &GeneratedObjectProfile) -> ObjectGalleryExportProfile {
@@ -2174,11 +2345,12 @@ impl TreeSegmentMetrics for TreeSegment {
 mod tests {
     use super::{
         GeneratedObjectProfile, ObjectBiomeContext, ObjectCollisionMode, ObjectGalleryExport,
-        ObjectGalleryExportMode, ObjectGenerationRequest, ObjectKind, ObjectLod, ObjectSemantic,
-        ObjectWeatherState, ProceduralObjectRegistry, TREE_GALLERY_BASE_SEED,
-        TREE_GEOMETRY_VERSION, TREE_PROFILE_VERSION, generate_tree_asset, procedural_tree_profile,
-        stable_object_id, tree_family_definition,
+        ObjectGenerationRequest, ObjectKind, ObjectLod, ObjectSemantic, ObjectWeatherState,
+        ProceduralObjectRegistry, TREE_GALLERY_BASE_SEED, TREE_GEOMETRY_VERSION,
+        TREE_PROFILE_VERSION, generate_tree_asset, procedural_tree_profile, stable_object_id,
+        tree_family_definition,
     };
+    use crate::game::gallery::GalleryExportMode;
     use bevy::prelude::Transform;
 
     #[test]
@@ -2323,7 +2495,7 @@ mod tests {
         let manifest = ObjectGalleryExport {
             generated_by: "dao_game::objects::ObjectGallery",
             exported_at_epoch_ms: 1_234,
-            export_mode: ObjectGalleryExportMode::ManifestOnly.export_label(),
+            export_mode: GalleryExportMode::ManifestOnly.export_label(),
             screenshot_path: "logs/object-gallery.png".to_string(),
             lighting_preset: Some("固定光照".to_string()),
             camera_position: Some([1.0, 2.0, 3.0]),

@@ -9,6 +9,7 @@ use crate::game::{
     director::DirectorState,
     ecology::EcologyState,
     flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
+    gallery::AssetCodexState,
     intent::{IntentState, PerceptionState, intent_debug_line, perception_label},
     journey::{JourneyStage, JourneyState, StoryArcStage, format_journey_memory_line},
     landmarks::LandmarkState,
@@ -45,6 +46,7 @@ impl Plugin for UiPlugin {
                     update_hud_omen_text,
                     update_hud_context_text,
                     update_hud_compass_text,
+                    update_asset_codex_panel,
                     update_notebook_overlay,
                 )
                     .run_if(in_state(AppScreen::InGame)),
@@ -107,6 +109,15 @@ struct HudCompassPanel;
 
 #[derive(Component)]
 struct HudCompassText;
+
+#[derive(Component)]
+struct AssetCodexPanel;
+
+#[derive(Component)]
+struct AssetCodexTitleText;
+
+#[derive(Component)]
+struct AssetCodexBodyText;
 
 #[derive(Component)]
 struct Crosshair;
@@ -423,8 +434,8 @@ fn spawn_main_menu(
                             spawn_action_button(
                                 parent,
                                 &font,
-                                "材质陈列馆",
-                                "审查程序化材质族与光照预设",
+                                "材质陈列馆 / 图鉴",
+                                "审查程序化材质族、物体样本与导出信息",
                                 UiButtonAction::StartMaterialGallery,
                                 ButtonTone::Secondary,
                             );
@@ -589,6 +600,39 @@ fn spawn_hud(mut commands: Commands, session_mode: Res<SessionMode>, ui_font: Re
                     TextColor(TEXT_PRIMARY),
                     HudJourneyText,
                 )],
+            ));
+
+            parent.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(24),
+                    bottom: px(156),
+                    padding: UiRect::axes(px(16), px(14)),
+                    border: UiRect::all(px(1)),
+                    border_radius: BorderRadius::all(px(8)),
+                    width: px(440),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(0.08, 0.09, 0.08, 0.7)),
+                BorderColor::all(Color::srgba(0.42, 0.36, 0.24, 0.86)),
+                Visibility::Hidden,
+                AssetCodexPanel,
+                children![
+                    (
+                        Text::new("AssetCodex"),
+                        ui_text_font(&font, 18.0),
+                        TextColor(TEXT_ACCENT),
+                        AssetCodexTitleText,
+                    ),
+                    (
+                        Text::new("图鉴样本载入中"),
+                        ui_text_font(&font, 13.5),
+                        TextColor(TEXT_MUTED),
+                        AssetCodexBodyText,
+                    )
+                ],
             ));
 
             parent.spawn((
@@ -1043,11 +1087,19 @@ fn update_hud_control_text(
     let Some(mut controls_text) = controls_query.iter_mut().next() else {
         return;
     };
-    controls_text.0 = format!(
-        "{}\nF 交谈/观察  E 感知  M 方位感  N 记事本  Tab 分类  G 通过边界  F3 {}",
-        control_hint(*session_mode),
-        ui_mode.hud_mode.label()
-    );
+    let detail_hint = match *session_mode {
+        SessionMode::MaterialGallery => {
+            format!(
+                "O 导出对象图鉴  Shift+O 连带截图  E 导出材质馆  F3 {}",
+                ui_mode.hud_mode.label()
+            )
+        }
+        _ => format!(
+            "F 交谈/观察  E 感知  M 方位感  N 记事本  Tab 分类  G 通过边界  F3 {}",
+            ui_mode.hud_mode.label()
+        ),
+    };
+    controls_text.0 = format!("{}\n{}", control_hint(*session_mode), detail_hint);
     for mut visibility in &mut panel_query {
         *visibility = if ui_mode.hud_mode == HudMode::Development {
             Visibility::Visible
@@ -1398,6 +1450,42 @@ fn update_notebook_overlay(
     body_text.0 = notebook_overlay_text(notebook.as_deref(), ui_mode.notebook_category);
 }
 
+fn update_asset_codex_panel(
+    session_mode: Res<SessionMode>,
+    codex: Res<AssetCodexState>,
+    mut panel_query: Query<&mut Visibility, With<AssetCodexPanel>>,
+    mut title_query: Query<&mut Text, (With<AssetCodexTitleText>, Without<AssetCodexBodyText>)>,
+    mut body_query: Query<&mut Text, (With<AssetCodexBodyText>, Without<AssetCodexTitleText>)>,
+) {
+    let Some(mut panel_visibility) = panel_query.iter_mut().next() else {
+        return;
+    };
+    let Some(mut title_text) = title_query.iter_mut().next() else {
+        return;
+    };
+    let Some(mut body_text) = body_query.iter_mut().next() else {
+        return;
+    };
+
+    let visible = *session_mode == SessionMode::MaterialGallery && codex.visible;
+    *panel_visibility = if visible {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+
+    if !visible {
+        return;
+    }
+
+    title_text.0 = if codex.subtitle.is_empty() {
+        codex.title.clone()
+    } else {
+        format!("{} / {}", codex.title, codex.subtitle)
+    };
+    body_text.0 = codex.panel_body();
+}
+
 fn button_color(tone: ButtonTone, visual: ButtonVisualState) -> Color {
     match (tone, visual) {
         (ButtonTone::Primary, ButtonVisualState::Normal) => Color::srgb(0.23, 0.34, 0.26),
@@ -1425,7 +1513,7 @@ fn control_hint(session_mode: SessionMode) -> &'static str {
         SessionMode::Exploration => "WASD 移动  Shift 疾走  Space 跳跃  V 视角  Esc 暂停",
         SessionMode::Presentation => "自动巡游展示场景  Esc 暂停",
         SessionMode::MaterialGallery => {
-            "材质陈列馆  WASD/鼠标 移动  Space/Ctrl 升降  Shift 加速  1-4 光照  [ ] 分类  E 导出"
+            "材质陈列馆/图鉴  WASD/鼠标 移动  Space/Ctrl 升降  Shift 加速  1-4 光照  [ ] 分类  E/O 导出"
         }
     }
 }

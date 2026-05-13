@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Instant,
-};
+use std::{fs, path::Path, time::Instant};
 
 use avian3d::prelude::{Collider, CollisionEventsEnabled, RigidBody, Sensor};
 use bevy::{
@@ -26,6 +22,7 @@ use crate::{
     core::performance::{FramePerformance, PerformancePhase},
     game::{
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
+        gallery::{GalleryExportMode, GalleryExportQueue, GalleryExportStage, prepare_export_path},
         physics::{
             DaoCollider, DaoColliderRole, DaoColliderSource, DaoPhysicsLayer, DaoPhysicsSensor,
             DaoSensorKind, gallery_layers, stable_gallery_sensor_id,
@@ -244,48 +241,16 @@ impl Default for MaterialGalleryState {
 
 #[derive(Debug, Resource, Clone, PartialEq)]
 struct MaterialGalleryExportState {
-    export_path: PathBuf,
-    screenshot_path: PathBuf,
-    pending_stage: MaterialGalleryExportStage,
-    next_export_allowed_at: Option<Instant>,
-    frame_index: u64,
+    queue: GalleryExportQueue,
 }
 
 impl Default for MaterialGalleryExportState {
     fn default() -> Self {
         Self {
-            export_path: PathBuf::from("logs/material-gallery-manifest.json"),
-            screenshot_path: PathBuf::from("logs/material-gallery.png"),
-            pending_stage: MaterialGalleryExportStage::Idle,
-            next_export_allowed_at: None,
-            frame_index: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum MaterialGalleryExportStage {
-    Idle,
-    ManifestQueued {
-        mode: MaterialGalleryExportMode,
-        queued_frame: u64,
-    },
-    ScreenshotQueued {
-        queued_frame: u64,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum MaterialGalleryExportMode {
-    ManifestOnly,
-    ManifestAndScreenshot,
-}
-
-impl MaterialGalleryExportMode {
-    fn export_label(self) -> &'static str {
-        match self {
-            Self::ManifestOnly => "manifest_only",
-            Self::ManifestAndScreenshot => "manifest_and_screenshot",
+            queue: GalleryExportQueue::new(
+                "logs/material-gallery-manifest.json",
+                "logs/material-gallery.png",
+            ),
         }
     }
 }
@@ -417,9 +382,10 @@ fn spawn_material_gallery(mut params: MaterialGallerySpawnParams) {
     let gallery_started = Instant::now();
     params.state.selected_category = None;
     params.state.lighting = GalleryLightingPreset::FixedStudio;
-    params.export_state.pending_stage = MaterialGalleryExportStage::Idle;
-    params.export_state.next_export_allowed_at = None;
-    params.export_state.frame_index = 0;
+    params.export_state.queue = GalleryExportQueue::new(
+        "logs/material-gallery-manifest.json",
+        "logs/material-gallery.png",
+    );
     *params.camera_state = MaterialGalleryCameraState::default();
 
     for entity in &params.sun_query {
@@ -645,7 +611,7 @@ fn spawn_material_exhibit(
 }
 
 fn advance_material_gallery_export_frame(mut export_state: ResMut<MaterialGalleryExportState>) {
-    export_state.frame_index = export_state.frame_index.wrapping_add(1);
+    export_state.queue.advance_frame();
 }
 
 fn handle_material_gallery_input(
@@ -672,35 +638,31 @@ fn handle_material_gallery_input(
     }
 
     if keys.just_pressed(KeyCode::KeyE) {
-        let now = Instant::now();
-        if let Some(allowed_at) = export_state.next_export_allowed_at
-            && now < allowed_at
-        {
-            tracing::warn!(
-                target: "dao_game::materials::export",
-                cooldown_remaining_ms = (allowed_at - now).as_secs_f32() * 1000.0,
-                "material gallery export ignored during cooldown"
-            );
-            return;
-        }
-
         let with_screenshot = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
         let mode = if with_screenshot {
-            MaterialGalleryExportMode::ManifestAndScreenshot
+            GalleryExportMode::ManifestAndScreenshot
         } else {
-            MaterialGalleryExportMode::ManifestOnly
+            GalleryExportMode::ManifestOnly
         };
-        export_state.pending_stage = MaterialGalleryExportStage::ManifestQueued {
-            mode,
-            queued_frame: export_state.frame_index,
-        };
-        export_state.next_export_allowed_at =
-            Some(now + std::time::Duration::from_secs_f32(MATERIAL_EXPORT_COOLDOWN_SECONDS));
-        tracing::info!(
-            target: "dao_game::materials::export",
-            mode = mode.export_label(),
-            "material gallery export queued"
-        );
+        match export_state
+            .queue
+            .queue_export(mode, MATERIAL_EXPORT_COOLDOWN_SECONDS)
+        {
+            Ok(()) => {
+                tracing::info!(
+                    target: "dao_game::materials::export",
+                    mode = mode.export_label(),
+                    "material gallery export queued"
+                );
+            }
+            Err(cooldown_remaining_ms) => {
+                tracing::warn!(
+                    target: "dao_game::materials::export",
+                    cooldown_remaining_ms,
+                    "material gallery export ignored during cooldown"
+                );
+            }
+        }
     }
 }
 
@@ -710,67 +672,58 @@ fn process_material_gallery_export_queue(
     state: Res<MaterialGalleryState>,
     mut export_state: ResMut<MaterialGalleryExportState>,
 ) {
-    match export_state.pending_stage.clone() {
-        MaterialGalleryExportStage::Idle => {}
-        MaterialGalleryExportStage::ManifestQueued { mode, queued_frame } => {
-            if queued_frame == export_state.frame_index {
+    match export_state.queue.pending_stage.clone() {
+        GalleryExportStage::Idle => {}
+        GalleryExportStage::ManifestQueued { mode, queued_frame } => {
+            if queued_frame == export_state.queue.frame_index {
                 return;
             }
             if let Err(error) = export_material_gallery_manifest(
                 &library,
                 state.lighting,
                 mode,
-                &export_state.export_path,
-                &export_state.screenshot_path,
+                &export_state.queue.export_path,
+                &export_state.queue.screenshot_path,
             ) {
                 tracing::error!(
                     target: "dao_game::materials::export",
-                    path = %export_state.export_path.display(),
+                    path = %export_state.queue.export_path.display(),
                     error = %error,
                     "material gallery export failed"
                 );
-                export_state.pending_stage = MaterialGalleryExportStage::Idle;
+                export_state.queue.reset();
                 return;
             }
             tracing::info!(
                 target: "dao_game::materials::export",
-                path = %export_state.export_path.display(),
+                path = %export_state.queue.export_path.display(),
                 mode = mode.export_label(),
                 "material gallery manifest exported"
             );
-            export_state.pending_stage = if mode == MaterialGalleryExportMode::ManifestAndScreenshot
-            {
-                MaterialGalleryExportStage::ScreenshotQueued {
-                    queued_frame: export_state.frame_index,
-                }
-            } else {
-                MaterialGalleryExportStage::Idle
-            };
+            export_state.queue.mark_manifest_exported(mode);
         }
-        MaterialGalleryExportStage::ScreenshotQueued { queued_frame } => {
-            if queued_frame == export_state.frame_index {
+        GalleryExportStage::ScreenshotQueued { queued_frame } => {
+            if queued_frame == export_state.queue.frame_index {
                 return;
             }
-            if let Err(error) =
-                prepare_material_gallery_screenshot_path(&export_state.screenshot_path)
-            {
+            if let Err(error) = prepare_export_path(&export_state.queue.screenshot_path) {
                 tracing::error!(
                     target: "dao_game::materials::export",
-                    path = %export_state.screenshot_path.display(),
+                    path = %export_state.queue.screenshot_path.display(),
                     error = %error,
                     "material gallery screenshot path preparation failed"
                 );
             } else {
                 commands
                     .spawn(Screenshot::primary_window())
-                    .observe(save_to_disk(export_state.screenshot_path.clone()));
+                    .observe(save_to_disk(export_state.queue.screenshot_path.clone()));
                 tracing::info!(
                     target: "dao_game::materials::export",
-                    path = %export_state.screenshot_path.display(),
+                    path = %export_state.queue.screenshot_path.display(),
                     "material gallery screenshot requested"
                 );
             }
-            export_state.pending_stage = MaterialGalleryExportStage::Idle;
+            export_state.queue.reset();
         }
     }
 }
@@ -1225,17 +1178,11 @@ fn next_category(current: Option<MaterialCategory>, delta: i32) -> MaterialCateg
 fn export_material_gallery_manifest(
     library: &ProceduralMaterialLibrary,
     lighting: GalleryLightingPreset,
-    mode: MaterialGalleryExportMode,
+    mode: GalleryExportMode,
     export_path: &Path,
     screenshot_path: &Path,
 ) -> Result<(), String> {
-    if let Some(parent) = export_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    }
+    prepare_export_path(export_path)?;
     let export = MaterialGalleryExport {
         generated_by: "dao_game::materials::MaterialGallery",
         lighting,
@@ -1265,17 +1212,6 @@ fn export_material_gallery_manifest(
         .map_err(|error| format!("failed to serialize gallery manifest: {error}"))?;
     fs::write(export_path, raw)
         .map_err(|error| format!("failed to write {}: {error}", export_path.display()))
-}
-
-fn prepare_material_gallery_screenshot_path(path: &Path) -> Result<(), String> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    }
-    Ok(())
 }
 
 fn approval_for_material(definition: &ProceduralMaterialDefinition) -> MaterialApprovalState {
