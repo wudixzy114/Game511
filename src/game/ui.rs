@@ -1940,8 +1940,10 @@ mod tests {
             origin: bevy::prelude::Vec3::ZERO,
             spawn_point: bevy::prelude::Vec3::ZERO,
             areas: Vec::new(),
+            houses: Vec::new(),
             actors: Vec::new(),
             nearest_actor: None,
+            nearest_house: None,
             interaction_prompt: None,
             player_was_bootstrapped: true,
             herding: HerdingState {

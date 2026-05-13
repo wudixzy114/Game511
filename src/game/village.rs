@@ -47,6 +47,7 @@ impl Plugin for VillagePlugin {
                 update_village_atmosphere,
                 update_herding_state,
                 update_village_actor_behavior,
+                sync_village_collider_centers,
                 animate_village_asset_parts,
                 update_village_interaction,
             )
@@ -62,8 +63,10 @@ pub struct VillageState {
     pub origin: Vec3,
     pub spawn_point: Vec3,
     pub areas: Vec<VillageArea>,
+    pub houses: Vec<VillageHouseState>,
     pub actors: Vec<VillageActorState>,
     pub nearest_actor: Option<VillageActorSnapshot>,
+    pub nearest_house: Option<VillageHouseSnapshot>,
     pub interaction_prompt: Option<String>,
     pub player_was_bootstrapped: bool,
     pub herding: HerdingState,
@@ -103,6 +106,24 @@ impl VillageAreaKind {
             Self::OuterPath => "村外小路",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VillageHouseState {
+    pub id: u64,
+    pub position: Vec3,
+    pub yaw: f32,
+    pub half_extents: Vec2,
+    pub door_position: Vec3,
+    pub interior_position: Vec3,
+    pub occupied_by_player: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VillageHouseSnapshot {
+    pub id: u64,
+    pub distance: f32,
+    pub inside: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,6 +252,25 @@ struct VillageAnimatedPart {
 #[derive(Debug, Component)]
 struct VillageVisual;
 
+#[derive(Debug, Component, Clone, Copy, PartialEq)]
+pub struct VillageCollider {
+    pub kind: VillageColliderKind,
+    pub center: Vec2,
+    pub half_extents: Vec2,
+    pub yaw: f32,
+    pub radius: f32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum VillageColliderKind {
+    House,
+    InteriorProp,
+    Well,
+    SheepPenRail,
+    MarketStall,
+    Actor,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VillageLayoutConfig {
     pub house_count: usize,
@@ -358,8 +398,10 @@ fn initialize_village_session(
         origin: layout.origin,
         spawn_point: layout.spawn_point,
         areas: layout.areas,
+        houses: layout.houses,
         actors: layout.actors,
         nearest_actor: None,
+        nearest_house: None,
         interaction_prompt: None,
         player_was_bootstrapped: false,
         herding,
@@ -464,7 +506,7 @@ struct VillageLayout {
     spawn_point: Vec3,
     areas: Vec<VillageArea>,
     actors: Vec<VillageActorState>,
-    houses: Vec<Vec3>,
+    houses: Vec<VillageHouseState>,
 }
 
 pub fn build_village_layout(
@@ -478,8 +520,10 @@ pub fn build_village_layout(
         origin: layout.origin,
         spawn_point: layout.spawn_point,
         areas: layout.areas,
+        houses: layout.houses,
         actors: layout.actors,
         nearest_actor: None,
+        nearest_house: None,
         interaction_prompt: None,
         player_was_bootstrapped: false,
         herding,
@@ -548,11 +592,29 @@ fn build_layout_internal(
         .map(|index| {
             let angle = index as f32 / house_count as f32 * std::f32::consts::TAU + 0.35;
             let radius = 8.0 + (index % 2) as f32 * 4.5;
-            ground_position(
+            let position = ground_position(
                 world_map,
                 origin + Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius),
                 0.0,
-            )
+            );
+            let yaw = house_yaw(index);
+            let half_extents = house_half_extents(index);
+            let forward = Quat::from_rotation_y(yaw) * -Vec3::Z;
+            let door_position = ground_position(
+                world_map,
+                position + forward * (half_extents.y + 0.92),
+                0.08,
+            );
+            let interior_position = ground_position(world_map, position + forward * 0.72, 1.22);
+            VillageHouseState {
+                id: stable_house_id(index as u64),
+                position,
+                yaw,
+                half_extents,
+                door_position,
+                interior_position,
+                occupied_by_player: false,
+            }
         })
         .collect();
 
@@ -648,6 +710,26 @@ fn ground_position(world_map: &WorldMap, position: Vec3, y_offset: f32) -> Vec3 
     Vec3::new(position.x, height + y_offset, position.z)
 }
 
+fn stable_house_id(index: u64) -> u64 {
+    let mut value = index
+        .wrapping_mul(0xD1B5_4A32_D192_ED03)
+        .wrapping_add(0xA24B_AED4_963E_E407);
+    value ^= value >> 29;
+    value = value.wrapping_mul(0x9FB2_1C65_1E98_DF25);
+    value ^ (value >> 32)
+}
+
+fn house_yaw(index: usize) -> f32 {
+    index as f32 * 0.43
+}
+
+fn house_half_extents(index: usize) -> Vec2 {
+    Vec2::new(
+        2.55 + (index % 3) as f32 * 0.16,
+        2.18 + (index % 2) as f32 * 0.2,
+    )
+}
+
 fn spawn_village_visuals(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -666,8 +748,16 @@ fn spawn_village_visuals(
         .id();
     commands.entity(root).with_children(|parent| {
         for (index, house) in layout.houses.iter().enumerate() {
-            let local = *house - layout.origin;
-            spawn_house(parent, meshes, materials, asset_config, local, index);
+            let local = house.position - layout.origin;
+            spawn_house(
+                parent,
+                meshes,
+                materials,
+                asset_config,
+                local,
+                house.yaw,
+                index,
+            );
         }
         for area in &layout.areas {
             let local = area.position - layout.origin;
@@ -690,6 +780,253 @@ fn spawn_village_visuals(
         }
     });
     tag_village_ambient_parts(commands, root);
+    spawn_village_colliders(commands, layout);
+}
+
+fn spawn_village_colliders(commands: &mut Commands, layout: &VillageLayout) {
+    for house in &layout.houses {
+        commands.spawn((
+            Name::new("VillageHouseCollider"),
+            DespawnOnExit(AppScreen::InGame),
+            Transform::from_translation(house.position),
+            VillageCollider {
+                kind: VillageColliderKind::House,
+                center: Vec2::new(house.position.x, house.position.z),
+                half_extents: house.half_extents,
+                yaw: house.yaw,
+                radius: house.half_extents.length() + 0.2,
+            },
+        ));
+
+        let rotation = Quat::from_rotation_y(house.yaw);
+        for (name, local, half_extents) in [
+            (
+                "VillageHouseHearthCollider",
+                Vec3::new(
+                    -house.half_extents.x * 0.32,
+                    0.0,
+                    house.half_extents.y * 0.18,
+                ),
+                Vec2::new(0.48, 0.36),
+            ),
+            (
+                "VillageHouseBedCollider",
+                Vec3::new(
+                    house.half_extents.x * 0.28,
+                    0.0,
+                    house.half_extents.y * 0.18,
+                ),
+                Vec2::new(0.72, 0.42),
+            ),
+            (
+                "VillageHouseTableCollider",
+                Vec3::new(0.0, 0.0, -house.half_extents.y * 0.05),
+                Vec2::new(0.46, 0.34),
+            ),
+        ] {
+            let world = house.position + rotation * local;
+            commands.spawn((
+                Name::new(name),
+                DespawnOnExit(AppScreen::InGame),
+                Transform::from_translation(world),
+                VillageCollider {
+                    kind: VillageColliderKind::InteriorProp,
+                    center: Vec2::new(world.x, world.z),
+                    half_extents,
+                    yaw: house.yaw,
+                    radius: half_extents.length() + 0.2,
+                },
+            ));
+        }
+    }
+
+    for area in &layout.areas {
+        match area.kind {
+            VillageAreaKind::Well => {
+                commands.spawn((
+                    Name::new("VillageWellCollider"),
+                    DespawnOnExit(AppScreen::InGame),
+                    Transform::from_translation(area.position),
+                    VillageCollider::circle(
+                        VillageColliderKind::Well,
+                        Vec2::new(area.position.x, area.position.z),
+                        1.35,
+                    ),
+                ));
+            }
+            VillageAreaKind::SheepPen => {
+                for side in 0..4 {
+                    let horizontal = side < 2;
+                    let offset = match side {
+                        0 => Vec3::new(0.0, 0.0, -8.0),
+                        1 => Vec3::new(0.0, 0.0, 8.0),
+                        2 => Vec3::new(-8.0, 0.0, 0.0),
+                        _ => Vec3::new(8.0, 0.0, 0.0),
+                    };
+                    let world = area.position + offset;
+                    commands.spawn((
+                        Name::new("SheepPenRailCollider"),
+                        DespawnOnExit(AppScreen::InGame),
+                        Transform::from_translation(world),
+                        VillageCollider {
+                            kind: VillageColliderKind::SheepPenRail,
+                            center: Vec2::new(world.x, world.z),
+                            half_extents: if horizontal {
+                                Vec2::new(8.1, 0.28)
+                            } else {
+                                Vec2::new(0.28, 8.1)
+                            },
+                            yaw: 0.0,
+                            radius: 8.4,
+                        },
+                    ));
+                }
+            }
+            VillageAreaKind::Market => {
+                commands.spawn((
+                    Name::new("MarketStallCollider"),
+                    DespawnOnExit(AppScreen::InGame),
+                    Transform::from_translation(area.position),
+                    VillageCollider {
+                        kind: VillageColliderKind::MarketStall,
+                        center: Vec2::new(area.position.x, area.position.z),
+                        half_extents: Vec2::new(2.75, 1.55),
+                        yaw: 0.0,
+                        radius: 3.2,
+                    },
+                ));
+            }
+            VillageAreaKind::Houses | VillageAreaKind::Shore | VillageAreaKind::OuterPath => {}
+        }
+    }
+}
+
+impl VillageCollider {
+    fn circle(kind: VillageColliderKind, center: Vec2, radius: f32) -> Self {
+        Self {
+            kind,
+            center,
+            half_extents: Vec2::splat(radius.max(0.05)),
+            yaw: 0.0,
+            radius: radius.max(0.05),
+        }
+    }
+}
+
+pub fn resolve_village_collision(
+    start: Vec2,
+    desired: Vec2,
+    capsule_radius: f32,
+    colliders: impl IntoIterator<Item = VillageCollider>,
+) -> (Vec2, bool) {
+    let mut position = desired;
+    let mut blocked = false;
+    for collider in colliders {
+        if let Some(resolved) = resolve_single_village_collider(position, capsule_radius, collider)
+        {
+            position = resolved;
+            blocked = true;
+        }
+    }
+
+    if blocked && (position - desired).length_squared() > (desired - start).length_squared() * 1.8 {
+        (start, true)
+    } else {
+        (position, blocked)
+    }
+}
+
+fn resolve_single_village_collider(
+    position: Vec2,
+    capsule_radius: f32,
+    collider: VillageCollider,
+) -> Option<Vec2> {
+    if collider.kind == VillageColliderKind::House
+        && inside_house_door_gap(
+            position,
+            collider.center,
+            collider.half_extents,
+            collider.yaw,
+        )
+    {
+        return None;
+    }
+    if position.distance_squared(collider.center) > (collider.radius + capsule_radius + 0.6).powi(2)
+    {
+        return None;
+    }
+
+    if collider.kind == VillageColliderKind::Actor {
+        return resolve_circle_collision(
+            position,
+            collider.center,
+            collider.radius + capsule_radius,
+        );
+    }
+
+    resolve_oriented_box_collision(
+        position,
+        collider.center,
+        collider.half_extents + Vec2::splat(capsule_radius),
+        collider.yaw,
+    )
+}
+
+fn resolve_circle_collision(position: Vec2, center: Vec2, radius: f32) -> Option<Vec2> {
+    let delta = position - center;
+    let distance = delta.length();
+    if distance >= radius {
+        return None;
+    }
+    let normal = if distance > 0.0001 {
+        delta / distance
+    } else {
+        Vec2::X
+    };
+    Some(center + normal * radius)
+}
+
+fn resolve_oriented_box_collision(
+    position: Vec2,
+    center: Vec2,
+    half_extents: Vec2,
+    yaw: f32,
+) -> Option<Vec2> {
+    let (local, right, forward) = oriented_local_position(position, center, yaw);
+    if local.x.abs() >= half_extents.x || local.y.abs() >= half_extents.y {
+        return None;
+    }
+
+    let push_x = half_extents.x - local.x.abs();
+    let push_z = half_extents.y - local.y.abs();
+    let resolved_local = if push_x < push_z {
+        Vec2::new(local.x.signum() * half_extents.x, local.y)
+    } else {
+        Vec2::new(local.x, local.y.signum() * half_extents.y)
+    };
+    Some(center + right * resolved_local.x + forward * resolved_local.y)
+}
+
+fn point_inside_oriented_box(position: Vec2, center: Vec2, half_extents: Vec2, yaw: f32) -> bool {
+    let (local, _, _) = oriented_local_position(position, center, yaw);
+    local.x.abs() <= half_extents.x && local.y.abs() <= half_extents.y
+}
+
+fn inside_house_door_gap(position: Vec2, center: Vec2, half_extents: Vec2, yaw: f32) -> bool {
+    let (local, _, _) = oriented_local_position(position, center, yaw);
+    let near_front = local.y <= -half_extents.y + 0.72 && local.y >= -half_extents.y - 1.35;
+    near_front && local.x.abs() <= 0.82
+}
+
+fn oriented_local_position(position: Vec2, center: Vec2, yaw: f32) -> (Vec2, Vec2, Vec2) {
+    let right = Vec2::new(yaw.cos(), -yaw.sin());
+    let forward = Vec2::new(yaw.sin(), yaw.cos());
+    let delta = position - center;
+    (
+        Vec2::new(delta.dot(right), delta.dot(forward)),
+        right,
+        forward,
+    )
 }
 
 fn spawn_house(
@@ -698,9 +1035,9 @@ fn spawn_house(
     materials: &ProceduralAssetMaterials,
     asset_config: &crate::core::config::AssetConfig,
     position: Vec3,
+    yaw: f32,
     index: usize,
 ) {
-    let yaw = index as f32 * 0.43;
     spawn_procedural_asset(
         parent,
         meshes,
@@ -881,6 +1218,11 @@ fn spawn_village_actors(
                     radius: actor.radius,
                     seed,
                 });
+                commands.entity(entity).insert(VillageCollider::circle(
+                    VillageColliderKind::Actor,
+                    Vec2::new(position.x, position.z),
+                    0.52,
+                ));
                 tag_village_actor_parts(commands, entity, actor.id);
             }
             VillageActorKind::Shepherd | VillageActorKind::Merchant => {
@@ -909,9 +1251,20 @@ fn spawn_village_actors(
                     radius: actor.radius,
                     seed,
                 });
+                commands.entity(entity).insert(VillageCollider::circle(
+                    VillageColliderKind::Actor,
+                    Vec2::new(position.x, position.z),
+                    0.48,
+                ));
                 tag_village_actor_parts(commands, entity, actor.id);
             }
         }
+    }
+}
+
+fn sync_village_collider_centers(mut query: Query<(&Transform, &mut VillageCollider)>) {
+    for (transform, mut collider) in &mut query {
+        collider.center = Vec2::new(transform.translation.x, transform.translation.z);
     }
 }
 
@@ -1265,17 +1618,18 @@ fn actor_y_offset(kind: VillageActorKind) -> f32 {
 
 fn update_village_interaction(
     resources: VillageInteractionResources<'_>,
-    player_query: Query<&Transform, With<WandererPrototype>>,
+    mut player_query: Query<&mut Transform, With<WandererPrototype>>,
     actor_query: Query<(&VillageActor, &Transform), Without<WandererPrototype>>,
 ) {
     let (time, keys, village, ecology, mut intent, mut notebook) = resources;
     let Some(mut village) = village else {
         return;
     };
-    let Some(player_transform) = player_query.iter().next() else {
+    let Some(mut player_transform) = player_query.iter_mut().next() else {
         return;
     };
 
+    let nearest_house = nearest_house_interaction(&village, player_transform.translation);
     let nearest = actor_query
         .iter()
         .filter_map(|(actor, transform)| {
@@ -1289,10 +1643,25 @@ fn update_village_interaction(
         .min_by(|a, b| a.distance.total_cmp(&b.distance));
 
     village.nearest_actor = nearest;
-    village.interaction_prompt =
-        build_village_interaction_prompt(nearest, &village.herding, player_transform.translation);
+    village.nearest_house = nearest_house;
+    village.interaction_prompt = build_village_interaction_prompt(
+        nearest,
+        nearest_house,
+        &village.herding,
+        player_transform.translation,
+    );
 
     if !keys.just_pressed(KeyCode::KeyF) {
+        return;
+    }
+
+    if try_handle_house_interaction(
+        &mut village,
+        &mut player_transform,
+        nearest_house,
+        time.elapsed_secs(),
+        notebook.as_deref_mut(),
+    ) {
         return;
     }
 
@@ -1335,9 +1704,18 @@ fn update_village_interaction(
 
 fn build_village_interaction_prompt(
     nearest: Option<VillageActorSnapshot>,
+    nearest_house: Option<VillageHouseSnapshot>,
     herding: &HerdingState,
     player_position: Vec3,
 ) -> Option<String> {
+    if let Some(house) = nearest_house {
+        return Some(if house.inside {
+            "可离开屋舍".to_string()
+        } else {
+            "可推门入内".to_string()
+        });
+    }
+
     let herding_prompt = match herding.phase {
         HerdingPhase::NotStarted | HerdingPhase::Prompted if herding.task_available => {
             Some("可开始放羊".to_string())
@@ -1363,6 +1741,91 @@ fn build_village_interaction_prompt(
         _ => None,
     };
     herding_prompt.or_else(|| nearest.map(|actor| actor.kind.prompt().to_string()))
+}
+
+fn nearest_house_interaction(
+    village: &VillageState,
+    player_position: Vec3,
+) -> Option<VillageHouseSnapshot> {
+    village
+        .houses
+        .iter()
+        .filter_map(|house| {
+            let inside = house.occupied_by_player
+                || point_inside_oriented_box(
+                    Vec2::new(player_position.x, player_position.z),
+                    Vec2::new(house.position.x, house.position.z),
+                    house.half_extents + Vec2::splat(0.18),
+                    house.yaw,
+                );
+            let reference = if inside {
+                house.interior_position
+            } else {
+                house.door_position
+            };
+            let distance = planar_distance(player_position, reference);
+            let radius = if inside { 4.2 } else { INTERACTION_RADIUS };
+            (distance <= radius).then_some(VillageHouseSnapshot {
+                id: house.id,
+                distance,
+                inside,
+            })
+        })
+        .min_by(|a, b| a.distance.total_cmp(&b.distance))
+}
+
+fn try_handle_house_interaction(
+    village: &mut VillageState,
+    player_transform: &mut Transform,
+    nearest_house: Option<VillageHouseSnapshot>,
+    at_seconds: f32,
+    notebook: Option<&mut NotebookState>,
+) -> bool {
+    let Some(snapshot) = nearest_house else {
+        return false;
+    };
+    let Some(house_index) = village
+        .houses
+        .iter()
+        .position(|house| house.id == snapshot.id)
+    else {
+        return false;
+    };
+
+    let house = &mut village.houses[house_index];
+    if snapshot.inside {
+        let forward = Quat::from_rotation_y(house.yaw) * -Vec3::Z;
+        player_transform.translation = house.door_position + forward * 1.8 + Vec3::Y * 1.12;
+        house.occupied_by_player = false;
+        tracing::info!(
+            target: "dao_game::village::house",
+            house_id = house.id,
+            "player exited procedural house"
+        );
+    } else {
+        player_transform.translation = house.interior_position;
+        player_transform.rotation = Quat::from_rotation_y(house.yaw + std::f32::consts::PI);
+        house.occupied_by_player = true;
+        let _ = record_notebook_entry(
+            notebook,
+            NotebookRecord {
+                kind: NotebookEntryKind::Observation,
+                at_seconds,
+                location: Some("屋舍".to_string()),
+                source: NotebookSource::Observation,
+                title: "推门入内".to_string(),
+                body: "屋里有泥地、床铺、炉灶和木桌。门没有把你挡在外面，村庄也不再只是外壳。"
+                    .to_string(),
+                tags: vec![NotebookTag::Village, NotebookTag::Memory],
+            },
+        );
+        tracing::info!(
+            target: "dao_game::village::house",
+            house_id = house.id,
+            "player entered procedural house"
+        );
+    }
+    true
 }
 
 fn try_handle_herding_interaction(
@@ -1701,7 +2164,8 @@ mod tests {
             journey::{DreamPhase, DreamState, JourneyResponseState, JourneyState, StoryArcStage},
             village::{
                 ShepherdSchedulePhase, VillageActorKind, VillageAreaKind, VillageAtmosphere,
-                VillageDayPhase, VillageLayoutConfig, actor_target_position, build_village_layout,
+                VillageCollider, VillageColliderKind, VillageDayPhase, VillageLayoutConfig,
+                actor_target_position, build_village_layout, resolve_village_collision,
                 shepherd_schedule_position, update_village_atmosphere, village_day_phase,
             },
             world::WorldMap,
@@ -1753,6 +2217,13 @@ mod tests {
                 .iter()
                 .any(|actor| actor.kind == VillageActorKind::Shepherd)
         );
+        assert_eq!(village.houses.len(), 5);
+        assert!(
+            village
+                .houses
+                .iter()
+                .all(|house| house.door_position.distance(house.position) > 1.5)
+        );
     }
 
     #[test]
@@ -1765,7 +2236,39 @@ mod tests {
 
         assert_eq!(first.origin, second.origin);
         assert_eq!(first.areas, second.areas);
+        assert_eq!(first.houses, second.houses);
         assert_eq!(first.actors, second.actors);
+    }
+
+    #[test]
+    fn village_collision_blocks_house_wall_but_keeps_door_gap_open() {
+        let collider = VillageCollider {
+            kind: VillageColliderKind::House,
+            center: Vec2::ZERO,
+            half_extents: Vec2::new(2.5, 2.0),
+            yaw: 0.0,
+            radius: 3.4,
+        };
+
+        let (wall_position, wall_blocked) =
+            resolve_village_collision(Vec2::new(2.9, 0.0), Vec2::new(2.2, 0.0), 0.4, [collider]);
+        let (door_position, door_blocked) =
+            resolve_village_collision(Vec2::new(0.0, -3.0), Vec2::new(0.0, -2.15), 0.4, [collider]);
+
+        assert!(wall_blocked);
+        assert!(wall_position.x.abs() >= 2.9);
+        assert!(!door_blocked);
+        assert_eq!(door_position, Vec2::new(0.0, -2.15));
+    }
+
+    #[test]
+    fn village_collision_pushes_out_of_actor_radius() {
+        let collider = VillageCollider::circle(VillageColliderKind::Actor, Vec2::ZERO, 0.5);
+        let (position, blocked) =
+            resolve_village_collision(Vec2::new(1.2, 0.0), Vec2::new(0.2, 0.0), 0.4, [collider]);
+
+        assert!(blocked);
+        assert!(position.length() >= 0.9);
     }
 
     #[test]

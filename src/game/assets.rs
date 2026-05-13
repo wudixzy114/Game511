@@ -110,6 +110,7 @@ pub struct ProceduralAssetMaterials {
     mud_wall: Handle<StandardMaterial>,
     dark_roof: Handle<StandardMaterial>,
     wood: Handle<StandardMaterial>,
+    grove_leaf: Handle<StandardMaterial>,
     stone: Handle<StandardMaterial>,
     cloth: Handle<StandardMaterial>,
     water: Handle<StandardMaterial>,
@@ -145,6 +146,11 @@ impl ProceduralAssetMaterials {
             wood: materials.add(StandardMaterial {
                 base_color: toned_color(0.33, 0.24, 0.15, saturation),
                 perceptual_roughness: 0.92,
+                ..Default::default()
+            }),
+            grove_leaf: materials.add(StandardMaterial {
+                base_color: toned_color(0.22, 0.38, 0.18, saturation),
+                perceptual_roughness: 0.97,
                 ..Default::default()
             }),
             stone: materials.add(StandardMaterial {
@@ -236,6 +242,7 @@ impl ProceduralAssetMaterials {
             ProceduralMaterialFamily::MudWall => self.mud_wall.clone(),
             ProceduralMaterialFamily::DarkRoof => self.dark_roof.clone(),
             ProceduralMaterialFamily::Wood => self.wood.clone(),
+            ProceduralMaterialFamily::GroveLeaf => self.grove_leaf.clone(),
             ProceduralMaterialFamily::Stone => self.stone.clone(),
             ProceduralMaterialFamily::Cloth => self.cloth.clone(),
             ProceduralMaterialFamily::Water => self.water.clone(),
@@ -340,10 +347,27 @@ pub struct ProceduralPartBlueprint {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProceduralShape {
     Cuboid(Vec3),
-    Cylinder { radius: f32, depth: f32 },
-    Capsule { radius: f32, depth: f32 },
-    Sphere { radius: f32 },
-    Pyramid { width: f32, height: f32 },
+    Cylinder {
+        radius: f32,
+        depth: f32,
+    },
+    Capsule {
+        radius: f32,
+        depth: f32,
+    },
+    Sphere {
+        radius: f32,
+    },
+    Pyramid {
+        width: f32,
+        height: f32,
+    },
+    GabledRoof {
+        width: f32,
+        depth: f32,
+        height: f32,
+        overhang: f32,
+    },
 }
 
 #[derive(Debug, Component, Clone, Copy, Eq, PartialEq, Hash)]
@@ -601,6 +625,12 @@ fn mesh_from_shape(shape: ProceduralShape) -> Mesh {
         ProceduralShape::Capsule { radius, depth } => Mesh::from(Capsule3d::new(radius, depth)),
         ProceduralShape::Sphere { radius } => Sphere::new(radius).mesh().uv(16, 10),
         ProceduralShape::Pyramid { width, height } => pyramid_mesh(width, height),
+        ProceduralShape::GabledRoof {
+            width,
+            depth,
+            height,
+            overhang,
+        } => gabled_roof_mesh(width, depth, height, overhang),
     }
 }
 
@@ -649,85 +679,236 @@ fn house_parts(
         spec.base_size.y * (0.96 + seeded_unit(spec.seed, 37) * 0.08),
         spec.base_size.z * (0.94 + seeded_unit(spec.seed, 41) * 0.12),
     );
+    let wide_variant = seeded_unit(spec.seed, 43) > 0.55;
+    let lean_to_side = if seeded_unit(spec.seed, 47) > 0.5 {
+        1.0
+    } else {
+        -1.0
+    };
+    let roof_height = body.y * (0.42 + seeded_unit(spec.seed, 53) * 0.14);
+    let roof_y = body.y * 0.77;
+    let wall_height = body.y * 0.74;
+    let wall_y = wall_height * 0.5;
+    let wall_thickness = 0.18;
+    let door_half_width = 0.58;
+    let front_z = -body.z * 0.45;
+    let back_z = body.z * 0.43;
+    let side_x = body.x * 0.45;
+    let interior_floor = Vec3::new(body.x * 0.78, 0.08, body.z * 0.7);
+
     match lod {
-        ProceduralAssetLod::Near => vec![
-            part(
-                "HouseWall",
-                ProceduralShape::Cuboid(Vec3::new(body.x * 0.9, body.y * 0.75, body.z * 0.86)),
-                ProceduralMaterialFamily::MudWall,
-                Transform::from_translation(Vec3::Y * body.y * 0.38),
-            ),
-            part(
-                "HouseRoof",
-                ProceduralShape::Cuboid(Vec3::new(body.x, body.y * 0.24, body.z)),
-                ProceduralMaterialFamily::DarkRoof,
-                Transform::from_translation(Vec3::Y * body.y * 0.82),
-            ),
-            part(
-                "HouseDoor",
-                ProceduralShape::Cuboid(Vec3::new(0.76, 1.25, 0.08)),
-                ProceduralMaterialFamily::Wood,
-                Transform::from_translation(Vec3::new(0.0, 0.72, -body.z * 0.44)),
-            ),
-            part(
-                "HouseFrontBeamLeft",
-                ProceduralShape::Cuboid(Vec3::new(0.16, body.y * 0.76, 0.16)),
-                ProceduralMaterialFamily::Wood,
-                Transform::from_translation(Vec3::new(
-                    -body.x * 0.45,
-                    body.y * 0.39,
-                    -body.z * 0.47,
-                )),
-            ),
-            part(
-                "HouseFrontBeamRight",
-                ProceduralShape::Cuboid(Vec3::new(0.16, body.y * 0.76, 0.16)),
-                ProceduralMaterialFamily::Wood,
-                Transform::from_translation(Vec3::new(
-                    body.x * 0.45,
-                    body.y * 0.39,
-                    -body.z * 0.47,
-                )),
-            ),
-            part(
-                "HouseWindowWarmLeft",
-                ProceduralShape::Cuboid(Vec3::new(0.48, 0.38, 0.06)),
-                ProceduralMaterialFamily::WarmLight,
-                Transform::from_translation(Vec3::new(-body.x * 0.25, 1.28, -body.z * 0.45)),
-            ),
-            part(
-                "HouseWindowWarmRight",
-                ProceduralShape::Cuboid(Vec3::new(0.48, 0.38, 0.06)),
-                ProceduralMaterialFamily::WarmLight,
-                Transform::from_translation(Vec3::new(body.x * 0.25, 1.28, -body.z * 0.45)),
-            ),
-            part(
-                "HouseChimney",
-                ProceduralShape::Cuboid(Vec3::new(0.42, 0.82, 0.42)),
-                ProceduralMaterialFamily::Stone,
-                Transform::from_translation(Vec3::new(body.x * 0.22, body.y * 1.04, body.z * 0.18)),
-            ),
-            animated_part(
-                "HouseSmokeWisp",
-                ProceduralShape::Sphere { radius: 0.34 },
-                ProceduralMaterialFamily::Shadow,
-                Transform::from_translation(Vec3::new(body.x * 0.22, body.y * 1.32, body.z * 0.18))
+        ProceduralAssetLod::Near => {
+            let mut parts = vec![
+                part(
+                    "HousePackedEarthFloor",
+                    ProceduralShape::Cuboid(interior_floor),
+                    ProceduralMaterialFamily::Sand,
+                    Transform::from_translation(Vec3::new(0.0, 0.06, 0.03)),
+                ),
+                part(
+                    "HouseBackWall",
+                    ProceduralShape::Cuboid(Vec3::new(body.x * 0.86, wall_height, wall_thickness)),
+                    ProceduralMaterialFamily::MudWall,
+                    Transform::from_translation(Vec3::new(0.0, wall_y, back_z)),
+                ),
+                part(
+                    "HouseLeftWall",
+                    ProceduralShape::Cuboid(Vec3::new(wall_thickness, wall_height, body.z * 0.78)),
+                    ProceduralMaterialFamily::MudWall,
+                    Transform::from_translation(Vec3::new(-side_x, wall_y, 0.02)),
+                ),
+                part(
+                    "HouseRightWall",
+                    ProceduralShape::Cuboid(Vec3::new(wall_thickness, wall_height, body.z * 0.78)),
+                    ProceduralMaterialFamily::MudWall,
+                    Transform::from_translation(Vec3::new(side_x, wall_y, 0.02)),
+                ),
+                part(
+                    "HouseFrontWallLeft",
+                    ProceduralShape::Cuboid(Vec3::new(
+                        (body.x * 0.43 - door_half_width).max(0.32),
+                        wall_height,
+                        wall_thickness,
+                    )),
+                    ProceduralMaterialFamily::MudWall,
+                    Transform::from_translation(Vec3::new(
+                        -(body.x * 0.22 + door_half_width * 0.5),
+                        wall_y,
+                        front_z,
+                    )),
+                ),
+                part(
+                    "HouseFrontWallRight",
+                    ProceduralShape::Cuboid(Vec3::new(
+                        (body.x * 0.43 - door_half_width).max(0.32),
+                        wall_height,
+                        wall_thickness,
+                    )),
+                    ProceduralMaterialFamily::MudWall,
+                    Transform::from_translation(Vec3::new(
+                        body.x * 0.22 + door_half_width * 0.5,
+                        wall_y,
+                        front_z,
+                    )),
+                ),
+                part(
+                    "HouseDoorLintel",
+                    ProceduralShape::Cuboid(Vec3::new(door_half_width * 2.1, 0.22, wall_thickness)),
+                    ProceduralMaterialFamily::Wood,
+                    Transform::from_translation(Vec3::new(0.0, 1.58, front_z - 0.01)),
+                ),
+                part(
+                    "HouseGabledRoof",
+                    ProceduralShape::GabledRoof {
+                        width: body.x,
+                        depth: body.z,
+                        height: roof_height,
+                        overhang: 0.36,
+                    },
+                    ProceduralMaterialFamily::DarkRoof,
+                    Transform::from_translation(Vec3::Y * roof_y),
+                ),
+                part(
+                    "HouseDoorOpenPlank",
+                    ProceduralShape::Cuboid(Vec3::new(0.54, 1.34, 0.08)),
+                    ProceduralMaterialFamily::Wood,
+                    Transform::from_translation(Vec3::new(-0.54, 0.78, front_z - 0.12))
+                        .with_rotation(Quat::from_rotation_y(-0.58)),
+                ),
+                part(
+                    "HouseFrontBeamLeft",
+                    ProceduralShape::Cuboid(Vec3::new(0.16, body.y * 0.76, 0.16)),
+                    ProceduralMaterialFamily::Wood,
+                    Transform::from_translation(Vec3::new(
+                        -body.x * 0.45,
+                        body.y * 0.39,
+                        -body.z * 0.47,
+                    )),
+                ),
+                part(
+                    "HouseFrontBeamRight",
+                    ProceduralShape::Cuboid(Vec3::new(0.16, body.y * 0.76, 0.16)),
+                    ProceduralMaterialFamily::Wood,
+                    Transform::from_translation(Vec3::new(
+                        body.x * 0.45,
+                        body.y * 0.39,
+                        -body.z * 0.47,
+                    )),
+                ),
+                part(
+                    "HouseWindowWarmLeft",
+                    ProceduralShape::Cuboid(Vec3::new(0.42, 0.34, 0.06)),
+                    ProceduralMaterialFamily::WarmLight,
+                    Transform::from_translation(Vec3::new(-body.x * 0.28, 1.18, front_z - 0.06)),
+                ),
+                part(
+                    "HouseWindowWarmRight",
+                    ProceduralShape::Cuboid(Vec3::new(0.42, 0.34, 0.06)),
+                    ProceduralMaterialFamily::WarmLight,
+                    Transform::from_translation(Vec3::new(body.x * 0.28, 1.18, front_z - 0.06)),
+                ),
+                part(
+                    "HouseInteriorHearth",
+                    ProceduralShape::Cuboid(Vec3::new(0.82, 0.32, 0.62)),
+                    ProceduralMaterialFamily::Stone,
+                    Transform::from_translation(Vec3::new(-body.x * 0.22, 0.22, body.z * 0.22)),
+                ),
+                part(
+                    "HouseInteriorBed",
+                    ProceduralShape::Cuboid(Vec3::new(1.32, 0.34, 0.72)),
+                    ProceduralMaterialFamily::Cloth,
+                    Transform::from_translation(Vec3::new(body.x * 0.22, 0.24, body.z * 0.18)),
+                ),
+                part(
+                    "HouseInteriorTable",
+                    ProceduralShape::Cuboid(Vec3::new(0.82, 0.12, 0.58)),
+                    ProceduralMaterialFamily::Wood,
+                    Transform::from_translation(Vec3::new(0.0, 0.58, -body.z * 0.08)),
+                ),
+                part(
+                    "HouseInteriorLantern",
+                    ProceduralShape::Sphere { radius: 0.16 },
+                    ProceduralMaterialFamily::WarmLight,
+                    Transform::from_translation(Vec3::new(0.0, 1.62, 0.02))
+                        .with_scale(Vec3::new(0.86, 1.15, 0.86)),
+                ),
+                part(
+                    "HouseChimney",
+                    ProceduralShape::Cuboid(Vec3::new(0.42, 0.82, 0.42)),
+                    ProceduralMaterialFamily::Stone,
+                    Transform::from_translation(Vec3::new(
+                        body.x * 0.22,
+                        body.y * 1.04,
+                        body.z * 0.18,
+                    )),
+                ),
+                animated_part(
+                    "HouseSmokeWisp",
+                    ProceduralShape::Sphere { radius: 0.34 },
+                    ProceduralMaterialFamily::Shadow,
+                    Transform::from_translation(Vec3::new(
+                        body.x * 0.22,
+                        body.y * 1.32,
+                        body.z * 0.18,
+                    ))
                     .with_scale(Vec3::new(1.0, 1.45, 1.0)),
-                ProceduralAnimationRole::Smoke,
-            ),
-            part(
-                "HouseEaveShadow",
-                ProceduralShape::Cuboid(Vec3::new(body.x * 0.94, 0.05, 0.08)),
-                ProceduralMaterialFamily::Shadow,
-                Transform::from_translation(Vec3::new(0.0, body.y * 0.7, -body.z * 0.5)),
-            ),
-            part(
-                "HouseStep",
-                ProceduralShape::Cuboid(Vec3::new(1.2, 0.18, 0.72)),
-                ProceduralMaterialFamily::Stone,
-                Transform::from_translation(Vec3::new(0.0, 0.12, -body.z * 0.58)),
-            ),
-        ],
+                    ProceduralAnimationRole::Smoke,
+                ),
+                part(
+                    "HouseEaveShadow",
+                    ProceduralShape::Cuboid(Vec3::new(body.x * 0.94, 0.05, 0.12)),
+                    ProceduralMaterialFamily::Shadow,
+                    Transform::from_translation(Vec3::new(0.0, body.y * 0.7, -body.z * 0.5)),
+                ),
+                part(
+                    "HouseStep",
+                    ProceduralShape::Cuboid(Vec3::new(1.2, 0.18, 0.72)),
+                    ProceduralMaterialFamily::Stone,
+                    Transform::from_translation(Vec3::new(0.0, 0.12, -body.z * 0.58)),
+                ),
+            ];
+            if wide_variant {
+                parts.extend([
+                    part(
+                        "HouseSideLeanToRoof",
+                        ProceduralShape::Cuboid(Vec3::new(body.x * 0.38, 0.12, body.z * 0.64)),
+                        ProceduralMaterialFamily::DarkRoof,
+                        Transform::from_translation(Vec3::new(
+                            side_x * lean_to_side,
+                            body.y * 0.55,
+                            body.z * 0.03,
+                        ))
+                        .with_rotation(Quat::from_rotation_z(-0.18 * lean_to_side)),
+                    ),
+                    part(
+                        "HouseSideStorageCrates",
+                        ProceduralShape::Cuboid(Vec3::new(0.84, 0.52, 0.64)),
+                        ProceduralMaterialFamily::Wood,
+                        Transform::from_translation(Vec3::new(
+                            side_x * lean_to_side,
+                            0.36,
+                            body.z * 0.04,
+                        )),
+                    ),
+                ]);
+            } else {
+                parts.extend([
+                    part(
+                        "HouseLoftBeam",
+                        ProceduralShape::Cuboid(Vec3::new(body.x * 0.66, 0.12, 0.12)),
+                        ProceduralMaterialFamily::Wood,
+                        Transform::from_translation(Vec3::new(0.0, 1.72, body.z * 0.12)),
+                    ),
+                    part(
+                        "HouseHangingHerbs",
+                        ProceduralShape::Cuboid(Vec3::new(0.18, 0.46, 0.12)),
+                        ProceduralMaterialFamily::GroveLeaf,
+                        Transform::from_translation(Vec3::new(body.x * 0.24, 1.44, -0.1)),
+                    ),
+                ]);
+            }
+            parts
+        }
         ProceduralAssetLod::Mid => vec![
             part(
                 "HouseMidBody",
@@ -737,14 +918,19 @@ fn house_parts(
             ),
             part(
                 "HouseMidRoof",
-                ProceduralShape::Cuboid(Vec3::new(body.x, body.y * 0.24, body.z)),
+                ProceduralShape::GabledRoof {
+                    width: body.x,
+                    depth: body.z,
+                    height: roof_height,
+                    overhang: 0.3,
+                },
                 ProceduralMaterialFamily::DarkRoof,
-                Transform::from_translation(Vec3::Y * body.y * 0.82),
+                Transform::from_translation(Vec3::Y * roof_y),
             ),
         ],
         ProceduralAssetLod::Far => vec![part(
             "HouseFarBlock",
-            ProceduralShape::Cuboid(Vec3::new(body.x, body.y * 0.82, body.z)),
+            ProceduralShape::Cuboid(Vec3::new(body.x, body.y * 0.78, body.z)),
             ProceduralMaterialFamily::MudWall,
             Transform::from_translation(Vec3::Y * body.y * 0.42),
         )],
@@ -1628,6 +1814,56 @@ fn pyramid_mesh(width: f32, height: f32) -> Mesh {
     mesh
 }
 
+fn gabled_roof_mesh(width: f32, depth: f32, height: f32, overhang: f32) -> Mesh {
+    let half_width = width * 0.5 + overhang;
+    let half_depth = depth * 0.5 + overhang * 0.6;
+    let eave_y = 0.0;
+    let ridge_y = height.max(0.05);
+    let positions = vec![
+        [-half_width, eave_y, -half_depth],
+        [half_width, eave_y, -half_depth],
+        [half_width, eave_y, half_depth],
+        [-half_width, eave_y, half_depth],
+        [0.0, ridge_y, -half_depth],
+        [0.0, ridge_y, half_depth],
+    ];
+    let uvs = vec![
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
+        [0.5, 0.0],
+        [0.5, 1.0],
+    ];
+    let indices = vec![
+        0, 4, 3, 3, 4, 5, 1, 2, 4, 2, 5, 4, 0, 1, 4, 3, 5, 2, 0, 3, 1, 1, 3, 2,
+    ];
+    let mut normals = vec![[0.0, 0.0, 0.0]; positions.len()];
+    for triangle in indices.chunks_exact(3) {
+        let a = Vec3::from_array(positions[triangle[0] as usize]);
+        let b = Vec3::from_array(positions[triangle[1] as usize]);
+        let c = Vec3::from_array(positions[triangle[2] as usize]);
+        let face_normal = (b - a).cross(c - a).normalize_or_zero();
+        for index in triangle {
+            let normal = Vec3::from_array(normals[*index as usize]) + face_normal;
+            normals[*index as usize] = normal.to_array();
+        }
+    }
+    for normal in &mut normals {
+        *normal = Vec3::from_array(*normal).normalize_or_zero().to_array();
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProceduralAssetSpec {
     pub kind: ProceduralAssetKind,
@@ -1728,6 +1964,7 @@ pub enum ProceduralMaterialFamily {
     MudWall,
     DarkRoof,
     Wood,
+    GroveLeaf,
     Stone,
     Cloth,
     Water,
@@ -2228,6 +2465,19 @@ mod tests {
             asset_blueprint(&pyramid, ProceduralAssetLod::Near).part_count()
                 > asset_blueprint(&pyramid, ProceduralAssetLod::Mid).part_count()
         );
+    }
+
+    #[test]
+    fn village_house_blueprint_has_open_door_and_interior_parts() {
+        let house = registered_spec(ProceduralAssetKind::VillageHouse);
+        let blueprint = asset_blueprint(&house, ProceduralAssetLod::Near);
+        let names: Vec<_> = blueprint.parts.iter().map(|part| part.name).collect();
+
+        assert!(names.contains(&"HouseDoorOpenPlank"));
+        assert!(names.contains(&"HouseInteriorHearth"));
+        assert!(names.contains(&"HouseInteriorBed"));
+        assert!(names.contains(&"HouseInteriorTable"));
+        assert!(names.contains(&"HouseGabledRoof"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use crate::{
     game::{
         flow::{AppScreen, InGameState, SessionMode, in_session_mode},
         regions::RegionGraphState,
+        village::{VillageCollider, resolve_village_collision},
         world::{
             TerrainCollisionProxy, TerrainCollisionSample, WandererPrototype, WorldCamera, WorldMap,
         },
@@ -366,6 +367,7 @@ fn move_player_body(
     state: Option<ResMut<FirstPersonState>>,
     bootstrap: Option<Res<FirstPersonBootstrap>>,
     regions: Option<Res<RegionGraphState>>,
+    village_colliders: Query<&VillageCollider>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
 ) {
     let started_at = std::time::Instant::now();
@@ -425,18 +427,30 @@ fn move_player_body(
         Vec2::new(transform.translation.x, transform.translation.z),
         Vec2::new(horizontal_delta.x, horizontal_delta.z),
         walker,
-        ground_sampler,
+        &mut *ground_sampler,
     );
     let Some(horizontal_contact) = horizontal_contact else {
         return;
     };
-    transform.translation.x = horizontal_contact.position.x;
-    transform.translation.z = horizontal_contact.position.y;
+    let (asset_position, asset_blocked) = resolve_village_collision(
+        Vec2::new(transform.translation.x, transform.translation.z),
+        horizontal_contact.position,
+        walker.capsule_radius,
+        village_colliders.iter().copied(),
+    );
+    transform.translation.x = asset_position.x;
+    transform.translation.z = asset_position.y;
+    let support = if asset_blocked {
+        sample_capsule_support(asset_position, walker.capsule_radius, ground_sampler)
+            .unwrap_or(horizontal_contact.support)
+    } else {
+        horizontal_contact.support
+    };
 
     let vertical_contact = resolve_vertical_contact(
         VerticalContactInput {
             current_y: transform.translation.y,
-            ground_y: horizontal_contact.support.height + config.player.body_height,
+            ground_y: support.height + config.player.body_height,
             vertical_velocity: state.vertical_velocity,
             grounded: state.grounded,
             jump_requested: keys.just_pressed(KeyCode::Space),

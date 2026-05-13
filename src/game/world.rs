@@ -3220,6 +3220,9 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
     let shore_blend = shoreline_factor(sample, water_level);
     let wet_edge = wet * shore_blend * 0.22;
     let wind_alignment = directional_wind_pattern(sample.world_x, sample.world_z);
+    let normal_hint = procedural_normal_light(sample);
+    let tread = tread_marks(sample);
+    let wet_sheen = wet_surface_sheen(sample, water_level);
     let sand_ripple = match sample.biome {
         BiomeKind::DesertSand => wind_alignment * (0.09 + dust * 0.08),
         BiomeKind::Gobi => wind_alignment * (0.04 + rocky * 0.03),
@@ -3234,6 +3237,8 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
     };
     let cool_wet_tint = wet_edge * 0.14 + shore_blend * 0.04;
     let warm_dust_tint = dust * 0.05 + sand_ripple * 0.04;
+    let material_light = normal_hint * (0.05 + rocky * 0.035 + shore_blend * 0.02);
+    let compression_shadow = tread * (0.045 + wet * 0.03);
     Color::linear_rgba(
         (r + sediment * 0.08 - rocky * 0.06
             + grain * 0.03
@@ -3242,18 +3247,27 @@ fn terrain_texture_color(sample: &TerrainVertexSample, water_level: f32) -> Colo
             + grass_variation.x
             - cool_wet_tint
             + warm_dust_tint
-            - pebble_shadow)
+            + material_light
+            + wet_sheen * 0.035
+            - pebble_shadow
+            - compression_shadow)
             .clamp(0.0, 1.0),
         (g + wet * 0.04 - rocky * 0.04 + grain * 0.02 + grass_variation.y + sand_ripple * 0.035
             - wet_edge * 0.035
-            - dust * 0.018)
+            - dust * 0.018
+            + material_light * 0.72
+            + wet_sheen * 0.05
+            - compression_shadow * 0.75)
             .clamp(0.0, 1.0),
         (b + wet * 0.06 + rocky * 0.03 - grain * 0.03
             + mineral_breakup * 0.015
             + grass_variation.z
             - sand_ripple * 0.025
             + cool_wet_tint
-            - dust * 0.012)
+            - dust * 0.012
+            + material_light * 0.42
+            + wet_sheen * 0.07
+            - compression_shadow * 0.35)
             .clamp(0.0, 1.0),
         1.0,
     )
@@ -3296,6 +3310,41 @@ fn biome_grass_variation(sample: &TerrainVertexSample) -> Vec3 {
         BiomeKind::Oasis => Vec3::new(-0.005, 0.05, 0.015),
         _ => Vec3::ZERO,
     }
+}
+
+fn procedural_normal_light(sample: &TerrainVertexSample) -> f32 {
+    let fine_x = (sample.world_x * 1.13 + sample.world_z * 0.17).sin();
+    let fine_z = (sample.world_z * 1.07 - sample.world_x * 0.21).cos();
+    let diagonal = ((sample.world_x + sample.world_z) * 0.53).sin();
+    let relief = fine_x * 0.46 + fine_z * 0.38 + diagonal * 0.16;
+    let biome_weight = match sample.biome {
+        BiomeKind::Ridge | BiomeKind::Gobi => 1.0,
+        BiomeKind::DesertSand => 0.84,
+        BiomeKind::Meadow | BiomeKind::Grove | BiomeKind::Oasis => 0.62,
+        BiomeKind::Steppe => 0.72,
+        BiomeKind::Water => 0.18,
+    };
+    relief.clamp(-1.0, 1.0) * biome_weight
+}
+
+fn tread_marks(sample: &TerrainVertexSample) -> f32 {
+    let path_a = (sample.world_x * 0.045 + sample.world_z * 0.031)
+        .sin()
+        .abs();
+    let path_b = ((sample.world_x - sample.world_z) * 0.028).cos().abs();
+    let band = (1.0 - (path_a * 0.68 + path_b * 0.32)).clamp(0.0, 1.0);
+    let biome_weight = match sample.biome {
+        BiomeKind::Meadow | BiomeKind::Steppe | BiomeKind::DesertSand | BiomeKind::Gobi => 1.0,
+        BiomeKind::Oasis | BiomeKind::Grove => 0.55,
+        BiomeKind::Ridge | BiomeKind::Water => 0.15,
+    };
+    band.powf(5.2) * biome_weight * (0.45 + sample.moisture * 0.55)
+}
+
+fn wet_surface_sheen(sample: &TerrainVertexSample, water_level: f32) -> f32 {
+    let shoreline = shoreline_factor(sample, water_level);
+    let ripple = directional_wind_pattern(sample.world_x * 1.7, sample.world_z * 1.7);
+    (shoreline * ripple * (0.35 + sample.moisture * 0.65)).clamp(0.0, 1.0)
 }
 
 fn detail_visuals_for_biome(
