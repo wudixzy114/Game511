@@ -267,8 +267,8 @@ impl ObjectCollisionMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::VisualOnly => "仅表现",
-            Self::TrunkOnly => "树干",
-            Self::TrunkAndRoots => "树干+根部",
+            Self::TrunkOnly => "主体",
+            Self::TrunkAndRoots => "主体+扩展",
             Self::Full => "完整",
         }
     }
@@ -308,6 +308,11 @@ pub enum ObjectMaterialSlot {
     LeafSecondary = 3,
     LeafDry = 4,
     RootShadow = 5,
+    RockPrimary = 6,
+    RockStrata = 7,
+    RockWet = 8,
+    RockMoss = 9,
+    RockShadow = 10,
 }
 
 impl ObjectMaterialSlot {
@@ -319,6 +324,11 @@ impl ObjectMaterialSlot {
             Self::LeafSecondary => "leaf_secondary",
             Self::LeafDry => "leaf_dry",
             Self::RootShadow => "root_shadow",
+            Self::RockPrimary => "rock_primary",
+            Self::RockStrata => "rock_strata",
+            Self::RockWet => "rock_wet",
+            Self::RockMoss => "rock_moss",
+            Self::RockShadow => "rock_shadow",
         }
     }
 }
@@ -375,6 +385,7 @@ pub struct ObjectFamilyDefinition {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ObjectFamilyGeneratorKind {
     Tree,
+    Rock,
     Placeholder,
 }
 
@@ -386,6 +397,7 @@ impl ObjectFamilyGeneratorKind {
     ) -> ObjectGeneratedAsset {
         match self {
             Self::Tree => families::tree::generate_asset(request, family),
+            Self::Rock => families::rock::generate_asset(request, family),
             Self::Placeholder => generate_placeholder_asset(request, family),
         }
     }
@@ -419,9 +431,9 @@ impl Default for ProceduralObjectRegistry {
                     families::tree::definition(),
                     ObjectFamilyGeneratorKind::Tree,
                 ),
-                simple_family(
-                    ObjectKind::Rock,
-                    vec![ObjectSemantic::Stone, ObjectSemantic::Waterside],
+                RegisteredObjectFamily::new(
+                    families::rock::definition(),
+                    ObjectFamilyGeneratorKind::Rock,
                 ),
                 simple_family(
                     ObjectKind::RuinFragment,
@@ -511,6 +523,20 @@ impl ObjectGenerationRequest {
             mode: ObjectGenerationMode::Gallery,
         }
     }
+
+    pub fn rock(seed: u64, lod: ObjectLod, transform: Transform) -> Self {
+        Self {
+            kind: ObjectKind::Rock,
+            seed,
+            lod,
+            transform,
+            biome: ObjectBiomeContext::Ridge,
+            weather: ObjectWeatherState::Clear,
+            material_variant: ObjectMaterialVariant::Default,
+            collision_mode: ObjectCollisionMode::TrunkAndRoots,
+            mode: ObjectGenerationMode::Gallery,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize)]
@@ -545,9 +571,29 @@ pub struct ProceduralTreeProfile {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct ProceduralRockProfile {
+    pub seed: u64,
+    pub biome: ObjectBiomeContext,
+    pub base_radius: f32,
+    pub height: f32,
+    pub elongation: f32,
+    pub flatten: f32,
+    pub tilt: Vec2,
+    pub strata_strength: f32,
+    pub crack_density: f32,
+    pub erosion: f32,
+    pub wet_line: f32,
+    pub moss_ratio: f32,
+    pub shard_count: usize,
+    pub collider_radius: f32,
+    pub collider_height: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GeneratedObjectProfile {
     Tree(ProceduralTreeProfile),
+    Rock(ProceduralRockProfile),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -660,6 +706,7 @@ struct ProceduralTreeWindPart {
 #[derive(Debug, Resource, Clone, PartialEq)]
 struct ObjectGalleryState {
     export_queue: GalleryExportQueue,
+    focus_index: usize,
 }
 
 impl Default for ObjectGalleryState {
@@ -669,6 +716,7 @@ impl Default for ObjectGalleryState {
                 "logs/object-gallery-manifest.json",
                 "logs/object-gallery.png",
             ),
+            focus_index: 0,
         }
     }
 }
@@ -699,13 +747,18 @@ struct ObjectMeshHandles {
 }
 
 #[derive(Debug, Clone)]
-struct TreeSlotMaterials {
+struct ObjectSlotMaterials {
     bark_primary: Handle<StandardMaterial>,
     bark_worn_edge: Handle<StandardMaterial>,
     leaf_primary: Handle<StandardMaterial>,
     leaf_secondary: Handle<StandardMaterial>,
     leaf_dry: Handle<StandardMaterial>,
     root_shadow: Handle<StandardMaterial>,
+    rock_primary: Handle<StandardMaterial>,
+    rock_strata: Handle<StandardMaterial>,
+    rock_wet: Handle<StandardMaterial>,
+    rock_moss: Handle<StandardMaterial>,
+    rock_shadow: Handle<StandardMaterial>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -788,9 +841,22 @@ enum ObjectGalleryExportProfile {
         moss_ratio: f32,
         wind_flex: f32,
     },
+    Rock {
+        base_radius: f32,
+        height: f32,
+        elongation: f32,
+        flatten: f32,
+        strata_strength: f32,
+        crack_density: f32,
+        erosion: f32,
+        wet_line: f32,
+        moss_ratio: f32,
+        shard_count: usize,
+    },
 }
 
 const TREE_SAMPLE_COUNT_PER_LOD: usize = 6;
+const ROCK_SAMPLE_COUNT_PER_LOD: usize = 5;
 const OBJECT_EXPORT_COOLDOWN_SECONDS: f32 = 0.55;
 
 fn simple_family(kind: ObjectKind, semantics: Vec<ObjectSemantic>) -> RegisteredObjectFamily {
@@ -823,6 +889,7 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
         "logs/object-gallery-manifest.json",
         "logs/object-gallery.png",
     );
+    params.gallery_state.focus_index = 0;
     params.codex_state.reset();
     let floor_material = params.materials.add(StandardMaterial {
         base_color: Color::srgb(0.095, 0.115, 0.1),
@@ -833,12 +900,12 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
     let object_meshes = ObjectMeshHandles {
         floor: params
             .meshes
-            .add(Mesh::from(Plane3d::new(Vec3::Y, Vec2::new(56.0, 24.0)))),
+            .add(Mesh::from(Plane3d::new(Vec3::Y, Vec2::new(72.0, 28.0)))),
         cylinder: params.meshes.add(Mesh::from(Cylinder::new(1.0, 1.0))),
         sphere: params.meshes.add(Sphere::new(1.0).mesh().uv(20, 14)),
         cuboid: params.meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0))),
     };
-    let slot_materials = tree_slot_materials(&params.asset_materials);
+    let slot_materials = object_slot_materials(&params.asset_materials);
 
     params
         .commands
@@ -854,9 +921,9 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
                 Name::new("ProceduralObjectGalleryFloor"),
                 Mesh3d(object_meshes.floor.clone()),
                 MeshMaterial3d(floor_material),
-                Transform::from_xyz(16.0, -0.04, -15.0),
+                Transform::from_xyz(34.0, -0.04, -15.0),
             ));
-            for request in tree_gallery_requests() {
+            for request in object_gallery_requests() {
                 if params.registry.family(request.kind).is_some() {
                     let asset = generate_object_asset(request, &params.registry);
                     spawn_generated_object(
@@ -872,14 +939,21 @@ fn spawn_procedural_object_gallery(mut params: ObjectGallerySpawnParams) {
 
     tracing::info!(
         target: "dao_game::objects::gallery",
-        samples = TREE_SAMPLE_COUNT_PER_LOD * 3,
-        profile_version = families::tree::PROFILE_VERSION,
-        geometry_version = families::tree::GEOMETRY_VERSION,
-        "procedural object gallery spawned with near/mid/far tree samples"
+        samples = TREE_SAMPLE_COUNT_PER_LOD * 3 + ROCK_SAMPLE_COUNT_PER_LOD * 3,
+        family_count = params.registry.families().count(),
+        "procedural object gallery spawned with near/mid/far multi-family samples"
     );
     params
         .performance
         .record_phase_duration(PerformancePhase::Assets, started_at.elapsed());
+}
+
+fn object_gallery_requests() -> Vec<ObjectGenerationRequest> {
+    let mut requests =
+        Vec::with_capacity(TREE_SAMPLE_COUNT_PER_LOD * 3 + ROCK_SAMPLE_COUNT_PER_LOD * 3);
+    requests.extend(tree_gallery_requests());
+    requests.extend(rock_gallery_requests());
+    requests
 }
 
 fn tree_gallery_requests() -> Vec<ObjectGenerationRequest> {
@@ -929,6 +1003,64 @@ fn tree_gallery_requests() -> Vec<ObjectGenerationRequest> {
             requests.push(request);
         }
     }
+    requests
+}
+
+fn rock_gallery_requests() -> Vec<ObjectGenerationRequest> {
+    let mut requests = Vec::with_capacity(ROCK_SAMPLE_COUNT_PER_LOD * 3);
+    let biomes = [
+        ObjectBiomeContext::Ridge,
+        ObjectBiomeContext::Wetland,
+        ObjectBiomeContext::RuinEdge,
+        ObjectBiomeContext::DesertWind,
+        ObjectBiomeContext::Meadow,
+        ObjectBiomeContext::VillageCourtyard,
+    ];
+    let weather = [
+        ObjectWeatherState::Clear,
+        ObjectWeatherState::RainSoaked,
+        ObjectWeatherState::DryWind,
+        ObjectWeatherState::DreamTint,
+    ];
+    let material_variant = [
+        ObjectMaterialVariant::Default,
+        ObjectMaterialVariant::Wet,
+        ObjectMaterialVariant::Dusty,
+        ObjectMaterialVariant::Mossy,
+    ];
+    let lod_rows = [ObjectLod::Near, ObjectLod::Mid, ObjectLod::Far];
+
+    for (lod_row, lod) in lod_rows.into_iter().enumerate() {
+        for column in 0..ROCK_SAMPLE_COUNT_PER_LOD {
+            let seed = families::rock::GALLERY_BASE_SEED
+                .wrapping_add((lod_row as u64 + 1) * 0x94D0_49BB)
+                .wrapping_add(column as u64 * 0x9E37_79B9);
+            let mut request = ObjectGenerationRequest {
+                kind: ObjectKind::Rock,
+                seed,
+                lod,
+                transform: Transform::from_xyz(
+                    43.0 + column as f32 * 6.8,
+                    0.0,
+                    -6.0 - lod_row as f32 * 8.0,
+                ),
+                biome: biomes[(column + lod_row) % biomes.len()],
+                weather: weather[(column * 2 + lod_row) % weather.len()],
+                material_variant: material_variant[(column + lod_row) % material_variant.len()],
+                collision_mode: match lod {
+                    ObjectLod::Near => ObjectCollisionMode::Full,
+                    ObjectLod::Mid => ObjectCollisionMode::TrunkAndRoots,
+                    ObjectLod::Far => ObjectCollisionMode::VisualOnly,
+                },
+                mode: ObjectGenerationMode::Gallery,
+            };
+            if request.weather == ObjectWeatherState::DreamTint {
+                request.material_variant = ObjectMaterialVariant::Mossy;
+            }
+            requests.push(request);
+        }
+    }
+
     requests
 }
 
@@ -988,7 +1120,7 @@ fn generate_placeholder_asset(
 fn spawn_generated_object(
     parent: &mut ChildSpawnerCommands<'_>,
     meshes: &ObjectMeshHandles,
-    slot_materials: &TreeSlotMaterials,
+    slot_materials: &ObjectSlotMaterials,
     asset: ObjectGeneratedAsset,
     mode: ObjectGenerationMode,
 ) {
@@ -1029,7 +1161,7 @@ fn spawn_generated_object(
                     MeshMaterial3d(material),
                     part.local_transform,
                 ));
-                if let Some(profile) = tree_profile_from_generated(&asset.profile)
+                if let Some(profile) = tree_wind_profile(&asset.profile)
                     && let Some(wind_band) = part.wind_band
                 {
                     entity.insert(wind_part_for_tree(
@@ -1042,12 +1174,13 @@ fn spawn_generated_object(
                 }
             }
             if mode == ObjectGenerationMode::Gallery {
-                spawn_tree_colliders(tree, &asset.collision);
+                spawn_object_colliders(tree, asset.kind, &asset.collision);
             }
         });
 
     tracing::info!(
-        target: "dao_game::objects::tree",
+        target: "dao_game::objects::gallery",
+        kind = asset.kind.export_label(),
         stable_id = asset.stable_id,
         seed = asset.seed,
         lod = asset.lod.export_label(),
@@ -1059,10 +1192,14 @@ fn spawn_generated_object(
     );
 }
 
-fn spawn_tree_colliders(parent: &mut ChildSpawnerCommands<'_>, collision: &ObjectCollisionRecipe) {
+fn spawn_object_colliders(
+    parent: &mut ChildSpawnerCommands<'_>,
+    kind: ObjectKind,
+    collision: &ObjectCollisionRecipe,
+) {
     if let Some(trunk) = &collision.trunk {
         parent.spawn((
-            Name::new("TreeTrunkCollider"),
+            Name::new(format!("{}MainCollider", kind.label())),
             Transform::from_xyz(0.0, trunk.height * 0.5, 0.0),
             RigidBody::Static,
             Collider::capsule(trunk.radius, (trunk.height - trunk.radius * 2.0).max(0.12)),
@@ -1077,7 +1214,7 @@ fn spawn_tree_colliders(parent: &mut ChildSpawnerCommands<'_>, collision: &Objec
     }
     for (index, blocker) in collision.root_blockers.iter().enumerate() {
         parent.spawn((
-            Name::new(format!("TreeRootBlocker{index}")),
+            Name::new(format!("{}Blocker{index}", kind.label())),
             Transform::from_translation(blocker.center)
                 .with_rotation(Quat::from_rotation_y(blocker.yaw)),
             RigidBody::Static,
@@ -1097,7 +1234,7 @@ fn spawn_tree_colliders(parent: &mut ChildSpawnerCommands<'_>, collision: &Objec
     }
     if let Some(sensor) = &collision.sensor {
         parent.spawn((
-            Name::new("TreeObservationSensor"),
+            Name::new(format!("{}ObservationSensor", kind.label())),
             Transform::from_translation(sensor.center),
             RigidBody::Static,
             Collider::cuboid(
@@ -1120,9 +1257,10 @@ fn spawn_tree_colliders(parent: &mut ChildSpawnerCommands<'_>, collision: &Objec
     }
 }
 
-fn tree_profile_from_generated(profile: &GeneratedObjectProfile) -> Option<ProceduralTreeProfile> {
+fn tree_wind_profile(profile: &GeneratedObjectProfile) -> Option<ProceduralTreeProfile> {
     match profile {
         GeneratedObjectProfile::Tree(profile) => Some(*profile),
+        GeneratedObjectProfile::Rock(_) => None,
     }
 }
 
@@ -1135,7 +1273,7 @@ fn mesh_for_recipe(meshes: &ObjectMeshHandles, recipe: ObjectMeshRecipe) -> Hand
 }
 
 fn material_for_slot(
-    materials: &TreeSlotMaterials,
+    materials: &ObjectSlotMaterials,
     slot: ObjectMaterialSlot,
 ) -> Handle<StandardMaterial> {
     match slot {
@@ -1145,17 +1283,27 @@ fn material_for_slot(
         ObjectMaterialSlot::LeafSecondary => materials.leaf_secondary.clone(),
         ObjectMaterialSlot::LeafDry => materials.leaf_dry.clone(),
         ObjectMaterialSlot::RootShadow => materials.root_shadow.clone(),
+        ObjectMaterialSlot::RockPrimary => materials.rock_primary.clone(),
+        ObjectMaterialSlot::RockStrata => materials.rock_strata.clone(),
+        ObjectMaterialSlot::RockWet => materials.rock_wet.clone(),
+        ObjectMaterialSlot::RockMoss => materials.rock_moss.clone(),
+        ObjectMaterialSlot::RockShadow => materials.rock_shadow.clone(),
     }
 }
 
-fn tree_slot_materials(materials: &ProceduralAssetMaterials) -> TreeSlotMaterials {
-    TreeSlotMaterials {
+fn object_slot_materials(materials: &ProceduralAssetMaterials) -> ObjectSlotMaterials {
+    ObjectSlotMaterials {
         bark_primary: materials.handle_for_family(ProceduralMaterialFamily::Wood),
         bark_worn_edge: materials.handle_for_family(ProceduralMaterialFamily::OldStone),
         leaf_primary: materials.handle_for_family(ProceduralMaterialFamily::GroveLeaf),
         leaf_secondary: materials.handle_for_family(ProceduralMaterialFamily::GroveLeaf),
         leaf_dry: materials.handle_for_family(ProceduralMaterialFamily::Sand),
         root_shadow: materials.handle_for_family(ProceduralMaterialFamily::Shadow),
+        rock_primary: materials.handle_for_family(ProceduralMaterialFamily::Stone),
+        rock_strata: materials.handle_for_family(ProceduralMaterialFamily::OldStone),
+        rock_wet: materials.handle_for_family(ProceduralMaterialFamily::Water),
+        rock_moss: materials.handle_for_family(ProceduralMaterialFamily::GroveLeaf),
+        rock_shadow: materials.handle_for_family(ProceduralMaterialFamily::Shadow),
     }
 }
 
@@ -1267,6 +1415,12 @@ fn handle_object_gallery_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<ObjectGalleryState>,
 ) {
+    if keys.just_pressed(KeyCode::Minus) {
+        state.focus_index = state.focus_index.saturating_sub(1);
+    } else if keys.just_pressed(KeyCode::Equal) {
+        state.focus_index = state.focus_index.saturating_add(1);
+    }
+
     if !keys.just_pressed(KeyCode::KeyO) {
         return;
     }
@@ -1450,7 +1604,7 @@ fn export_object_gallery_manifest(
 
 fn refresh_object_gallery_codex(
     registry: Res<ProceduralObjectRegistry>,
-    gallery_state: Res<ObjectGalleryState>,
+    mut gallery_state: ResMut<ObjectGalleryState>,
     material_gallery_state: Option<Res<MaterialGalleryState>>,
     objects: Query<&ProceduralObjectInstance>,
     mut codex_state: ResMut<AssetCodexState>,
@@ -1462,7 +1616,9 @@ fn refresh_object_gallery_codex(
     }
 
     instances.sort_by_key(|instance| (instance.kind as u8, instance.stable_id));
-    let sample = instances[0];
+    let max_index = instances.len().saturating_sub(1);
+    gallery_state.focus_index = gallery_state.focus_index.min(max_index);
+    let sample = instances[gallery_state.focus_index];
     let family_definitions: Vec<_> = registry.families().collect();
     let current_family_samples: Vec<_> = instances
         .iter()
@@ -1511,12 +1667,14 @@ fn refresh_object_gallery_codex(
 
     let summary_lines = vec![
         format!(
-            "家族：{}  样本：{}  近/中/远：{}/{}/{}",
+            "家族：{}  样本：{}  近/中/远：{}/{}/{}  焦点：{}/{}",
             sample.kind.label(),
             instances.len(),
             near_count,
             mid_count,
-            far_count
+            far_count,
+            gallery_state.focus_index + 1,
+            instances.len()
         ),
         format!(
             "焦点 Seed：{}  StableId：{}  审核：{}",
@@ -1563,6 +1721,17 @@ fn refresh_object_gallery_codex(
             profile.root_exposure * 100.0,
             profile.wind_flex * 100.0
         )),
+        GeneratedObjectProfile::Rock(profile) => inspector_lines.push(format!(
+            "岩石参数：半径 {:.2}m  高度 {:.2}m  层理 {:.0}%  裂纹 {:.0}%  侵蚀 {:.0}%  湿线 {:.0}%  苔藓 {:.0}%  碎块 {}",
+            profile.base_radius,
+            profile.height,
+            profile.strata_strength * 100.0,
+            profile.crack_density * 100.0,
+            profile.erosion * 100.0,
+            profile.wet_line * 100.0,
+            profile.moss_ratio * 100.0,
+            profile.shard_count
+        )),
     }
 
     let approval_lines = vec![approval_distribution_line(&instances)];
@@ -1580,7 +1749,8 @@ fn refresh_object_gallery_codex(
             "截图：{}",
             gallery_state.export_queue.screenshot_path.display()
         ),
-        "操作：O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单".to_string(),
+        "操作：- / = 切换焦点样本  O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单"
+            .to_string(),
     ];
     let overview_lines = summary_lines.clone();
 
@@ -1624,7 +1794,7 @@ fn refresh_object_gallery_codex(
         },
     ];
     codex_state.controls_hint =
-        "O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单".to_string();
+        "- / = 切换焦点样本  O 导出对象清单  Shift+O 导出对象清单+截图  E 导出材质清单".to_string();
     codex_state.export_manifest_path = gallery_state.export_queue.export_path.display().to_string();
     codex_state.screenshot_path = gallery_state
         .export_queue
@@ -1772,6 +1942,18 @@ fn export_profile(profile: &GeneratedObjectProfile) -> ObjectGalleryExportProfil
             moss_ratio: profile.moss_ratio,
             wind_flex: profile.wind_flex,
         },
+        GeneratedObjectProfile::Rock(profile) => ObjectGalleryExportProfile::Rock {
+            base_radius: profile.base_radius,
+            height: profile.height,
+            elongation: profile.elongation,
+            flatten: profile.flatten,
+            strata_strength: profile.strata_strength,
+            crack_density: profile.crack_density,
+            erosion: profile.erosion,
+            wet_line: profile.wet_line,
+            moss_ratio: profile.moss_ratio,
+            shard_count: profile.shard_count,
+        },
     }
 }
 
@@ -1828,9 +2010,21 @@ fn approval_for_object(asset: &ObjectGeneratedAsset) -> ObjectApprovalState {
     if asset.stats.vertex_estimate > 11_500 && asset.lod == ObjectLod::Near {
         return ObjectApprovalState::PerformanceRisk;
     }
-    let GeneratedObjectProfile::Tree(profile) = asset.profile;
-    if profile.health < 0.22 || profile.dead_branch_ratio > 0.74 {
-        return ObjectApprovalState::NeedsRevision;
+    match asset.profile {
+        GeneratedObjectProfile::Tree(profile) => {
+            if profile.health < 0.22 || profile.dead_branch_ratio > 0.74 {
+                return ObjectApprovalState::NeedsRevision;
+            }
+        }
+        GeneratedObjectProfile::Rock(profile) => {
+            if profile.flatten < 0.28
+                || profile.crack_density > 0.9
+                || (matches!(asset.request.material_variant, ObjectMaterialVariant::Wet)
+                    && profile.wet_line < 0.18)
+            {
+                return ObjectApprovalState::NeedsRevision;
+            }
+        }
     }
     ObjectApprovalState::Satisfied
 }
@@ -2041,6 +2235,43 @@ mod tests {
             super::families::tree::GEOMETRY_VERSION
         );
         assert!(family.golden_seeds.len() >= 3);
+    }
+
+    #[test]
+    fn rock_family_declares_golden_seeds_and_versions() {
+        let family = super::families::rock::definition();
+        assert_eq!(
+            family.profile_version,
+            super::families::rock::PROFILE_VERSION
+        );
+        assert_eq!(
+            family.geometry_version,
+            super::families::rock::GEOMETRY_VERSION
+        );
+        assert_eq!(family.kind, ObjectKind::Rock);
+        assert!(family.golden_seeds.len() >= 3);
+    }
+
+    #[test]
+    fn rock_generation_contains_collision_and_material_slots() {
+        let family = super::families::rock::definition();
+        let request = ObjectGenerationRequest {
+            kind: ObjectKind::Rock,
+            seed: super::families::rock::GALLERY_BASE_SEED,
+            lod: ObjectLod::Near,
+            transform: Transform::default(),
+            biome: ObjectBiomeContext::Ridge,
+            weather: ObjectWeatherState::RainSoaked,
+            material_variant: super::ObjectMaterialVariant::Wet,
+            collision_mode: ObjectCollisionMode::Full,
+            mode: super::ObjectGenerationMode::Gallery,
+        };
+
+        let generated = super::families::rock::generate_asset(request, &family);
+        assert!(matches!(generated.profile, GeneratedObjectProfile::Rock(_)));
+        assert!(generated.stats.part_count >= 4);
+        assert!(generated.collision.trunk.is_some());
+        assert!(!generated.material_slots.is_empty());
     }
 
     #[test]
