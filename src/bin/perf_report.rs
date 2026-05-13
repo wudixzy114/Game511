@@ -39,6 +39,8 @@ const DETAIL_PHASES: [&str; 26] = [
     "world_streaming",
     "world_visibility",
 ];
+const MAIN_SCHEDULE_FIELD: &str = "main_schedule_ms";
+const RENDER_SCHEDULE_FIELD: &str = "render_schedule_ms";
 const HTML_CHART_POINTS: usize = 360;
 
 fn main() -> Result<(), String> {
@@ -262,6 +264,8 @@ struct FrameSample {
     average_ms: Option<f32>,
     budget_delta_ms: Option<f32>,
     profiled_phase_ms: f32,
+    main_schedule_ms: Option<f32>,
+    render_schedule_ms: Option<f32>,
     phases: HashMap<String, f32>,
 }
 
@@ -289,6 +293,8 @@ struct FrameDetailSummary {
     start_frame: u64,
     end_frame: u64,
     average_profiled_phase_ms: f32,
+    average_main_schedule_ms: Option<f32>,
+    average_render_schedule_ms: Option<f32>,
     latest_moving_average_ms: Option<f32>,
     max_budget_delta_ms: Option<f32>,
 }
@@ -324,6 +330,8 @@ fn load_report(path: &Path) -> Result<PerfReport, String> {
     let mut report = PerfReport::default();
 
     let mut active_session_id: Option<String> = None;
+    let mut frame_indices: HashMap<u64, usize> = HashMap::new();
+    let mut pending_render_schedule_ms: HashMap<u64, f32> = HashMap::new();
 
     for line in reader.lines() {
         let line = line.map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -351,6 +359,8 @@ fn load_report(path: &Path) -> Result<PerfReport, String> {
             report.ignored_lines = ignored_lines;
             report.budget_ms = parse_f32_field(fields, "budget_ms");
             report.target_fps = parse_f32_field(fields, "target_fps");
+            frame_indices.clear();
+            pending_render_schedule_ms.clear();
             continue;
         }
         if active_session_id.is_some() && line_session_id != active_session_id {
@@ -359,13 +369,16 @@ fn load_report(path: &Path) -> Result<PerfReport, String> {
         match parsed.target.as_str() {
             "dao_game::performance::frame_detail" => {
                 if let Some(frame_ms) = parse_f32_field(fields, "frame_ms") {
+                    let frame = parse_u64_field(fields, "frame").unwrap_or(0);
                     let mut sample = FrameSample {
-                        frame: parse_u64_field(fields, "frame").unwrap_or(0),
+                        frame,
                         frame_ms,
                         average_ms: parse_f32_field(fields, "average_ms"),
                         budget_delta_ms: parse_f32_field(fields, "budget_delta_ms"),
                         profiled_phase_ms: parse_f32_field(fields, "profiled_phase_ms")
                             .unwrap_or(0.0),
+                        main_schedule_ms: parse_f32_field(fields, MAIN_SCHEDULE_FIELD),
+                        render_schedule_ms: pending_render_schedule_ms.remove(&frame),
                         phases: HashMap::new(),
                     };
                     report.budget_ms = parse_f32_field(fields, "budget_ms").or(report.budget_ms);
@@ -375,7 +388,24 @@ fn load_report(path: &Path) -> Result<PerfReport, String> {
                             sample.phases.insert(phase.to_string(), phase_ms);
                         }
                     }
+                    frame_indices.insert(frame, report.frame_samples.len());
                     report.frame_samples.push(sample);
+                }
+            }
+            "dao_game::performance::render_detail" => {
+                let Some(frame) = parse_u64_field(fields, "frame") else {
+                    continue;
+                };
+                let Some(render_schedule_ms) = parse_f32_field(fields, RENDER_SCHEDULE_FIELD)
+                else {
+                    continue;
+                };
+                if let Some(index) = frame_indices.get(&frame).copied() {
+                    if let Some(sample) = report.frame_samples.get_mut(index) {
+                        sample.render_schedule_ms = Some(render_schedule_ms);
+                    }
+                } else {
+                    pending_render_schedule_ms.insert(frame, render_schedule_ms);
                 }
             }
             "dao_game::performance::frame" => {
@@ -604,6 +634,15 @@ fn print_single_text_report(path: &str, report: &PerfReport) {
                 "average_profiled_phase_ms: {:.2}",
                 detail.average_profiled_phase_ms
             );
+            if let Some(average_main_schedule_ms) = detail.average_main_schedule_ms {
+                println!("average_main_schedule_ms: {:.2}", average_main_schedule_ms);
+            }
+            if let Some(average_render_schedule_ms) = detail.average_render_schedule_ms {
+                println!(
+                    "average_render_schedule_ms: {:.2}",
+                    average_render_schedule_ms
+                );
+            }
             if let Some(latest_moving_average_ms) = detail.latest_moving_average_ms {
                 println!("latest_moving_average_ms: {:.2}", latest_moving_average_ms);
             }
@@ -718,6 +757,35 @@ fn print_comparison_text_report(
             percent_delta(left.stddev, right.stddev)
         );
     }
+    if let (Some(left), Some(right)) = (
+        frame_detail_summary(baseline),
+        frame_detail_summary(candidate),
+    ) {
+        if let (Some(left_main), Some(right_main)) = (
+            left.average_main_schedule_ms,
+            right.average_main_schedule_ms,
+        ) {
+            println!(
+                "main_schedule_ms: {:.2} -> {:.2} ({:+.2}, {:+.1}%)",
+                left_main,
+                right_main,
+                right_main - left_main,
+                percent_delta(left_main, right_main)
+            );
+        }
+        if let (Some(left_render), Some(right_render)) = (
+            left.average_render_schedule_ms,
+            right.average_render_schedule_ms,
+        ) {
+            println!(
+                "render_schedule_ms: {:.2} -> {:.2} ({:+.2}, {:+.1}%)",
+                left_render,
+                right_render,
+                right_render - left_render,
+                percent_delta(left_render, right_render)
+            );
+        }
+    }
 
     println!("candidate_bottlenecks:");
     for finding in bottleneck_findings(candidate) {
@@ -806,6 +874,18 @@ fn frame_detail_summary(report: &PerfReport) -> Option<FrameDetailSummary> {
         .map(|sample| sample.profiled_phase_ms)
         .sum::<f32>()
         / report.frame_samples.len() as f32;
+    let average_main_schedule_ms = average_optional_metric(
+        report
+            .frame_samples
+            .iter()
+            .map(|sample| sample.main_schedule_ms),
+    );
+    let average_render_schedule_ms = average_optional_metric(
+        report
+            .frame_samples
+            .iter()
+            .map(|sample| sample.render_schedule_ms),
+    );
     let latest_moving_average_ms = report
         .frame_samples
         .iter()
@@ -820,9 +900,39 @@ fn frame_detail_summary(report: &PerfReport) -> Option<FrameDetailSummary> {
         start_frame: first.frame,
         end_frame: last.frame,
         average_profiled_phase_ms,
+        average_main_schedule_ms,
+        average_render_schedule_ms,
         latest_moving_average_ms,
         max_budget_delta_ms,
     })
+}
+
+fn average_optional_metric(values: impl Iterator<Item = Option<f32>>) -> Option<f32> {
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for value in values.flatten() {
+        total += value;
+        count += 1;
+    }
+    (count > 0).then_some(total / count as f32)
+}
+
+fn stage_coverage_ms(detail: FrameDetailSummary) -> f32 {
+    match (
+        detail.average_main_schedule_ms,
+        detail.average_render_schedule_ms,
+    ) {
+        // Main and render can overlap under pipelined rendering, so use the larger stage as the
+        // conservative high-level coverage signal instead of summing both.
+        (Some(main_schedule_ms), Some(render_schedule_ms)) => {
+            main_schedule_ms.max(render_schedule_ms)
+        }
+        (Some(main_schedule_ms), None) => main_schedule_ms,
+        (None, Some(render_schedule_ms)) => {
+            detail.average_profiled_phase_ms.max(render_schedule_ms)
+        }
+        (None, None) => detail.average_profiled_phase_ms,
+    }
 }
 
 fn bottleneck_findings(report: &PerfReport) -> Vec<BottleneckFinding> {
@@ -920,8 +1030,39 @@ fn bottleneck_findings(report: &PerfReport) -> Vec<BottleneckFinding> {
     }
 
     if let (Some(detail), Some(stats)) = (frame_detail_summary(report), frame_stats) {
+        if let (Some(main_schedule_ms), Some(render_schedule_ms)) = (
+            detail.average_main_schedule_ms,
+            detail.average_render_schedule_ms,
+        ) {
+            let (stage_name, stage_ms, peer_name, peer_ms) =
+                if render_schedule_ms > main_schedule_ms {
+                    (
+                        "render_schedule",
+                        render_schedule_ms,
+                        "main_schedule",
+                        main_schedule_ms,
+                    )
+                } else {
+                    (
+                        "main_schedule",
+                        main_schedule_ms,
+                        "render_schedule",
+                        render_schedule_ms,
+                    )
+                };
+            findings.push(BottleneckFinding {
+                level: "critical",
+                title: format!("high-level stage hotspot: {stage_name}"),
+                detail: format!(
+                    "avg {:.2} ms vs {} {:.2} ms; treat these as directional stage signals because pipeline overlap may exist",
+                    stage_ms,
+                    peer_name,
+                    peer_ms
+                ),
+            });
+        }
         let coverage = if stats.average > f32::EPSILON {
-            detail.average_profiled_phase_ms / stats.average
+            stage_coverage_ms(detail).min(stats.average) / stats.average
         } else {
             0.0
         };
@@ -930,7 +1071,7 @@ fn bottleneck_findings(report: &PerfReport) -> Vec<BottleneckFinding> {
                 level: "warn",
                 title: "low instrumentation coverage".to_string(),
                 detail: format!(
-                    "profiled phases explain {:.1}% of average frame time; add phase markers around render prep, asset work, or startup systems",
+                    "traced frame work explains {:.1}% of average frame time; add phase markers around render prep, asset work, or startup systems",
                     coverage * 100.0
                 ),
             });
@@ -1163,6 +1304,31 @@ fn comparison_report_json(
             (right.p99 - left.p99) as f64,
         );
     }
+    if let (Some(left), Some(right)) = (
+        frame_detail_summary(baseline),
+        frame_detail_summary(candidate),
+    ) {
+        if let (Some(left_main), Some(right_main)) = (
+            left.average_main_schedule_ms,
+            right.average_main_schedule_ms,
+        ) {
+            insert_number(
+                &mut root,
+                "main_schedule_ms_delta",
+                (right_main - left_main) as f64,
+            );
+        }
+        if let (Some(left_render), Some(right_render)) = (
+            left.average_render_schedule_ms,
+            right.average_render_schedule_ms,
+        ) {
+            insert_number(
+                &mut root,
+                "render_schedule_ms_delta",
+                (right_render - left_render) as f64,
+            );
+        }
+    }
     root.insert(
         "phase_deltas".to_string(),
         Value::Array(
@@ -1206,6 +1372,12 @@ fn frame_detail_summary_json(detail: FrameDetailSummary) -> Value {
         "average_profiled_phase_ms",
         detail.average_profiled_phase_ms as f64,
     );
+    if let Some(value) = detail.average_main_schedule_ms {
+        insert_number(&mut object, "average_main_schedule_ms", value as f64);
+    }
+    if let Some(value) = detail.average_render_schedule_ms {
+        insert_number(&mut object, "average_render_schedule_ms", value as f64);
+    }
     if let Some(value) = detail.latest_moving_average_ms {
         insert_number(&mut object, "latest_moving_average_ms", value as f64);
     }
@@ -1805,7 +1977,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{Command, bottleneck_findings, load_report, metric_stats, render_html_report};
+    use super::{
+        Command, bottleneck_findings, frame_detail_summary, load_report, metric_stats,
+        render_html_report,
+    };
 
     #[test]
     fn load_report_uses_latest_session_and_accepts_string_or_numeric_session_ids() {
@@ -1865,6 +2040,32 @@ mod tests {
         let assets = report.phase_totals.get("assets").unwrap();
         assert_eq!(assets.total_ms, 0.75);
         assert_eq!(assets.max_ms, 0.5);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_report_merges_render_schedule_samples_by_frame() {
+        let path = unique_temp_path("perf-report-render-detail");
+        fs::write(
+            &path,
+            concat!(
+                "{\"target\":\"dao_game::performance::session_start\",\"fields\":{\"session_id\":\"77\",\"budget_ms\":16.6}}\n",
+                "{\"target\":\"dao_game::performance::frame_detail\",\"fields\":{\"session_id\":\"77\",\"frame\":1,\"frame_ms\":10.0,\"average_ms\":10.0,\"budget_ms\":16.6,\"main_schedule_ms\":3.0,\"profiled_phase_ms\":2.0,\"ui_ms\":1.0,\"world_streaming_ms\":1.0}}\n",
+                "{\"target\":\"dao_game::performance::render_detail\",\"fields\":{\"session_id\":\"77\",\"frame\":1,\"render_schedule_ms\":6.0}}\n",
+                "{\"target\":\"dao_game::performance::session\",\"fields\":{\"session_id\":\"77\",\"frames\":1,\"over_budget_frames\":0,\"worst_frame_ms\":10.0,\"average_frame_ms\":10.0,\"average_over_budget_frame_ms\":0.0,\"hot_phase_1_name\":\"world_streaming\",\"hot_phase_1_avg_ms\":1.0,\"hot_phase_1_max_ms\":1.0}}\n"
+            ),
+        )
+        .unwrap();
+
+        let report = load_report(&path).unwrap();
+        let detail = frame_detail_summary(&report).unwrap();
+
+        assert_eq!(report.frame_samples.len(), 1);
+        assert_eq!(report.frame_samples[0].render_schedule_ms, Some(6.0));
+        assert_eq!(report.frame_samples[0].main_schedule_ms, Some(3.0));
+        assert_eq!(detail.average_main_schedule_ms, Some(3.0));
+        assert_eq!(detail.average_render_schedule_ms, Some(6.0));
 
         let _ = fs::remove_file(path);
     }

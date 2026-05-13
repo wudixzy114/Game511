@@ -4,6 +4,7 @@ use std::{
 };
 
 use bevy::prelude::*;
+use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
 
 use super::config::AppConfig;
 
@@ -26,6 +27,32 @@ impl Default for PerformanceSessionId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Resource, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LatestPerformanceFrame(pub u64);
+
+#[derive(Debug, Resource, Default)]
+pub struct MainScheduleTiming {
+    started_at: Option<Instant>,
+    latest_ms: f32,
+}
+
+impl MainScheduleTiming {
+    pub fn latest_ms(&self) -> f32 {
+        self.latest_ms
+    }
+}
+
+#[derive(Debug, Resource, Default, Clone, Copy, PartialEq, Eq)]
+struct RenderPerformanceFrame {
+    session_id: u128,
+    frame: u64,
+}
+
+#[derive(Debug, Resource, Default)]
+struct RenderScheduleTiming {
+    started_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -278,15 +305,30 @@ pub fn announce_performance_session_start(
     );
 }
 
+pub fn begin_main_schedule_timing(mut timing: ResMut<MainScheduleTiming>) {
+    timing.started_at = Some(Instant::now());
+}
+
+pub fn end_main_schedule_timing(mut timing: ResMut<MainScheduleTiming>) {
+    let Some(started_at) = timing.started_at.take() else {
+        return;
+    };
+    timing.latest_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn track_frame_timing(
     time: Res<Time>,
     config: Res<AppConfig>,
     session_id: Res<PerformanceSessionId>,
+    main_schedule: Res<MainScheduleTiming>,
+    mut latest_frame: ResMut<LatestPerformanceFrame>,
     mut performance: ResMut<FramePerformance>,
     mut report: ResMut<PerformanceSessionReport>,
     mut alerts: MessageWriter<PerformanceAlert>,
 ) {
     let snapshot = performance.update(time.delta());
+    latest_frame.0 = snapshot.frame_count;
     report.total_frames += 1;
     report.worst_frame_ms = report.worst_frame_ms.max(snapshot.frame_ms);
     report.total_frame_ms += snapshot.frame_ms;
@@ -348,6 +390,7 @@ pub fn track_frame_timing(
             average_ms = snapshot.moving_average_ms,
             budget_ms = config.quality.frame_time_budget_ms,
             budget_delta_ms = snapshot.frame_ms - config.quality.frame_time_budget_ms,
+            main_schedule_ms = main_schedule.latest_ms(),
             profiled_phase_ms = profiled_phase_ms,
             assets_ms = assets_ms,
             director_ms = director_ms,
@@ -423,6 +466,56 @@ pub fn track_frame_timing(
             budget_ms: config.quality.frame_time_budget_ms,
         });
     }
+}
+
+fn extract_render_performance_frame(
+    mut commands: Commands,
+    session_id: Extract<Res<PerformanceSessionId>>,
+    frame: Extract<Res<LatestPerformanceFrame>>,
+) {
+    commands.insert_resource(RenderPerformanceFrame {
+        session_id: session_id.0,
+        frame: frame.0,
+    });
+}
+
+fn begin_render_schedule_timing(mut timing: ResMut<RenderScheduleTiming>) {
+    timing.started_at = Some(Instant::now());
+}
+
+fn end_render_schedule_timing(
+    frame: Option<Res<RenderPerformanceFrame>>,
+    mut timing: ResMut<RenderScheduleTiming>,
+) {
+    let Some(frame) = frame else {
+        return;
+    };
+    let Some(started_at) = timing.started_at.take() else {
+        return;
+    };
+    tracing::trace!(
+        target: "dao_game::performance::render_detail",
+        session_id = frame.session_id,
+        frame = frame.frame,
+        render_schedule_ms = started_at.elapsed().as_secs_f32() * 1000.0,
+        "render schedule sample"
+    );
+}
+
+pub fn install_render_schedule_timing(app: &mut App) {
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    render_app
+        .init_resource::<RenderScheduleTiming>()
+        .add_systems(ExtractSchedule, extract_render_performance_frame)
+        .add_systems(
+            Render,
+            (
+                begin_render_schedule_timing.in_set(RenderSystems::ExtractCommands),
+                end_render_schedule_timing.in_set(RenderSystems::PostCleanup),
+            ),
+        );
 }
 
 fn should_log_frame(frame_count: u64, interval: u32) -> bool {
