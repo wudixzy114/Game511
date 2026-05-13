@@ -453,6 +453,28 @@ pub fn deterministic_director(input: &DirectorInput) -> DirectorOutput {
             text: "商人可以谈起风沙另一侧的旅人传闻。".to_string(),
         });
     }
+    if input.story_stage == StoryArcStage::FarBankOutpost.label() {
+        suggestions.push(DirectorSuggestion {
+            kind: DirectorSuggestionKind::Dialogue,
+            semantic_tags: vec![
+                "town".to_string(),
+                "trade".to_string(),
+                "preparation".to_string(),
+            ],
+            strength: 0.62,
+            duration_seconds: 8.0,
+            precondition: DirectorPrecondition::RegionKnown,
+            text: "对岸摊棚可以留下关于城镇买卖和旅费的闲谈。".to_string(),
+        });
+        suggestions.push(DirectorSuggestion {
+            kind: DirectorSuggestionKind::EnvironmentResponse,
+            semantic_tags: vec!["loss".to_string(), "trust".to_string()],
+            strength: 0.48,
+            duration_seconds: 5.0,
+            precondition: DirectorPrecondition::RegionKnown,
+            text: "路边空箱和凌乱脚印可以提前埋下失去的影子。".to_string(),
+        });
+    }
     if input.pyramid_visible {
         suggestions.push(DirectorSuggestion {
             kind: DirectorSuggestionKind::Place,
@@ -664,5 +686,33 @@ mod tests {
             crate::game::director::omen_from_director_tags(&["pyramid".to_string()]),
             Some(OmenKind::DawnLight)
         );
+    }
+
+    #[test]
+    fn deterministic_director_reserves_far_bank_town_and_loss_hooks() {
+        let input = DirectorInput {
+            player_position: [0.0, 0.0, 0.0],
+            current_region: Some("山地边界".to_string()),
+            story_stage: crate::game::journey::StoryArcStage::FarBankOutpost
+                .label()
+                .to_string(),
+            dream_phase: DreamPhase::Afterglow.label().to_string(),
+            dominant_intent: None,
+            known_places: Vec::new(),
+            notebook_summary: Vec::new(),
+            pyramid_visible: false,
+            ecology_signal: None,
+        };
+
+        let output = deterministic_director(&input);
+
+        assert!(output.suggestions.iter().any(|suggestion| {
+            suggestion.semantic_tags.iter().any(|tag| tag == "trade")
+                && !suggestion.text.contains("任务")
+        }));
+        assert!(output.suggestions.iter().any(|suggestion| {
+            suggestion.semantic_tags.iter().any(|tag| tag == "loss")
+                && !suggestion.text.contains("任务")
+        }));
     }
 }

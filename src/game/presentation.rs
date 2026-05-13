@@ -116,7 +116,10 @@ impl PresentationScene {
 enum PresentationVisualSample {
     Functional,
     VillageDawn,
+    PostDreamDeparture,
     DreamAfterSeaWind,
+    BoundaryCrossing,
+    FarBankArrival,
     MistBoundary,
     SandstormPyramid,
     OasisRuins,
@@ -137,7 +140,10 @@ impl PresentationVisualSample {
         match self {
             Self::Functional => "functional-showcase",
             Self::VillageDawn => "village-dawn",
+            Self::PostDreamDeparture => "post-dream-departure",
             Self::DreamAfterSeaWind => "dream-after-sea-wind",
+            Self::BoundaryCrossing => "boundary-crossing",
+            Self::FarBankArrival => "far-bank-arrival",
             Self::MistBoundary => "mist-boundary",
             Self::SandstormPyramid => "sandstorm-pyramid",
             Self::OasisRuins => "oasis-ruins",
@@ -183,7 +189,10 @@ enum PresentationJourneyStep {
     VillageLife,
     Dream,
     DreamEcho,
+    PostDreamDeparture,
     Boundary,
+    BoundaryCrossing,
+    FarBankArrival,
     DesertPyramid,
     Ecology,
     ThirdPerson,
@@ -875,6 +884,29 @@ fn build_village_scenes(village: &VillageState, world_map: &WorldMap) -> Vec<Pre
         .with_wander_start(shore + Vec3::new(-4.0, 0.0, -6.0), world_map)
         .with_camera_drift(Vec3::new(2.4, 0.05, -2.2)),
         village_scene(
+            "Post Dream Departure",
+            "after the pyramid dream, the village road, wind and distant birds make leaving understandable without an objective line",
+            outer + Vec3::new(-2.0, 0.0, 4.0),
+            outer + Vec3::new(0.0, 1.0, -12.0),
+            world_map,
+            Vec3::new(-8.5, 4.8, 10.0),
+            0.03,
+            WeatherKind::Mist,
+            PresentationJourneyStep::PostDreamDeparture,
+        )
+        .with_visual_sample(
+            PresentationVisualSample::PostDreamDeparture,
+            CameraMode::FirstPerson,
+            CompositionGuide {
+                foreground: "village edge path and low grass",
+                midground: "outer road, moving birds and light wind response",
+                background: "fogged river direction beyond the familiar homes",
+                quality_gate: "departure feels motivated by world behavior, not by explicit task UI",
+            },
+        )
+        .with_wander_start(village.spawn_point + Vec3::new(0.0, 0.0, -18.0), world_map)
+        .with_camera_drift(Vec3::new(1.8, 0.0, -2.0)),
+        village_scene(
             "Night Sea Baseline",
             "quiet sea at night with stars and water carrying memory rather than instructions",
             sea_watch,
@@ -918,7 +950,7 @@ fn build_region_scenes(regions: &RegionGraphState, world_map: &WorldMap) -> Vec<
         .iter()
         .take(2)
         .enumerate()
-        .map(|(index, gate)| {
+        .flat_map(|(index, gate)| {
             let scene = build_journey_scene(
                 if index == 0 {
                     "Mist Boundary Baseline"
@@ -942,20 +974,84 @@ fn build_region_scenes(regions: &RegionGraphState, world_map: &WorldMap) -> Vec<
             .with_camera_drift(Vec3::new(2.0, 0.1, -2.4));
 
             if index == 0 {
-                scene
+                let mut scenes = vec![
+                    scene
+                        .with_visual_sample(
+                            PresentationVisualSample::MistBoundary,
+                            CameraMode::FirstPerson,
+                            CompositionGuide {
+                                foreground: "river edge, old crossing ground and low mist",
+                                midground: "gate stones or ford silhouette inside fog",
+                                background: "mountain or far-bank shadow",
+                                quality_gate: "boundary is readable as landscape, not a glowing UI doorway",
+                            },
+                        )
+                        .with_wander_start(
+                            gate.position + Vec3::new(-8.0, 0.0, gate.radius * 0.82),
+                            world_map,
+                        ),
+                    build_journey_scene(
+                        "Boundary Crossing",
+                        "the player stands on old stones inside the mist river crossing rather than touching a portal",
+                        gate.position + Vec3::new(-2.0, 0.0, gate.radius * 0.12),
+                        gate.position + Vec3::new(3.5, 1.2, -gate.radius * 0.18),
+                        world_map,
+                        Vec3::new(-6.5, 3.6, 7.0),
+                        0.09,
+                        WeatherKind::Mist,
+                        Some(OmenKind::SummitCall),
+                        PresentationJourneyStep::BoundaryCrossing,
+                    )
                     .with_visual_sample(
-                        PresentationVisualSample::MistBoundary,
+                        PresentationVisualSample::BoundaryCrossing,
                         CameraMode::FirstPerson,
                         CompositionGuide {
-                            foreground: "river edge, old crossing ground and low mist",
-                            midground: "gate stones or ford silhouette inside fog",
-                            background: "mountain or far-bank shadow",
-                            quality_gate: "boundary is readable as landscape, not a glowing UI doorway",
+                            foreground: "wet ford stones and low water ribbon",
+                            midground: "mist opening around the crossing line",
+                            background: "far-bank landform beginning to replace the village horizon",
+                            quality_gate: "crossing reads as physical movement through terrain, not a teleport effect",
                         },
                     )
-                    .with_wander_start(gate.position + Vec3::new(-8.0, 0.0, gate.radius * 0.82), world_map)
+                    .with_wander_start(
+                        gate.position + Vec3::new(-5.0, 0.0, gate.radius * 0.22),
+                        world_map,
+                    )
+                    .with_camera_drift(Vec3::new(1.0, 0.0, -1.4)),
+                ];
+                if let Some(outpost) = regions.outpost.as_ref() {
+                    scenes.push(
+                        build_journey_scene(
+                            "Far Bank Arrival",
+                            "first far-bank outpost frames the next town-preparation stage without jumping straight to a city",
+                            outpost.center + Vec3::new(-6.0, 0.0, 8.0),
+                            outpost.center + Vec3::new(1.5, 1.2, 1.0),
+                            world_map,
+                            Vec3::new(-9.0, 4.8, 9.5),
+                            0.2,
+                            WeatherKind::Clear,
+                            Some(OmenKind::DawnLight),
+                            PresentationJourneyStep::FarBankArrival,
+                        )
+                        .with_visual_sample(
+                            PresentationVisualSample::FarBankArrival,
+                            CameraMode::ThirdPerson,
+                            CompositionGuide {
+                                foreground: "traveler and trampled far-bank path",
+                                midground: "temporary houses, stall and marker",
+                                background: "ridge road toward the eventual town stage",
+                                quality_gate: "outpost is a believable transition place, with room for trade and loss hooks",
+                            },
+                        )
+                        .with_wander_start(
+                            outpost.center + Vec3::new(-10.0, 0.0, 8.0),
+                            world_map,
+                        )
+                        .with_camera_drift(Vec3::new(2.0, 0.1, -2.0)),
+                    );
+                }
+                scenes
             } else {
-                scene
+                vec![scene]
             }
         })
         .collect()
@@ -1265,7 +1361,10 @@ fn drive_journey_showcase(
             | PresentationJourneyStep::VillageLife
             | PresentationJourneyStep::Dream
             | PresentationJourneyStep::DreamEcho
+            | PresentationJourneyStep::PostDreamDeparture
             | PresentationJourneyStep::Boundary
+            | PresentationJourneyStep::BoundaryCrossing
+            | PresentationJourneyStep::FarBankArrival
             | PresentationJourneyStep::DesertPyramid
             | PresentationJourneyStep::Ecology
             | PresentationJourneyStep::ThirdPerson
@@ -1298,7 +1397,17 @@ fn drive_journey_showcase(
                 signs.current_omen = Some(OmenKind::DawnLight);
                 signs.omen_intensity = signs.omen_intensity.max(0.78);
             }
+            PresentationJourneyStep::PostDreamDeparture => {
+                journey.story_stage = StoryArcStage::DreamAfterglow;
+                journey.dream.phase = DreamPhase::Afterglow;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 0.72;
+                signs.omen_triggered = true;
+                signs.current_omen = Some(OmenKind::SummitCall);
+                signs.omen_intensity = signs.omen_intensity.max(0.7);
+            }
             PresentationJourneyStep::Boundary
+            | PresentationJourneyStep::BoundaryCrossing
             | PresentationJourneyStep::DesertPyramid
             | PresentationJourneyStep::Ecology
             | PresentationJourneyStep::ThirdPerson
@@ -1311,6 +1420,15 @@ fn drive_journey_showcase(
                 signs.current_omen = scene.expected_omen.or(Some(OmenKind::DawnLight));
                 signs.omen_intensity = signs.omen_intensity.max(0.82);
             }
+            PresentationJourneyStep::FarBankArrival => {
+                journey.story_stage = StoryArcStage::FarBankOutpost;
+                journey.dream.phase = DreamPhase::Afterglow;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 0.62;
+                signs.omen_triggered = true;
+                signs.current_omen = Some(OmenKind::DawnLight);
+                signs.omen_intensity = signs.omen_intensity.max(0.64);
+            }
             _ => {}
         }
         return;
@@ -1322,7 +1440,10 @@ fn drive_journey_showcase(
         | PresentationJourneyStep::VillageLife
         | PresentationJourneyStep::Dream
         | PresentationJourneyStep::DreamEcho
+        | PresentationJourneyStep::PostDreamDeparture
         | PresentationJourneyStep::Boundary
+        | PresentationJourneyStep::BoundaryCrossing
+        | PresentationJourneyStep::FarBankArrival
         | PresentationJourneyStep::DesertPyramid
         | PresentationJourneyStep::Ecology
         | PresentationJourneyStep::ThirdPerson
@@ -1379,7 +1500,10 @@ fn drive_region_showcase(
     scene: &PresentationScene,
     scene_progress: f32,
 ) {
-    if scene.journey_step != PresentationJourneyStep::Boundary {
+    if !matches!(
+        scene.journey_step,
+        PresentationJourneyStep::Boundary | PresentationJourneyStep::BoundaryCrossing
+    ) {
         return;
     }
     let Some(gate) = regions.gates.iter_mut().min_by(|left, right| {
@@ -1449,6 +1573,9 @@ fn presentation_context(
         village_focus: false,
         leaving_village: false,
         herding_completed: false,
+        afterglow_cue: None,
+        boundary_crossed: false,
+        outpost_reached: false,
     }
 }
 
@@ -1482,9 +1609,16 @@ mod tests {
             player::CameraMode,
             presentation::{
                 CompositionGuide, PresentationJourneyStep, PresentationScene,
-                PresentationVisualSample, build_journey_scenes, omen_for_place,
-                scene_index_at_elapsed, scene_progress, screenshot_manifest_for_scene,
-                sort_presentation_scenes_for_testing, visual_baseline_count,
+                PresentationVisualSample, build_journey_scenes, build_region_scenes,
+                omen_for_place, scene_index_at_elapsed, scene_progress,
+                screenshot_manifest_for_scene, sort_presentation_scenes_for_testing,
+                visual_baseline_count,
+            },
+            regions::{
+                GateProximity, RegionBiomeBias, RegionBoundaryKind, RegionGraphState, RegionId,
+                RegionKind, RegionOutpostState, RegionProfile, RegionWeatherBias,
+                TransitionCondition, TransitionGate, TransitionGateKind, TransitionGateState,
+                WorldRegion,
             },
             signs::OmenKind,
             world::{BiomeKind, WorldGridCoord, WorldMap},
@@ -1663,6 +1797,27 @@ mod tests {
     }
 
     #[test]
+    fn region_presentation_adds_departure_crossing_and_far_bank_samples() {
+        let config = test_config();
+        let world_map = WorldMap::new_for_testing(42, &config);
+        let graph = test_region_graph();
+
+        let scenes = build_region_scenes(&graph, &world_map);
+        let samples = scenes
+            .iter()
+            .map(|scene| scene.visual_sample)
+            .collect::<Vec<_>>();
+
+        assert!(samples.contains(&PresentationVisualSample::BoundaryCrossing));
+        assert!(samples.contains(&PresentationVisualSample::FarBankArrival));
+        assert!(
+            scenes
+                .iter()
+                .any(|scene| scene.journey_step == PresentationJourneyStep::FarBankArrival)
+        );
+    }
+
+    #[test]
     fn screenshot_manifest_records_directory_metadata_and_checklist() {
         let scene = test_scene(
             "village",
@@ -1702,6 +1857,65 @@ mod tests {
             weather: crate::game::environment::WeatherKind::Clear,
             expected_omen: None,
             journey_step: PresentationJourneyStep::Scenic,
+        }
+    }
+
+    fn test_region_graph() -> RegionGraphState {
+        let village = RegionId(1);
+        let boundary = RegionId(2);
+        RegionGraphState {
+            regions: vec![
+                test_region(village, RegionKind::VillageCoast, Vec3::ZERO),
+                test_region(
+                    boundary,
+                    RegionKind::MountainBoundary,
+                    Vec3::new(0.0, 0.0, -90.0),
+                ),
+            ],
+            gates: vec![TransitionGate {
+                id: 10,
+                from: village,
+                to: boundary,
+                kind: TransitionGateKind::MistRiverFord,
+                position: Vec3::new(0.0, 0.0, -42.0),
+                radius: 22.0,
+                condition: TransitionCondition::DreamAfterglowAndIntent,
+                state: TransitionGateState::Hinted,
+                hint: "雾里有旧水声。",
+            }],
+            current_region: village,
+            nearest_gate: Some(GateProximity {
+                gate_id: 10,
+                distance: 12.0,
+                open: false,
+            }),
+            discovered_gates: Vec::new(),
+            crossing: None,
+            outpost: Some(RegionOutpostState {
+                region: boundary,
+                center: Vec3::new(18.0, 0.0, -98.0),
+                arrival_radius: 20.0,
+                discovered: true,
+                recorded: false,
+            }),
+        }
+    }
+
+    fn test_region(id: RegionId, kind: RegionKind, center: Vec3) -> WorldRegion {
+        WorldRegion {
+            id,
+            kind,
+            seed: id.0,
+            center,
+            radius: 120.0,
+            landmark: None,
+            boundary: RegionBoundaryKind::MistRiver,
+            profile: RegionProfile {
+                biome_bias: RegionBiomeBias::CoastalMeadow,
+                weather_bias: RegionWeatherBias::ClearSeaMist,
+                danger: 0.1,
+                exploration_value: 0.4,
+            },
         }
     }
 

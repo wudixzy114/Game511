@@ -10,7 +10,7 @@ use crate::game::{
     ecology::EcologyState,
     flow::{AppScreen, InGameState, PendingSessionLaunch, SessionMode},
     intent::{IntentState, PerceptionState, intent_debug_line, perception_label},
-    journey::{JourneyStage, JourneyState, format_journey_memory_line},
+    journey::{JourneyStage, JourneyState, StoryArcStage, format_journey_memory_line},
     landmarks::LandmarkState,
     notebook::{NotebookEntry, NotebookEntryKind, NotebookState, format_notebook_entry_line},
     places::{MeaningfulPlaces, PlaceKind, planar_distance},
@@ -1585,6 +1585,15 @@ fn formal_journey_hint(
         if perception.is_some_and(|perception| perception.active) {
             return "梦中的金色斜面短暂清晰。".to_string();
         }
+        if let Some(cue) = journey.afterglow.cue {
+            return format!("{}：{}", cue.label(), cue.hint());
+        }
+        if journey.afterglow.unanswered_seconds > 18.0 || journey.dream.echo_strength < 0.22 {
+            return "梦醒后的回声正在变轻，风仍在等你重新看向村外。".to_string();
+        }
+        if journey.story_stage == StoryArcStage::FarBankOutpost {
+            return "雾后已有歇脚地，城镇的气息在更远处。".to_string();
+        }
         return "梦醒后，风仍带着沙的气味。".to_string();
     }
     if matches!(
@@ -1719,12 +1728,14 @@ fn return_path_hint(notebook: Option<&NotebookState>, ui_mode: &UiModeState) -> 
 
 fn herding_status_hint(village: &VillageState) -> Option<String> {
     match village.herding.phase {
-        HerdingPhase::Prompted if village.herding.task_available => Some("?????  F".to_string()),
-        HerdingPhase::FollowingToGrass => Some("???????????".to_string()),
-        HerdingPhase::GrazingAtPatch => Some("?????????????????".to_string()),
-        HerdingPhase::ReturningToPen => Some("?????????".to_string()),
+        HerdingPhase::Prompted if village.herding.task_available => {
+            Some("羊群看向草地  F".to_string())
+        }
+        HerdingPhase::FollowingToGrass => Some("羊群跟着你的步子".to_string()),
+        HerdingPhase::GrazingAtPatch => Some("羊群正在吃草，风慢下来".to_string()),
+        HerdingPhase::ReturningToPen => Some("羊群记得回圈的路".to_string()),
         HerdingPhase::Completed if village.herding.first_task_completed => {
-            Some("????????????????".to_string())
+            Some("羊群已经安顿，村外的风更清楚".to_string())
         }
         _ => None,
     }
@@ -1732,15 +1743,15 @@ fn herding_status_hint(village: &VillageState) -> Option<String> {
 
 fn gate_status_hint(regions: &RegionGraphState) -> String {
     if let Some(crossing) = regions.crossing.as_ref() {
-        return format!("????{}", crossing.gate_kind.label());
+        return format!("正在穿过{}", crossing.gate_kind.label());
     }
     regions
         .nearest_gate
         .map(|gate| {
             if gate.open {
-                "?????  G".to_string()
+                "雾河让出浅处  G".to_string()
             } else {
-                "?????".to_string()
+                "雾里有旧水声".to_string()
             }
         })
         .unwrap_or_default()
@@ -1756,14 +1767,21 @@ mod tests {
     use crate::game::{
         flow::{AppScreen, PendingSessionLaunch, SessionMode},
         notebook::{NotebookEntryKind, NotebookSource, NotebookState},
+        regions::{
+            GateProximity, RegionBiomeBias, RegionBoundaryKind, RegionGraphState, RegionId,
+            RegionKind, RegionProfile, RegionWeatherBias, TransitionCondition, TransitionGate,
+            TransitionGateKind, TransitionGateState, WorldRegion,
+        },
         signs::OmenKind,
+        village::{HerdingPhase, HerdingState, VillageState},
         world::BiomeKind,
     };
 
     use super::{
         biome_label, compass_text_for_context, control_hint, distance_band, facing_label_from_yaw,
-        notebook_overlay_text, omen_label, process_pending_session_launch, return_path_hint,
-        shift_notebook_category, time_of_day_label,
+        gate_status_hint, herding_status_hint, notebook_overlay_text, omen_label,
+        process_pending_session_launch, return_path_hint, shift_notebook_category,
+        time_of_day_label,
     };
 
     #[test]
@@ -1888,5 +1906,81 @@ mod tests {
 
         assert!(!text.contains("任务"));
         assert!(!text.contains("前往"));
+    }
+
+    #[test]
+    fn formal_context_hints_are_readable_and_non_task_like() {
+        let mut village = VillageState {
+            origin: bevy::prelude::Vec3::ZERO,
+            spawn_point: bevy::prelude::Vec3::ZERO,
+            areas: Vec::new(),
+            actors: Vec::new(),
+            nearest_actor: None,
+            interaction_prompt: None,
+            player_was_bootstrapped: true,
+            herding: HerdingState {
+                phase: HerdingPhase::FollowingToGrass,
+                task_available: true,
+                ..Default::default()
+            },
+        };
+        let herding = herding_status_hint(&village).expect("herding hint");
+        assert!(herding.contains("羊群"));
+        assert!(!herding.contains('?'));
+        assert!(!herding.contains("任务"));
+
+        village.herding.phase = HerdingPhase::Completed;
+        village.herding.first_task_completed = true;
+        assert!(
+            herding_status_hint(&village)
+                .expect("completed hint")
+                .contains("村外")
+        );
+
+        let graph = RegionGraphState {
+            regions: vec![test_region(RegionId(1), RegionKind::VillageCoast)],
+            gates: vec![TransitionGate {
+                id: 7,
+                from: RegionId(1),
+                to: RegionId(2),
+                kind: TransitionGateKind::MistRiverFord,
+                position: bevy::prelude::Vec3::ZERO,
+                radius: 20.0,
+                condition: TransitionCondition::DreamAfterglowAndIntent,
+                state: TransitionGateState::Open,
+                hint: "雾里有旧水声。",
+            }],
+            current_region: RegionId(1),
+            nearest_gate: Some(GateProximity {
+                gate_id: 7,
+                distance: 5.0,
+                open: true,
+            }),
+            discovered_gates: Vec::new(),
+            crossing: None,
+            outpost: None,
+        };
+        let gate = gate_status_hint(&graph);
+        assert!(gate.contains("雾河"));
+        assert!(!gate.contains('?'));
+        assert!(!gate.contains("任务"));
+    }
+
+    fn test_region(id: RegionId, kind: RegionKind) -> WorldRegion {
+        WorldRegion {
+            id,
+            kind,
+            seed: id.0,
+            center: bevy::prelude::Vec3::ZERO,
+            radius: 120.0,
+            landmark: None,
+            boundary: RegionBoundaryKind::MistRiver,
+            profile: RegionProfile {
+                biome_bias: RegionBiomeBias::CoastalMeadow,
+                weather_bias: RegionWeatherBias::ClearSeaMist,
+                danger: 0.1,
+                exploration_value: 0.4,
+            },
+        }
     }
 }

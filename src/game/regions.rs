@@ -1,6 +1,6 @@
 use bevy::{
     color::LinearRgba,
-    math::primitives::{Cuboid, Cylinder},
+    math::primitives::{Cuboid, Cylinder, Plane3d},
     pbr::MeshMaterial3d,
     prelude::*,
 };
@@ -225,15 +225,27 @@ pub struct RegionOutpostState {
 #[derive(Debug, Component)]
 struct TransitionGateVisual {
     gate_id: u64,
+    role: GateVisualRole,
 }
 
 #[derive(Debug, Component)]
 struct RegionOutpostVisual;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+enum GateVisualRole {
+    MistBed,
+    WaterRibbon,
+    FordStone,
+    Marker,
+    SoftLight,
+}
+
 #[derive(Debug, Resource, Clone)]
 struct RegionMaterials {
     mist: Handle<StandardMaterial>,
     stone: Handle<StandardMaterial>,
+    water: Handle<StandardMaterial>,
+    old_wood: Handle<StandardMaterial>,
 }
 
 const GATE_INTERACTION_RADIUS: f32 = 8.0;
@@ -865,7 +877,14 @@ fn update_transition_gate_visuals(
         } else {
             0.0
         };
-        transform.scale = Vec3::splat(0.85 + pulse * 0.35 + crossing_boost);
+        let base_scale = match visual.role {
+            GateVisualRole::MistBed => Vec3::new(1.0, 1.0, 1.0),
+            GateVisualRole::WaterRibbon => Vec3::new(1.0, 1.0, 1.0),
+            GateVisualRole::FordStone => Vec3::splat(1.0),
+            GateVisualRole::Marker => Vec3::splat(1.0),
+            GateVisualRole::SoftLight => Vec3::splat(1.0),
+        };
+        transform.scale = base_scale * (0.85 + pulse * 0.35 + crossing_boost);
     }
 }
 
@@ -889,8 +908,14 @@ fn spawn_gate_visuals(
             MeshMaterial3d(material),
             Transform::from_translation(gate.position + Vec3::Y * 0.08),
             Visibility::Hidden,
-            TransitionGateVisual { gate_id: gate.id },
+            TransitionGateVisual {
+                gate_id: gate.id,
+                role: GateVisualRole::MistBed,
+            },
         ));
+        if gate.kind == TransitionGateKind::MistRiverFord {
+            spawn_mist_river_ford_visuals(commands, meshes, materials, gate);
+        }
         if gate.kind == TransitionGateKind::MountainPass {
             for offset in [-3.8, 3.8] {
                 commands.spawn((
@@ -900,7 +925,10 @@ fn spawn_gate_visuals(
                     MeshMaterial3d(materials.stone.clone()),
                     Transform::from_translation(gate.position + Vec3::new(offset, 2.8, 0.0)),
                     Visibility::Hidden,
-                    TransitionGateVisual { gate_id: gate.id },
+                    TransitionGateVisual {
+                        gate_id: gate.id,
+                        role: GateVisualRole::Marker,
+                    },
                 ));
             }
         } else {
@@ -917,9 +945,77 @@ fn spawn_gate_visuals(
                 },
                 Transform::from_translation(gate.position + Vec3::Y * 1.6),
                 Visibility::Hidden,
-                TransitionGateVisual { gate_id: gate.id },
+                TransitionGateVisual {
+                    gate_id: gate.id,
+                    role: GateVisualRole::SoftLight,
+                },
             ));
         }
+    }
+}
+
+fn spawn_mist_river_ford_visuals(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &RegionMaterials,
+    gate: &TransitionGate,
+) {
+    commands.spawn((
+        Name::new("MistRiverWaterRibbon"),
+        DespawnOnExit(AppScreen::InGame),
+        Mesh3d(meshes.add(Mesh::from(Plane3d::default()))),
+        MeshMaterial3d(materials.water.clone()),
+        Transform::from_translation(gate.position + Vec3::new(0.0, 0.045, 0.0))
+            .with_rotation(Quat::from_rotation_y(0.18))
+            .with_scale(Vec3::new(gate.radius * 1.35, 1.0, gate.radius * 0.28)),
+        Visibility::Hidden,
+        TransitionGateVisual {
+            gate_id: gate.id,
+            role: GateVisualRole::WaterRibbon,
+        },
+    ));
+
+    for (index, offset) in [
+        Vec3::new(-5.6, 0.16, -3.8),
+        Vec3::new(-2.1, 0.2, -1.4),
+        Vec3::new(1.6, 0.18, 0.9),
+        Vec3::new(5.0, 0.2, 3.1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        commands.spawn((
+            Name::new("MistRiverFordStone"),
+            DespawnOnExit(AppScreen::InGame),
+            Mesh3d(meshes.add(Mesh::from(Cuboid::new(2.5, 0.28, 1.35)))),
+            MeshMaterial3d(materials.stone.clone()),
+            Transform::from_translation(gate.position + offset)
+                .with_rotation(Quat::from_rotation_y(index as f32 * 0.34 - 0.42)),
+            Visibility::Hidden,
+            TransitionGateVisual {
+                gate_id: gate.id,
+                role: GateVisualRole::FordStone,
+            },
+        ));
+    }
+
+    for (index, offset) in [Vec3::new(-7.2, 1.05, 4.6), Vec3::new(7.4, 1.0, -4.4)]
+        .into_iter()
+        .enumerate()
+    {
+        commands.spawn((
+            Name::new("MistRiverOldPost"),
+            DespawnOnExit(AppScreen::InGame),
+            Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.46, 2.1, 0.46)))),
+            MeshMaterial3d(materials.old_wood.clone()),
+            Transform::from_translation(gate.position + offset)
+                .with_rotation(Quat::from_rotation_z(if index == 0 { 0.08 } else { -0.1 })),
+            Visibility::Hidden,
+            TransitionGateVisual {
+                gate_id: gate.id,
+                role: GateVisualRole::Marker,
+            },
+        ));
     }
 }
 
@@ -971,6 +1067,19 @@ impl RegionMaterials {
             stone: materials.add(StandardMaterial {
                 base_color: Color::srgb(0.42, 0.42, 0.4),
                 perceptual_roughness: 0.98,
+                ..Default::default()
+            }),
+            water: materials.add(StandardMaterial {
+                base_color: Color::srgba(0.2, 0.44, 0.54, 0.58),
+                alpha_mode: AlphaMode::Blend,
+                emissive: LinearRgba::rgb(0.015, 0.04, 0.052),
+                perceptual_roughness: 0.28,
+                metallic: 0.02,
+                ..Default::default()
+            }),
+            old_wood: materials.add(StandardMaterial {
+                base_color: Color::srgb(0.25, 0.19, 0.13),
+                perceptual_roughness: 0.96,
                 ..Default::default()
             }),
         }

@@ -4,18 +4,30 @@ use bevy::prelude::*;
 
 use crate::game::{
     director::{DirectorState, DirectorSuggestionKind, place_from_director_tags},
+    ecology::{EcologySignal, EcologyState},
     flow::{AppScreen, InGameState},
     notebook::{
         NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
         dream_record, record_notebook_entry,
     },
     places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance},
+    regions::{RegionGraphState, TransitionGateKind, TransitionGateState},
     signs::{OmenKind, SignState},
     village::{HerdingPhase, VillageAreaKind, VillageState},
     world::{BiomeKind, WandererPrototype, WorldCamera, WorldGridCoord},
 };
 
 pub type JourneyPlaceKind = PlaceKind;
+
+type JourneySessionResources<'w> = (
+    Res<'w, Time>,
+    Option<Res<'w, SignState>>,
+    Option<Res<'w, VillageState>>,
+    Option<Res<'w, RegionGraphState>>,
+    Option<Res<'w, EcologyState>>,
+    Option<ResMut<'w, JourneyState>>,
+    Option<ResMut<'w, NotebookState>>,
+);
 
 pub struct JourneyPlugin;
 
@@ -46,6 +58,7 @@ pub struct JourneyState {
     pub story_elapsed: f32,
     pub village_day: u32,
     pub dream: DreamState,
+    pub afterglow: AfterglowOmenState,
     pub long_term_goal: Option<LongTermGoal>,
     pub last_distance_to_target: Option<f32>,
     pub last_player_position: Option<Vec3>,
@@ -66,6 +79,7 @@ impl Default for JourneyState {
             story_elapsed: 0.0,
             village_day: 1,
             dream: DreamState::default(),
+            afterglow: AfterglowOmenState::default(),
             long_term_goal: None,
             last_distance_to_target: None,
             last_player_position: None,
@@ -90,6 +104,11 @@ pub enum StoryArcStage {
     DreamApproaching,
     Dreaming,
     DreamAfterglow,
+    BoundaryCrossing,
+    FarBankOutpost,
+    TownPreparation,
+    FirstLoss,
+    DesertDeparture,
 }
 
 impl StoryArcStage {
@@ -100,6 +119,11 @@ impl StoryArcStage {
             Self::DreamApproaching => "梦境将至",
             Self::Dreaming => "梦中沙暴",
             Self::DreamAfterglow => "梦后回响",
+            Self::BoundaryCrossing => "边界穿越",
+            Self::FarBankOutpost => "对岸入口",
+            Self::TownPreparation => "城镇准备",
+            Self::FirstLoss => "第一次损失",
+            Self::DesertDeparture => "沙漠出发",
         }
     }
 }
@@ -168,6 +192,53 @@ impl JourneyStage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AfterglowOmenState {
+    pub cue: Option<AfterglowCueKind>,
+    pub intensity: f32,
+    pub unanswered_seconds: f32,
+    pub recorded_cues: Vec<AfterglowCueKind>,
+}
+
+impl Default for AfterglowOmenState {
+    fn default() -> Self {
+        Self {
+            cue: None,
+            intensity: 0.0,
+            unanswered_seconds: 0.0,
+            recorded_cues: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum AfterglowCueKind {
+    BirdDirection,
+    WindShift,
+    FortuneTellerLamp,
+    MerchantRumor,
+}
+
+impl AfterglowCueKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BirdDirection => "鸟群朝向旧渡口",
+            Self::WindShift => "风向忽然改道",
+            Self::FortuneTellerLamp => "占卜人的灯",
+            Self::MerchantRumor => "商人的沙漠传闻",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::BirdDirection => "鸟群没有盘旋在海边，而是沿着村外旧路低低飞去。",
+            Self::WindShift => "风从雾河方向吹回村口，带着冷水和细沙的味道。",
+            Self::FortuneTellerLamp => "村外路边多了一盏灯，像是在等一个已经醒来的人。",
+            Self::MerchantRumor => "商人谈起风沙另一侧的旅人，话里没有邀约，却留下方向。",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JourneyTarget {
     pub id: u64,
@@ -218,6 +289,11 @@ pub enum JourneyMemoryKind {
     Response,
     Echo,
     Dream,
+    BoundaryCrossing,
+    OutpostArrival,
+    TownPreparation,
+    FirstLoss,
+    DesertDeparture,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -300,6 +376,11 @@ pub enum JourneyEvent {
         to: DreamPhase,
         at_seconds: f32,
     },
+    AfterglowCueRecorded {
+        cue: AfterglowCueKind,
+        at_seconds: f32,
+        intensity: f32,
+    },
     InteractionCompleted {
         kind: JourneyInteractionKind,
         at_seconds: f32,
@@ -322,6 +403,9 @@ pub struct JourneyAdvanceContext {
     pub village_focus: bool,
     pub leaving_village: bool,
     pub herding_completed: bool,
+    pub afterglow_cue: Option<AfterglowCueKind>,
+    pub boundary_crossed: bool,
+    pub outpost_reached: bool,
 }
 
 const DEFAULT_ARRIVAL_RADIUS: f32 = 13.5;
@@ -407,14 +491,11 @@ fn select_journey_target(
 }
 
 fn advance_journey_session(
-    time: Res<Time>,
-    signs: Option<Res<SignState>>,
-    village: Option<Res<VillageState>>,
-    journey: Option<ResMut<JourneyState>>,
-    mut notebook: Option<ResMut<NotebookState>>,
+    resources: JourneySessionResources<'_>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
 ) {
+    let (time, signs, village, regions, ecology, journey, mut notebook) = resources;
     let Some(mut journey) = journey else {
         return;
     };
@@ -435,6 +516,9 @@ fn advance_journey_session(
         });
     let sign_state = signs.as_deref();
     let village_context = village_context(village.as_deref(), transform.translation);
+    let region_context = region_context(regions.as_deref(), transform.translation);
+    let afterglow_cue = afterglow_cue_from_ecology(ecology.as_deref())
+        .or_else(|| village_context.1.then_some(AfterglowCueKind::WindShift));
     let events = advance_journey_state(
         &mut journey,
         JourneyAdvanceContext {
@@ -452,6 +536,9 @@ fn advance_journey_session(
             herding_completed: village
                 .as_deref()
                 .is_some_and(|village| village.herding.first_task_completed),
+            afterglow_cue,
+            boundary_crossed: region_context.0,
+            outpost_reached: region_context.1,
         },
     );
 
@@ -521,6 +608,7 @@ pub fn advance_journey_state(
     state.last_player_position = Some(context.player_position);
     advance_response_state(&mut state.response, delta_seconds);
     advance_story_arc_state(state, context, &mut events);
+    advance_afterglow_omens(state, context, &mut events);
 
     if let Some(distance) = context.distance_to_target {
         state.last_distance_to_target = Some(distance);
@@ -697,7 +785,77 @@ fn advance_story_arc_state(
                 transition_dream_phase(state, DreamPhase::Afterglow, events);
             }
         }
-        StoryArcStage::DreamAfterglow => {}
+        StoryArcStage::DreamAfterglow => {
+            if context.boundary_crossed {
+                transition_story_stage(state, StoryArcStage::BoundaryCrossing, events);
+                record_journey_memory(state, JourneyMemoryKind::BoundaryCrossing, context, events);
+            }
+        }
+        StoryArcStage::BoundaryCrossing => {
+            if context.outpost_reached {
+                transition_story_stage(state, StoryArcStage::FarBankOutpost, events);
+                record_journey_memory(state, JourneyMemoryKind::OutpostArrival, context, events);
+                record_journey_memory(state, JourneyMemoryKind::TownPreparation, context, events);
+            }
+        }
+        StoryArcStage::FarBankOutpost
+        | StoryArcStage::TownPreparation
+        | StoryArcStage::FirstLoss
+        | StoryArcStage::DesertDeparture => {}
+    }
+}
+
+fn advance_afterglow_omens(
+    state: &mut JourneyState,
+    context: JourneyAdvanceContext,
+    events: &mut Vec<JourneyEvent>,
+) {
+    if state.dream.phase != DreamPhase::Afterglow {
+        state.afterglow.cue = None;
+        state.afterglow.intensity = 0.0;
+        state.afterglow.unanswered_seconds = 0.0;
+        return;
+    }
+
+    let cue = context.afterglow_cue.or_else(|| {
+        (context.leaving_village && state.dream.echo_strength > 0.18)
+            .then_some(AfterglowCueKind::WindShift)
+    });
+    let responding = cue.is_some() || context.leaving_village;
+    if responding {
+        state.afterglow.unanswered_seconds = 0.0;
+    } else {
+        state.afterglow.unanswered_seconds += context.delta_seconds.max(0.0);
+    }
+
+    let unanswered_fade = (state.afterglow.unanswered_seconds / 28.0).clamp(0.0, 0.72);
+    let target_intensity = cue.map_or(0.0, |cue| match cue {
+        AfterglowCueKind::BirdDirection => 0.72,
+        AfterglowCueKind::WindShift => 0.58,
+        AfterglowCueKind::FortuneTellerLamp => 0.84,
+        AfterglowCueKind::MerchantRumor => 0.68,
+    }) * state.dream.echo_strength.clamp(0.0, 1.0)
+        * (1.0 - unanswered_fade);
+    let blend = 1.0 - (-2.4 * context.delta_seconds.max(0.0)).exp();
+    state.afterglow.intensity = (state.afterglow.intensity
+        + (target_intensity - state.afterglow.intensity) * blend)
+        .clamp(0.0, 1.0);
+    state.afterglow.cue = if state.afterglow.intensity > 0.08 {
+        cue
+    } else {
+        None
+    };
+
+    if let Some(cue) = state.afterglow.cue
+        && state.afterglow.intensity >= 0.24
+        && !state.afterglow.recorded_cues.contains(&cue)
+    {
+        state.afterglow.recorded_cues.push(cue);
+        events.push(JourneyEvent::AfterglowCueRecorded {
+            cue,
+            at_seconds: state.session_elapsed,
+            intensity: state.afterglow.intensity,
+        });
     }
 }
 
@@ -858,6 +1016,21 @@ fn memory_text(
         },
         JourneyMemoryKind::Echo => format!("{place}的回响沉入记忆。"),
         JourneyMemoryKind::Dream => "梦里有沙暴、巨大金字塔，以及金字塔下的宝藏。".to_string(),
+        JourneyMemoryKind::BoundaryCrossing => {
+            "雾河不再只是远处的声音，你已经从旧渡口走过第一道自然边界。".to_string()
+        }
+        JourneyMemoryKind::OutpostArrival => {
+            "对岸有几间临时屋舍和一处歇脚地，风里第一次出现城镇的气息。".to_string()
+        }
+        JourneyMemoryKind::TownPreparation => {
+            "前方会有城镇、买卖与旅费，也会有只属于旅人的判断。".to_string()
+        }
+        JourneyMemoryKind::FirstLoss => {
+            "旅程不会只给新手的运气，失去某些东西也会成为理解世界的一部分。".to_string()
+        }
+        JourneyMemoryKind::DesertDeparture => {
+            "沙漠还在更远处，金字塔的方向已经进入这条路的尽头。".to_string()
+        }
     }
 }
 
@@ -879,6 +1052,23 @@ fn notebook_record_for_event(event: &JourneyEvent) -> Option<NotebookRecord> {
                 omen_memory_label(memory.omen)
             ),
             tags: vec![NotebookTag::Omen, NotebookTag::Memory],
+        }),
+        JourneyEvent::AfterglowCueRecorded {
+            cue,
+            at_seconds,
+            intensity,
+        } => Some(NotebookRecord {
+            kind: NotebookEntryKind::Sign,
+            at_seconds: *at_seconds,
+            location: Some("村外".to_string()),
+            source: NotebookSource::Sign,
+            title: cue.label().to_string(),
+            body: format!(
+                "{}这不是路线标记，只是梦醒后世界给出的又一次回应。强度约为 {:.0}%。",
+                cue.hint(),
+                intensity * 100.0
+            ),
+            tags: vec![NotebookTag::Omen, NotebookTag::Dream, NotebookTag::Memory],
         }),
         JourneyEvent::MemoryRecorded(memory) => Some(notebook_record_for_journey_memory(memory)),
         _ => None,
@@ -911,6 +1101,31 @@ fn notebook_record_for_journey_memory(memory: &JourneyMemory) -> NotebookRecord 
             NotebookSource::Dream,
             "沙暴中的金字塔".to_string(),
         ),
+        JourneyMemoryKind::BoundaryCrossing => (
+            NotebookEntryKind::Place,
+            NotebookSource::PlaceArrival,
+            "穿过迷雾河".to_string(),
+        ),
+        JourneyMemoryKind::OutpostArrival => (
+            NotebookEntryKind::Place,
+            NotebookSource::PlaceArrival,
+            "对岸前哨".to_string(),
+        ),
+        JourneyMemoryKind::TownPreparation => (
+            NotebookEntryKind::Observation,
+            NotebookSource::Journey,
+            "城镇前的准备".to_string(),
+        ),
+        JourneyMemoryKind::FirstLoss => (
+            NotebookEntryKind::JourneyEcho,
+            NotebookSource::Journey,
+            "失去也会留下路".to_string(),
+        ),
+        JourneyMemoryKind::DesertDeparture => (
+            NotebookEntryKind::JourneyEcho,
+            NotebookSource::Journey,
+            "沙漠出发的方向".to_string(),
+        ),
     };
     NotebookRecord {
         kind,
@@ -934,6 +1149,14 @@ fn notebook_tags_for_memory(memory: &JourneyMemory) -> Vec<NotebookTag> {
     match memory.place_kind {
         Some(PlaceKind::SpringEye | PlaceKind::QuietBay) => tags.push(NotebookTag::Sea),
         Some(PlaceKind::StoneRing) => tags.push(NotebookTag::Dream),
+        _ => {}
+    }
+    match memory.kind {
+        JourneyMemoryKind::TownPreparation => tags.push(NotebookTag::Merchant),
+        JourneyMemoryKind::DesertDeparture => tags.push(NotebookTag::Desert),
+        JourneyMemoryKind::BoundaryCrossing
+        | JourneyMemoryKind::OutpostArrival
+        | JourneyMemoryKind::FirstLoss => tags.push(NotebookTag::Omen),
         _ => {}
     }
     tags
@@ -1002,6 +1225,19 @@ fn log_journey_event(event: &JourneyEvent) {
                 to = to.label(),
                 at_seconds,
                 "dream phase changed"
+            );
+        }
+        JourneyEvent::AfterglowCueRecorded {
+            cue,
+            at_seconds,
+            intensity,
+        } => {
+            tracing::info!(
+                target: "dao_game::journey::afterglow",
+                cue = cue.label(),
+                at_seconds,
+                intensity,
+                "afterglow omen cue recorded"
             );
         }
         JourneyEvent::OmenRecorded(memory) => {
@@ -1089,6 +1325,33 @@ fn village_context(village: Option<&VillageState>, player_position: Vec3) -> (bo
     (village_focus, leaving_village)
 }
 
+fn region_context(regions: Option<&RegionGraphState>, player_position: Vec3) -> (bool, bool) {
+    let Some(regions) = regions else {
+        return (false, false);
+    };
+    let boundary_crossed = regions.gates.iter().any(|gate| {
+        gate.kind == TransitionGateKind::MistRiverFord && gate.state == TransitionGateState::Crossed
+    }) || regions
+        .outpost
+        .as_ref()
+        .is_some_and(|outpost| outpost.discovered);
+    let outpost_reached = regions.outpost.as_ref().is_some_and(|outpost| {
+        outpost.discovered
+            && regions.current_region == outpost.region
+            && planar_distance(player_position, outpost.center) <= outpost.arrival_radius
+    });
+    (boundary_crossed, outpost_reached)
+}
+
+fn afterglow_cue_from_ecology(ecology: Option<&EcologyState>) -> Option<AfterglowCueKind> {
+    match ecology.and_then(|ecology| ecology.latest_signal) {
+        Some(EcologySignal::BirdsTowardBoundary) => Some(AfterglowCueKind::BirdDirection),
+        Some(EcologySignal::MerchantDesertRumor) => Some(AfterglowCueKind::MerchantRumor),
+        Some(EcologySignal::FortuneTellerLamp) => Some(AfterglowCueKind::FortuneTellerLamp),
+        Some(EcologySignal::SheepUneasy) | None => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::{
@@ -1100,10 +1363,11 @@ mod tests {
         director::{DirectorState, DirectorSuggestion, DirectorSuggestionKind, DirectorValidation},
         flow::{AppScreen, InGameState},
         journey::{
-            DreamPhase, JourneyAdvanceContext, JourneyEvent, JourneyInteractionKind,
-            JourneyMemoryKind, JourneyOmenMemory, JourneyPlaceKind, JourneyPlugin, JourneyStage,
-            JourneyState, JourneyTarget, StoryArcStage, advance_journey_state,
-            choose_journey_place, format_journey_memory_line, notebook_record_for_event,
+            AfterglowCueKind, DreamPhase, JourneyAdvanceContext, JourneyEvent,
+            JourneyInteractionKind, JourneyMemoryKind, JourneyOmenMemory, JourneyPlaceKind,
+            JourneyPlugin, JourneyStage, JourneyState, JourneyTarget, StoryArcStage,
+            advance_journey_state, choose_journey_place, format_journey_memory_line,
+            notebook_record_for_event,
         },
         notebook::{NotebookEntryKind, NotebookSource},
         places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, PlaceTag},
@@ -1141,6 +1405,9 @@ mod tests {
             village_focus: false,
             leaving_village: false,
             herding_completed: false,
+            afterglow_cue: None,
+            boundary_crossed: false,
+            outpost_reached: false,
         }
     }
 
@@ -1534,6 +1801,88 @@ mod tests {
         );
 
         assert!(state.dream.echo_strength < 0.6);
+    }
+
+    #[test]
+    fn afterglow_cue_records_natural_sign_without_task_language() {
+        let mut state = JourneyState {
+            story_stage: StoryArcStage::DreamAfterglow,
+            dream: super::DreamState {
+                phase: DreamPhase::Afterglow,
+                echo_strength: 0.9,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let events = advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 1.0,
+                afterglow_cue: Some(AfterglowCueKind::BirdDirection),
+                leaving_village: true,
+                ..context(0.0, None, false)
+            },
+        );
+
+        assert_eq!(state.afterglow.cue, Some(AfterglowCueKind::BirdDirection));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, JourneyEvent::AfterglowCueRecorded { .. }))
+        );
+        let record = events
+            .iter()
+            .find_map(notebook_record_for_event)
+            .expect("notebook record");
+        assert!(record.title.contains("鸟群"));
+        assert!(!record.body.contains("任务"));
+    }
+
+    #[test]
+    fn boundary_and_outpost_extend_story_arc_for_next_phase() {
+        let mut state = JourneyState {
+            story_stage: StoryArcStage::DreamAfterglow,
+            dream: super::DreamState {
+                phase: DreamPhase::Afterglow,
+                echo_strength: 0.8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 0.5,
+                boundary_crossed: true,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::BoundaryCrossing);
+        assert!(
+            state
+                .memories
+                .iter()
+                .any(|memory| memory.kind == JourneyMemoryKind::BoundaryCrossing)
+        );
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 0.5,
+                boundary_crossed: true,
+                outpost_reached: true,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::FarBankOutpost);
+        assert!(
+            state
+                .memories
+                .iter()
+                .any(|memory| memory.kind == JourneyMemoryKind::TownPreparation)
+        );
     }
 
     #[test]
