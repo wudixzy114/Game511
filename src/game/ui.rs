@@ -1424,7 +1424,9 @@ fn control_hint(session_mode: SessionMode) -> &'static str {
     match session_mode {
         SessionMode::Exploration => "WASD 移动  Shift 疾走  Space 跳跃  V 视角  Esc 暂停",
         SessionMode::Presentation => "自动巡游展示场景  Esc 暂停",
-        SessionMode::MaterialGallery => "材质陈列馆  1-4 光照  [ ] 分类  E 导出  Esc 暂停",
+        SessionMode::MaterialGallery => {
+            "材质陈列馆  WASD/鼠标 移动  Space/Ctrl 升降  Shift 加速  1-4 光照  [ ] 分类  E 导出"
+        }
     }
 }
 

@@ -8,6 +8,7 @@ pub mod journey;
 pub mod landmarks;
 pub mod materials;
 pub mod notebook;
+pub mod objects;
 pub mod physics;
 pub mod places;
 pub mod player;
@@ -47,6 +48,7 @@ impl Plugin for GamePlugin {
         app.add_plugins(assets::ProceduralAssetPlugin);
         app.add_plugins(physics::DaoPhysicsPlugin);
         app.add_plugins(materials::MaterialGalleryPlugin);
+        app.add_plugins(objects::ProceduralObjectPlugin);
         app.add_plugins(ui::UiPlugin);
         app.add_plugins(world::WorldPlugin);
         app.add_plugins(notebook::NotebookPlugin);

@@ -5,6 +5,7 @@ use bevy::{
     asset::RenderAssetUsages,
     color::{ColorToComponents, LinearRgba},
     ecs::system::SystemParam,
+    input::mouse::AccumulatedMouseMotion,
     math::primitives::{Cuboid, Plane3d, Sphere, Torus},
     mesh::{Indices, PrimitiveTopology},
     pbr::MeshMaterial3d,
@@ -13,6 +14,7 @@ use bevy::{
         render_resource::{Extent3d, TextureDimension, TextureFormat},
         view::screenshot::{Screenshot, save_to_disk},
     },
+    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
 use serde::Serialize;
 
@@ -34,9 +36,14 @@ impl Plugin for MaterialGalleryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ProceduralMaterialLibrary>();
         app.insert_resource(MaterialGalleryState::default());
+        app.insert_resource(MaterialGalleryCameraState::default());
         app.add_systems(
             OnEnter(AppScreen::InGame),
             spawn_material_gallery.run_if(in_session_mode(SessionMode::MaterialGallery)),
+        );
+        app.add_systems(
+            OnEnter(InGameState::Running),
+            lock_material_gallery_cursor.run_if(in_session_mode(SessionMode::MaterialGallery)),
         );
         app.add_systems(
             Update,
@@ -44,6 +51,7 @@ impl Plugin for MaterialGalleryPlugin {
                 handle_material_gallery_input,
                 apply_material_gallery_lighting,
                 focus_material_gallery_camera,
+                move_material_gallery_camera,
             )
                 .chain()
                 .run_if(in_state(InGameState::Running))
@@ -233,6 +241,36 @@ impl Default for MaterialGalleryState {
     }
 }
 
+#[derive(Debug, Resource, Clone, Copy, PartialEq)]
+struct MaterialGalleryCameraState {
+    yaw: f32,
+    pitch: f32,
+    focused_category: Option<MaterialCategory>,
+    initialized: bool,
+}
+
+impl Default for MaterialGalleryCameraState {
+    fn default() -> Self {
+        Self {
+            yaw: -0.78,
+            pitch: -0.42,
+            focused_category: None,
+            initialized: false,
+        }
+    }
+}
+
+impl MaterialGalleryCameraState {
+    fn align_to_view(&mut self, eye: Vec3, target: Vec3) {
+        let forward = (target - eye).normalize_or_zero();
+        if forward.length_squared() <= f32::EPSILON {
+            return;
+        }
+        self.yaw = -forward.x.atan2(-forward.z);
+        self.pitch = forward.y.asin().clamp(-1.35, 1.35);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize)]
 pub enum GalleryLightingPreset {
     FixedStudio,
@@ -314,6 +352,7 @@ struct MaterialGallerySpawnParams<'w, 's> {
     commands: Commands<'w, 's>,
     library: Res<'w, ProceduralMaterialLibrary>,
     state: ResMut<'w, MaterialGalleryState>,
+    camera_state: ResMut<'w, MaterialGalleryCameraState>,
     performance: ResMut<'w, FramePerformance>,
     meshes: ResMut<'w, Assets<Mesh>>,
     images: ResMut<'w, Assets<Image>>,
@@ -326,6 +365,7 @@ fn spawn_material_gallery(mut params: MaterialGallerySpawnParams) {
     let gallery_started = Instant::now();
     params.state.selected_category = None;
     params.state.lighting = GalleryLightingPreset::FixedStudio;
+    *params.camera_state = MaterialGalleryCameraState::default();
 
     for entity in &params.sun_query {
         params.commands.entity(entity).despawn();
@@ -395,9 +435,14 @@ fn spawn_material_gallery(mut params: MaterialGallerySpawnParams) {
     ));
 
     if let Some(entity) = params.camera_query.iter().next() {
-        params.commands.entity(entity).insert(
-            Transform::from_xyz(-9.0, 12.0, 25.0).looking_at(Vec3::new(13.0, 1.1, 8.0), Vec3::Y),
-        );
+        let eye = Vec3::new(-9.0, 12.0, 25.0);
+        let target = Vec3::new(13.0, 1.1, 8.0);
+        params.camera_state.align_to_view(eye, target);
+        params.camera_state.initialized = true;
+        params
+            .commands
+            .entity(entity)
+            .insert(Transform::from_translation(eye).looking_at(target, Vec3::Y));
     }
 
     tracing::info!(
@@ -608,6 +653,14 @@ fn handle_material_gallery_input(
     }
 }
 
+fn lock_material_gallery_cursor(mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    let Some(mut cursor_options) = cursor_query.iter_mut().next() else {
+        return;
+    };
+    cursor_options.visible = false;
+    cursor_options.grab_mode = CursorGrabMode::Locked;
+}
+
 fn apply_material_gallery_lighting(
     state: Res<MaterialGalleryState>,
     mut clear_color: ResMut<ClearColor>,
@@ -678,8 +731,12 @@ fn apply_material_gallery_lighting(
 
 fn focus_material_gallery_camera(
     state: Res<MaterialGalleryState>,
+    mut camera_state: ResMut<MaterialGalleryCameraState>,
     mut camera_query: Query<&mut Transform, With<WorldCamera>>,
 ) {
+    if camera_state.initialized && camera_state.focused_category == state.selected_category {
+        return;
+    }
     let Some(mut transform) = camera_query.iter_mut().next() else {
         return;
     };
@@ -692,8 +749,66 @@ fn focus_material_gallery_camera(
         })
         .map(|index| index as f32 * 1.6)
         .unwrap_or(6.0);
-    *transform = Transform::from_xyz(-8.0, 11.5, 20.0 + row_bias)
-        .looking_at(Vec3::new(12.0, 1.1, 8.0 + row_bias * 0.35), Vec3::Y);
+    let eye = Vec3::new(-8.0, 11.5, 20.0 + row_bias);
+    let target = Vec3::new(12.0, 1.1, 8.0 + row_bias * 0.35);
+    camera_state.align_to_view(eye, target);
+    camera_state.focused_category = state.selected_category;
+    camera_state.initialized = true;
+    *transform = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+}
+
+fn move_material_gallery_camera(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    mut camera_state: ResMut<MaterialGalleryCameraState>,
+    mut camera_query: Query<&mut Transform, With<WorldCamera>>,
+) {
+    let Some(mut transform) = camera_query.iter_mut().next() else {
+        return;
+    };
+
+    let mouse_delta = mouse_motion.delta;
+    if mouse_delta != Vec2::ZERO {
+        const LOOK_SENSITIVITY: f32 = 0.0023;
+        camera_state.yaw -= mouse_delta.x * LOOK_SENSITIVITY;
+        camera_state.pitch =
+            (camera_state.pitch - mouse_delta.y * LOOK_SENSITIVITY).clamp(-1.35, 1.2);
+    }
+    transform.rotation =
+        Quat::from_rotation_y(camera_state.yaw) * Quat::from_rotation_x(camera_state.pitch);
+
+    let forward = *transform.forward();
+    let right = *transform.right();
+    let mut movement = Vec3::ZERO;
+    if keys.pressed(KeyCode::KeyW) {
+        movement += forward;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        movement -= forward;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        movement += right;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        movement -= right;
+    }
+    if keys.pressed(KeyCode::Space) {
+        movement += Vec3::Y;
+    }
+    if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+        movement -= Vec3::Y;
+    }
+
+    if movement.length_squared() <= f32::EPSILON {
+        return;
+    }
+    let speed = if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+        18.0
+    } else {
+        7.0
+    };
+    transform.translation += movement.normalize() * speed * time.delta_secs();
 }
 
 fn cleanup_material_gallery(
