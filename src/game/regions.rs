@@ -49,6 +49,7 @@ pub struct RegionGraphState {
     pub discovered_gates: Vec<u64>,
     pub crossing: Option<GateCrossingState>,
     pub outpost: Option<RegionOutpostState>,
+    pub milestones: RegionJourneyMilestones,
 }
 
 impl RegionGraphState {
@@ -220,6 +221,86 @@ pub struct RegionOutpostState {
     pub arrival_radius: f32,
     pub discovered: bool,
     pub recorded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionJourneyMilestones {
+    pub town_edge: RegionMilestoneState,
+    pub loss_crossroad: RegionMilestoneState,
+    pub desert_road: RegionMilestoneState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionMilestoneState {
+    pub kind: RegionMilestoneKind,
+    pub region: RegionId,
+    pub center: Vec3,
+    pub arrival_radius: f32,
+    pub discovered: bool,
+    pub recorded: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum RegionMilestoneKind {
+    TownEdge,
+    LossCrossroad,
+    DesertRoad,
+}
+
+impl RegionMilestoneKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TownEdge => "集镇边缘",
+            Self::LossCrossroad => "失物路口",
+            Self::DesertRoad => "沙漠前路",
+        }
+    }
+
+    fn notebook_title(self) -> &'static str {
+        match self {
+            Self::TownEdge => "听见集镇",
+            Self::LossCrossroad => "失物路口",
+            Self::DesertRoad => "沙漠前路",
+        }
+    }
+
+    fn notebook_body(self) -> &'static str {
+        match self {
+            Self::TownEdge => {
+                "摊棚后的路开始宽起来，车辙、盐袋和陌生口音混在风里。城镇还没露面，买卖和旅费已经有了重量。"
+            }
+            Self::LossCrossroad => {
+                "路边有空箱、断绳和急促脚印。这里不像告诫，更像世界提前留下的一道裂缝。"
+            }
+            Self::DesertRoad => {
+                "山风变干，地上的草线断在砂砾前。金字塔仍不可及，但沙漠已经进入脚下这条路。"
+            }
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::TownEdge => "前方有摊声和车辙",
+            Self::LossCrossroad => "路边空箱留下阴影",
+            Self::DesertRoad => "干风带来沙的味道",
+        }
+    }
+}
+
+impl RegionJourneyMilestones {
+    pub fn next_hint(
+        &self,
+        current_region: RegionId,
+        outpost_discovered: bool,
+    ) -> Option<&'static str> {
+        if !outpost_discovered {
+            return None;
+        }
+        [&self.town_edge, &self.loss_crossroad, &self.desert_road]
+            .into_iter()
+            .find(|milestone| milestone.region == current_region && !milestone.discovered)
+            .map(|milestone| milestone.kind.hint())
+    }
 }
 
 #[derive(Debug, Component)]
@@ -506,6 +587,12 @@ pub fn build_region_graph(
         discovered_gates: Vec::new(),
         crossing: None,
         outpost: build_region_outpost(world_map, boundary_region, mountain_center),
+        milestones: build_region_milestones(
+            world_map,
+            boundary_region,
+            desert_region,
+            mountain_center,
+        ),
     }
 }
 
@@ -522,6 +609,52 @@ fn build_region_outpost(
         discovered: false,
         recorded: false,
     })
+}
+
+fn build_region_milestones(
+    world_map: &WorldMap,
+    boundary_region: RegionId,
+    desert_region: RegionId,
+    mountain_center: Vec3,
+) -> RegionJourneyMilestones {
+    RegionJourneyMilestones {
+        town_edge: RegionMilestoneState {
+            kind: RegionMilestoneKind::TownEdge,
+            region: boundary_region,
+            center: ground_position(
+                world_map,
+                mountain_center + Vec3::new(48.0, 0.0, -26.0),
+                0.0,
+            ),
+            arrival_radius: 24.0,
+            discovered: false,
+            recorded: false,
+        },
+        loss_crossroad: RegionMilestoneState {
+            kind: RegionMilestoneKind::LossCrossroad,
+            region: boundary_region,
+            center: ground_position(
+                world_map,
+                mountain_center + Vec3::new(92.0, 0.0, -66.0),
+                0.0,
+            ),
+            arrival_radius: 22.0,
+            discovered: false,
+            recorded: false,
+        },
+        desert_road: RegionMilestoneState {
+            kind: RegionMilestoneKind::DesertRoad,
+            region: desert_region,
+            center: ground_position(
+                world_map,
+                mountain_center + Vec3::new(138.0, 0.0, -118.0),
+                0.0,
+            ),
+            arrival_radius: 28.0,
+            discovered: false,
+            recorded: false,
+        },
+    }
 }
 
 fn update_transition_gate_state(
@@ -611,6 +744,12 @@ fn update_transition_gate_state(
             },
         );
     }
+    update_region_milestones(
+        &mut graph,
+        player_position,
+        time.elapsed_secs(),
+        notebook.as_deref_mut(),
+    );
     let mut nearest = None;
     let mut changed_gate_ids = Vec::new();
     let current_region = graph.current_region;
@@ -741,6 +880,96 @@ fn update_transition_gate_state(
     }
 }
 
+fn update_region_milestones(
+    graph: &mut RegionGraphState,
+    player_position: Vec3,
+    elapsed_seconds: f32,
+    mut notebook: Option<&mut NotebookState>,
+) {
+    let current_region = graph.current_region;
+    let mut reached = Vec::new();
+    if mark_milestone_reached(
+        &mut graph.milestones.town_edge,
+        current_region,
+        player_position,
+    ) {
+        reached.push(RegionMilestoneKind::TownEdge);
+    }
+    if mark_milestone_reached(
+        &mut graph.milestones.loss_crossroad,
+        current_region,
+        player_position,
+    ) {
+        reached.push(RegionMilestoneKind::LossCrossroad);
+    }
+    if mark_milestone_reached(
+        &mut graph.milestones.desert_road,
+        current_region,
+        player_position,
+    ) {
+        reached.push(RegionMilestoneKind::DesertRoad);
+    }
+
+    let region_label = graph
+        .region(current_region)
+        .map(|region| region.kind.label().to_string());
+    for kind in reached {
+        let _ = record_notebook_entry(
+            notebook.as_deref_mut(),
+            NotebookRecord {
+                kind: match kind {
+                    RegionMilestoneKind::TownEdge => NotebookEntryKind::Observation,
+                    RegionMilestoneKind::LossCrossroad | RegionMilestoneKind::DesertRoad => {
+                        NotebookEntryKind::JourneyEcho
+                    }
+                },
+                at_seconds: elapsed_seconds,
+                location: region_label
+                    .clone()
+                    .or_else(|| Some(kind.label().to_string())),
+                source: NotebookSource::Journey,
+                title: kind.notebook_title().to_string(),
+                body: kind.notebook_body().to_string(),
+                tags: milestone_notebook_tags(kind),
+            },
+        );
+        tracing::info!(
+            target: "dao_game::regions::milestone",
+            milestone = kind.label(),
+            region = region_label.as_deref(),
+            "region journey milestone reached"
+        );
+    }
+}
+
+fn mark_milestone_reached(
+    milestone: &mut RegionMilestoneState,
+    current_region: RegionId,
+    player_position: Vec3,
+) -> bool {
+    if milestone.recorded || milestone.region != current_region {
+        return false;
+    }
+    if milestone.discovered
+        || planar_distance(player_position, milestone.center) <= milestone.arrival_radius
+    {
+        milestone.discovered = true;
+        milestone.recorded = true;
+        return true;
+    }
+    false
+}
+
+fn milestone_notebook_tags(kind: RegionMilestoneKind) -> Vec<NotebookTag> {
+    match kind {
+        RegionMilestoneKind::TownEdge => vec![NotebookTag::Memory, NotebookTag::Merchant],
+        RegionMilestoneKind::LossCrossroad => vec![NotebookTag::Memory, NotebookTag::Omen],
+        RegionMilestoneKind::DesertRoad => {
+            vec![NotebookTag::Memory, NotebookTag::Omen, NotebookTag::Desert]
+        }
+    }
+}
+
 fn spawn_region_outpost(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -834,6 +1063,109 @@ fn spawn_region_outpost(
         .with_lod(ProceduralAssetLod::Near),
     );
     commands.entity(marker).insert(RegionOutpostVisual);
+
+    spawn_region_milestone_visuals(commands, meshes, materials, asset_config, graph);
+}
+
+fn spawn_region_milestone_visuals(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
+    graph: &RegionGraphState,
+) {
+    let town = &graph.milestones.town_edge;
+    let stall = spawn_procedural_asset_entity(
+        commands,
+        meshes,
+        materials,
+        asset_config,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::MarketStall,
+            8_420,
+            "TownEdgeTradeStall",
+            Transform::from_translation(town.center + Vec3::new(-2.5, 0.0, 1.6))
+                .with_scale(Vec3::splat(0.9))
+                .with_rotation(Quat::from_rotation_y(0.42)),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
+    commands.entity(stall).insert(RegionOutpostVisual);
+    for index in 0..5 {
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            asset_config,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::PathStone,
+                8_430 + index as u64,
+                "TownEdgeCartRuts",
+                Transform::from_translation(
+                    town.center + Vec3::new(index as f32 * 2.0 - 4.0, 0.0, -3.0),
+                )
+                .with_scale(Vec3::new(0.9, 0.5, 1.25)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert(RegionOutpostVisual);
+    }
+
+    let loss = &graph.milestones.loss_crossroad;
+    let marker = spawn_procedural_asset_entity(
+        commands,
+        meshes,
+        materials,
+        asset_config,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::HeadlandMarker,
+            8_520,
+            "LossCrossroadMarker",
+            Transform::from_translation(loss.center + Vec3::new(1.5, 0.0, -1.8))
+                .with_scale(Vec3::new(0.58, 0.7, 0.58))
+                .with_rotation(Quat::from_rotation_y(-0.55)),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
+    commands.entity(marker).insert(RegionOutpostVisual);
+    for index in 0..3 {
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            asset_config,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::PathStone,
+                8_530 + index as u64,
+                "LossCrossroadBrokenCrate",
+                Transform::from_translation(
+                    loss.center + Vec3::new(index as f32 * 1.7 - 1.7, 0.0, 2.4),
+                )
+                .with_scale(Vec3::new(0.7, 0.42, 0.58))
+                .with_rotation(Quat::from_rotation_y(index as f32 * 0.7)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert(RegionOutpostVisual);
+    }
+
+    let desert = &graph.milestones.desert_road;
+    let relic = spawn_procedural_asset_entity(
+        commands,
+        meshes,
+        materials,
+        asset_config,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::DesertRelic,
+            8_620,
+            "DesertRoadRelic",
+            Transform::from_translation(desert.center + Vec3::new(0.0, 0.0, -2.5))
+                .with_scale(Vec3::new(0.74, 0.74, 0.74))
+                .with_rotation(Quat::from_rotation_y(0.18)),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
+    commands.entity(relic).insert(RegionOutpostVisual);
 }
 
 fn update_transition_gate_visuals(

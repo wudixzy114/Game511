@@ -406,6 +406,9 @@ pub struct JourneyAdvanceContext {
     pub afterglow_cue: Option<AfterglowCueKind>,
     pub boundary_crossed: bool,
     pub outpost_reached: bool,
+    pub town_edge_reached: bool,
+    pub loss_crossroad_reached: bool,
+    pub desert_road_reached: bool,
 }
 
 const DEFAULT_ARRIVAL_RADIUS: f32 = 13.5;
@@ -539,6 +542,9 @@ fn advance_journey_session(
             afterglow_cue,
             boundary_crossed: region_context.0,
             outpost_reached: region_context.1,
+            town_edge_reached: region_context.2,
+            loss_crossroad_reached: region_context.3,
+            desert_road_reached: region_context.4,
         },
     );
 
@@ -795,13 +801,27 @@ fn advance_story_arc_state(
             if context.outpost_reached {
                 transition_story_stage(state, StoryArcStage::FarBankOutpost, events);
                 record_journey_memory(state, JourneyMemoryKind::OutpostArrival, context, events);
+            }
+        }
+        StoryArcStage::FarBankOutpost => {
+            if context.town_edge_reached {
+                transition_story_stage(state, StoryArcStage::TownPreparation, events);
                 record_journey_memory(state, JourneyMemoryKind::TownPreparation, context, events);
             }
         }
-        StoryArcStage::FarBankOutpost
-        | StoryArcStage::TownPreparation
-        | StoryArcStage::FirstLoss
-        | StoryArcStage::DesertDeparture => {}
+        StoryArcStage::TownPreparation => {
+            if context.loss_crossroad_reached {
+                transition_story_stage(state, StoryArcStage::FirstLoss, events);
+                record_journey_memory(state, JourneyMemoryKind::FirstLoss, context, events);
+            }
+        }
+        StoryArcStage::FirstLoss => {
+            if context.desert_road_reached {
+                transition_story_stage(state, StoryArcStage::DesertDeparture, events);
+                record_journey_memory(state, JourneyMemoryKind::DesertDeparture, context, events);
+            }
+        }
+        StoryArcStage::DesertDeparture => {}
     }
 }
 
@@ -1325,9 +1345,12 @@ fn village_context(village: Option<&VillageState>, player_position: Vec3) -> (bo
     (village_focus, leaving_village)
 }
 
-fn region_context(regions: Option<&RegionGraphState>, player_position: Vec3) -> (bool, bool) {
+fn region_context(
+    regions: Option<&RegionGraphState>,
+    player_position: Vec3,
+) -> (bool, bool, bool, bool, bool) {
     let Some(regions) = regions else {
-        return (false, false);
+        return (false, false, false, false, false);
     };
     let boundary_crossed = regions.gates.iter().any(|gate| {
         gate.kind == TransitionGateKind::MistRiverFord && gate.state == TransitionGateState::Crossed
@@ -1340,7 +1363,18 @@ fn region_context(regions: Option<&RegionGraphState>, player_position: Vec3) -> 
             && regions.current_region == outpost.region
             && planar_distance(player_position, outpost.center) <= outpost.arrival_radius
     });
-    (boundary_crossed, outpost_reached)
+    let milestone_reached = |milestone: &crate::game::regions::RegionMilestoneState| {
+        milestone.discovered
+            || (regions.current_region == milestone.region
+                && planar_distance(player_position, milestone.center) <= milestone.arrival_radius)
+    };
+    (
+        boundary_crossed,
+        outpost_reached,
+        milestone_reached(&regions.milestones.town_edge),
+        milestone_reached(&regions.milestones.loss_crossroad),
+        milestone_reached(&regions.milestones.desert_road),
+    )
 }
 
 fn afterglow_cue_from_ecology(ecology: Option<&EcologyState>) -> Option<AfterglowCueKind> {
@@ -1408,6 +1442,9 @@ mod tests {
             afterglow_cue: None,
             boundary_crossed: false,
             outpost_reached: false,
+            town_edge_reached: false,
+            loss_crossroad_reached: false,
+            desert_road_reached: false,
         }
     }
 
@@ -1881,7 +1918,87 @@ mod tests {
             state
                 .memories
                 .iter()
+                .any(|memory| memory.kind == JourneyMemoryKind::OutpostArrival)
+        );
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 0.5,
+                boundary_crossed: true,
+                outpost_reached: true,
+                town_edge_reached: true,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::TownPreparation);
+        assert!(
+            state
+                .memories
+                .iter()
                 .any(|memory| memory.kind == JourneyMemoryKind::TownPreparation)
+        );
+    }
+
+    #[test]
+    fn town_loss_and_desert_stages_follow_world_milestones() {
+        let mut state = JourneyState {
+            story_stage: StoryArcStage::FarBankOutpost,
+            dream: super::DreamState {
+                phase: DreamPhase::Afterglow,
+                echo_strength: 0.62,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let idle_events = advance_journey_state(&mut state, context(0.5, None, false));
+        assert_eq!(state.story_stage, StoryArcStage::FarBankOutpost);
+        assert!(idle_events.iter().all(|event| {
+            !matches!(
+                event,
+                JourneyEvent::StoryStageChanged {
+                    to: StoryArcStage::TownPreparation,
+                    ..
+                }
+            )
+        }));
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 0.5,
+                town_edge_reached: true,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::TownPreparation);
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 0.5,
+                loss_crossroad_reached: true,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::FirstLoss);
+
+        advance_journey_state(
+            &mut state,
+            JourneyAdvanceContext {
+                delta_seconds: 0.5,
+                desert_road_reached: true,
+                ..context(0.0, None, false)
+            },
+        );
+        assert_eq!(state.story_stage, StoryArcStage::DesertDeparture);
+        assert!(
+            state
+                .memories
+                .iter()
+                .any(|memory| memory.kind == JourneyMemoryKind::DesertDeparture
+                    && !memory.text.contains("任务"))
         );
     }
 

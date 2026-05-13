@@ -15,7 +15,7 @@ use crate::game::{
     notebook::{NotebookEntry, NotebookEntryKind, NotebookState, format_notebook_entry_line},
     places::{MeaningfulPlaces, PlaceKind, planar_distance},
     player::{CameraMode, FirstPersonState},
-    regions::RegionGraphState,
+    regions::{RegionGraphState, RegionMilestoneKind},
     signs::{OmenGuidancePhase, OmenKind, SignState},
     village::{HerdingPhase, VillageState},
     world::{BiomeKind, WandererPrototype, WorldCycle, WorldMap},
@@ -1585,14 +1585,26 @@ fn formal_journey_hint(
         if perception.is_some_and(|perception| perception.active) {
             return "梦中的金色斜面短暂清晰。".to_string();
         }
+        match journey.story_stage {
+            StoryArcStage::FarBankOutpost => {
+                return "雾后已有歇脚地，车辙和摊声把城镇带近了一点。".to_string();
+            }
+            StoryArcStage::TownPreparation => {
+                return "买卖、旅费和陌生人的判断，开始成为路的一部分。".to_string();
+            }
+            StoryArcStage::FirstLoss => {
+                return "失去没有把路截断，它把另一种理解留在路口。".to_string();
+            }
+            StoryArcStage::DesertDeparture => {
+                return "草线已经断在砂砾前，沙漠的方向更清楚了。".to_string();
+            }
+            _ => {}
+        }
         if let Some(cue) = journey.afterglow.cue {
             return format!("{}：{}", cue.label(), cue.hint());
         }
         if journey.afterglow.unanswered_seconds > 18.0 || journey.dream.echo_strength < 0.22 {
             return "梦醒后的回声正在变轻，风仍在等你重新看向村外。".to_string();
-        }
-        if journey.story_stage == StoryArcStage::FarBankOutpost {
-            return "雾后已有歇脚地，城镇的气息在更远处。".to_string();
         }
         return "梦醒后，风仍带着沙的气味。".to_string();
     }
@@ -1745,6 +1757,19 @@ fn gate_status_hint(regions: &RegionGraphState) -> String {
     if let Some(crossing) = regions.crossing.as_ref() {
         return format!("正在穿过{}", crossing.gate_kind.label());
     }
+    if let Some(hint) = regions.outpost.as_ref().and_then(|outpost| {
+        regions
+            .milestones
+            .next_hint(regions.current_region, outpost.discovered)
+    }) {
+        return hint.to_string();
+    }
+    if regions.milestones.town_edge.discovered && !regions.milestones.loss_crossroad.discovered {
+        return RegionMilestoneKind::LossCrossroad.hint().to_string();
+    }
+    if regions.milestones.loss_crossroad.discovered && !regions.milestones.desert_road.discovered {
+        return RegionMilestoneKind::DesertRoad.hint().to_string();
+    }
     regions
         .nearest_gate
         .map(|gate| {
@@ -1769,7 +1794,8 @@ mod tests {
         notebook::{NotebookEntryKind, NotebookSource, NotebookState},
         regions::{
             GateProximity, RegionBiomeBias, RegionBoundaryKind, RegionGraphState, RegionId,
-            RegionKind, RegionProfile, RegionWeatherBias, TransitionCondition, TransitionGate,
+            RegionJourneyMilestones, RegionKind, RegionMilestoneKind, RegionMilestoneState,
+            RegionProfile, RegionWeatherBias, TransitionCondition, TransitionGate,
             TransitionGateKind, TransitionGateState, WorldRegion,
         },
         signs::OmenKind,
@@ -1959,6 +1985,11 @@ mod tests {
             discovered_gates: Vec::new(),
             crossing: None,
             outpost: None,
+            milestones: RegionJourneyMilestones {
+                town_edge: test_milestone(RegionMilestoneKind::TownEdge, RegionId(2)),
+                loss_crossroad: test_milestone(RegionMilestoneKind::LossCrossroad, RegionId(2)),
+                desert_road: test_milestone(RegionMilestoneKind::DesertRoad, RegionId(2)),
+            },
         };
         let gate = gate_status_hint(&graph);
         assert!(gate.contains("雾河"));
@@ -1981,6 +2012,17 @@ mod tests {
                 danger: 0.1,
                 exploration_value: 0.4,
             },
+        }
+    }
+
+    fn test_milestone(kind: RegionMilestoneKind, region: RegionId) -> RegionMilestoneState {
+        RegionMilestoneState {
+            kind,
+            region,
+            center: bevy::prelude::Vec3::ZERO,
+            arrival_radius: 20.0,
+            discovered: false,
+            recorded: false,
         }
     }
 }

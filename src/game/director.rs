@@ -475,6 +475,48 @@ pub fn deterministic_director(input: &DirectorInput) -> DirectorOutput {
             text: "路边空箱和凌乱脚印可以提前埋下失去的影子。".to_string(),
         });
     }
+    if input.story_stage == StoryArcStage::TownPreparation.label() {
+        suggestions.push(DirectorSuggestion {
+            kind: DirectorSuggestionKind::Dialogue,
+            semantic_tags: vec![
+                "town".to_string(),
+                "merchant".to_string(),
+                "trade".to_string(),
+            ],
+            strength: 0.64,
+            duration_seconds: 8.0,
+            precondition: DirectorPrecondition::RegionKnown,
+            text: "摊主闲谈可以让旅费、信任和城镇规矩变得可感。".to_string(),
+        });
+        suggestions.push(DirectorSuggestion {
+            kind: DirectorSuggestionKind::Place,
+            semantic_tags: vec!["loss".to_string(), "threshold".to_string()],
+            strength: 0.58,
+            duration_seconds: 7.0,
+            precondition: DirectorPrecondition::RegionKnown,
+            text: "路口的空箱、断绳和车辙可以成为失去将至的地点记忆。".to_string(),
+        });
+    }
+    if input.story_stage == StoryArcStage::FirstLoss.label() {
+        suggestions.push(DirectorSuggestion {
+            kind: DirectorSuggestionKind::EnvironmentResponse,
+            semantic_tags: vec!["loss".to_string(), "desert".to_string(), "wind".to_string()],
+            strength: 0.7,
+            duration_seconds: 7.0,
+            precondition: DirectorPrecondition::RegionKnown,
+            text: "干风可以从路口吹来，让失去后的方向不再像惩罚。".to_string(),
+        });
+    }
+    if input.story_stage == StoryArcStage::DesertDeparture.label() {
+        suggestions.push(DirectorSuggestion {
+            kind: DirectorSuggestionKind::Omen,
+            semantic_tags: vec!["desert".to_string(), "pyramid".to_string()],
+            strength: 0.76,
+            duration_seconds: 9.0,
+            precondition: DirectorPrecondition::RegionKnown,
+            text: "砂砾和远光可以把金字塔重新带回旅人的视野边缘。".to_string(),
+        });
+    }
     if input.pyramid_visible {
         suggestions.push(DirectorSuggestion {
             kind: DirectorSuggestionKind::Place,
@@ -714,5 +756,42 @@ mod tests {
             suggestion.semantic_tags.iter().any(|tag| tag == "loss")
                 && !suggestion.text.contains("任务")
         }));
+    }
+
+    #[test]
+    fn deterministic_director_extends_town_loss_and_desert_hooks() {
+        for (stage, expected_tag) in [
+            (
+                crate::game::journey::StoryArcStage::TownPreparation,
+                "trade",
+            ),
+            (crate::game::journey::StoryArcStage::FirstLoss, "loss"),
+            (
+                crate::game::journey::StoryArcStage::DesertDeparture,
+                "pyramid",
+            ),
+        ] {
+            let input = DirectorInput {
+                player_position: [0.0, 0.0, 0.0],
+                current_region: Some("山地边界".to_string()),
+                story_stage: stage.label().to_string(),
+                dream_phase: DreamPhase::Afterglow.label().to_string(),
+                dominant_intent: None,
+                known_places: Vec::new(),
+                notebook_summary: Vec::new(),
+                pyramid_visible: false,
+                ecology_signal: None,
+            };
+
+            let output = deterministic_director(&input);
+
+            assert!(output.suggestions.iter().any(|suggestion| {
+                suggestion
+                    .semantic_tags
+                    .iter()
+                    .any(|tag| tag == expected_tag)
+                    && !suggestion.text.contains("任务")
+            }));
+        }
     }
 }

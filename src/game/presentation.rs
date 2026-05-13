@@ -120,6 +120,9 @@ enum PresentationVisualSample {
     DreamAfterSeaWind,
     BoundaryCrossing,
     FarBankArrival,
+    TownPreparation,
+    FirstLoss,
+    DesertDeparture,
     MistBoundary,
     SandstormPyramid,
     OasisRuins,
@@ -144,6 +147,9 @@ impl PresentationVisualSample {
             Self::DreamAfterSeaWind => "dream-after-sea-wind",
             Self::BoundaryCrossing => "boundary-crossing",
             Self::FarBankArrival => "far-bank-arrival",
+            Self::TownPreparation => "town-preparation",
+            Self::FirstLoss => "first-loss",
+            Self::DesertDeparture => "desert-departure",
             Self::MistBoundary => "mist-boundary",
             Self::SandstormPyramid => "sandstorm-pyramid",
             Self::OasisRuins => "oasis-ruins",
@@ -193,6 +199,9 @@ enum PresentationJourneyStep {
     Boundary,
     BoundaryCrossing,
     FarBankArrival,
+    TownPreparation,
+    FirstLoss,
+    DesertDeparture,
     DesertPyramid,
     Ecology,
     ThirdPerson,
@@ -1049,12 +1058,93 @@ fn build_region_scenes(regions: &RegionGraphState, world_map: &WorldMap) -> Vec<
                         .with_camera_drift(Vec3::new(2.0, 0.1, -2.0)),
                     );
                 }
+                scenes.extend(build_town_milestone_scenes(regions, world_map));
                 scenes
             } else {
                 vec![scene]
             }
         })
         .collect()
+}
+
+fn build_town_milestone_scenes(
+    regions: &RegionGraphState,
+    world_map: &WorldMap,
+) -> Vec<PresentationScene> {
+    let town = &regions.milestones.town_edge;
+    let loss = &regions.milestones.loss_crossroad;
+    let desert = &regions.milestones.desert_road;
+    vec![
+        build_journey_scene(
+            "Town Preparation",
+            "trade traces and wider road stage the first town-preparation beat without a quest board",
+            town.center + Vec3::new(-7.0, 0.0, 5.5),
+            town.center + Vec3::new(1.0, 1.1, 0.2),
+            world_map,
+            Vec3::new(-8.0, 4.5, 8.0),
+            0.33,
+            WeatherKind::Clear,
+            Some(OmenKind::DawnLight),
+            PresentationJourneyStep::TownPreparation,
+        )
+        .with_visual_sample(
+            PresentationVisualSample::TownPreparation,
+            CameraMode::ThirdPerson,
+            CompositionGuide {
+                foreground: "cart ruts and footpath widening away from the outpost",
+                midground: "trade stall and traveler-scale preparation space",
+                background: "ridge road implying a larger town beyond sight",
+                quality_gate: "preparation reads through world objects, not explicit objective UI",
+            },
+        )
+        .with_camera_drift(Vec3::new(1.4, 0.0, -1.2)),
+        build_journey_scene(
+            "First Loss",
+            "broken crates and scattered tracks form the first-loss foreshadowing point",
+            loss.center + Vec3::new(-5.5, 0.0, 4.0),
+            loss.center + Vec3::new(0.8, 1.0, -0.4),
+            world_map,
+            Vec3::new(-7.2, 4.0, 6.8),
+            0.42,
+            WeatherKind::Storm,
+            Some(OmenKind::SummitCall),
+            PresentationJourneyStep::FirstLoss,
+        )
+        .with_visual_sample(
+            PresentationVisualSample::FirstLoss,
+            CameraMode::FirstPerson,
+            CompositionGuide {
+                foreground: "empty crate, broken rope and hard-edged road dust",
+                midground: "crossroad marker with no explicit warning sign",
+                background: "road continuing despite the loss beat",
+                quality_gate: "loss feels like an event seed in the world, not a punishment screen",
+            },
+        )
+        .with_camera_drift(Vec3::new(0.8, 0.0, -1.0)),
+        build_journey_scene(
+            "Desert Departure",
+            "grass gives way to dry ground as the route begins to face the desert",
+            desert.center + Vec3::new(-8.0, 0.0, 6.5),
+            desert.center + Vec3::new(1.2, 1.0, -2.0),
+            world_map,
+            Vec3::new(-9.5, 4.8, 8.0),
+            0.58,
+            WeatherKind::Sandstorm,
+            Some(OmenKind::DawnLight),
+            PresentationJourneyStep::DesertDeparture,
+        )
+        .with_visual_sample(
+            PresentationVisualSample::DesertDeparture,
+            CameraMode::ThirdPerson,
+            CompositionGuide {
+                foreground: "traveler on the last rough path before sand",
+                midground: "small relic and thinning grass line",
+                background: "dry haze and desert-facing ridge",
+                quality_gate: "desert departure reads as a gradual biome threshold",
+            },
+        )
+        .with_camera_drift(Vec3::new(2.2, 0.0, -1.8)),
+    ]
 }
 
 fn build_director_scenes(
@@ -1365,6 +1455,9 @@ fn drive_journey_showcase(
             | PresentationJourneyStep::Boundary
             | PresentationJourneyStep::BoundaryCrossing
             | PresentationJourneyStep::FarBankArrival
+            | PresentationJourneyStep::TownPreparation
+            | PresentationJourneyStep::FirstLoss
+            | PresentationJourneyStep::DesertDeparture
             | PresentationJourneyStep::DesertPyramid
             | PresentationJourneyStep::Ecology
             | PresentationJourneyStep::ThirdPerson
@@ -1429,6 +1522,33 @@ fn drive_journey_showcase(
                 signs.current_omen = Some(OmenKind::DawnLight);
                 signs.omen_intensity = signs.omen_intensity.max(0.64);
             }
+            PresentationJourneyStep::TownPreparation => {
+                journey.story_stage = StoryArcStage::TownPreparation;
+                journey.dream.phase = DreamPhase::Afterglow;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 0.56;
+                signs.omen_triggered = true;
+                signs.current_omen = Some(OmenKind::StillWater);
+                signs.omen_intensity = signs.omen_intensity.max(0.56);
+            }
+            PresentationJourneyStep::FirstLoss => {
+                journey.story_stage = StoryArcStage::FirstLoss;
+                journey.dream.phase = DreamPhase::Afterglow;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 0.5;
+                signs.omen_triggered = true;
+                signs.current_omen = Some(OmenKind::SummitCall);
+                signs.omen_intensity = signs.omen_intensity.max(0.6);
+            }
+            PresentationJourneyStep::DesertDeparture => {
+                journey.story_stage = StoryArcStage::DesertDeparture;
+                journey.dream.phase = DreamPhase::Afterglow;
+                journey.dream.seen_pyramid = true;
+                journey.dream.echo_strength = 0.7;
+                signs.omen_triggered = true;
+                signs.current_omen = Some(OmenKind::DawnLight);
+                signs.omen_intensity = signs.omen_intensity.max(0.7);
+            }
             _ => {}
         }
         return;
@@ -1444,6 +1564,9 @@ fn drive_journey_showcase(
         | PresentationJourneyStep::Boundary
         | PresentationJourneyStep::BoundaryCrossing
         | PresentationJourneyStep::FarBankArrival
+        | PresentationJourneyStep::TownPreparation
+        | PresentationJourneyStep::FirstLoss
+        | PresentationJourneyStep::DesertDeparture
         | PresentationJourneyStep::DesertPyramid
         | PresentationJourneyStep::Ecology
         | PresentationJourneyStep::ThirdPerson
@@ -1576,6 +1699,9 @@ fn presentation_context(
         afterglow_cue: None,
         boundary_crossed: false,
         outpost_reached: false,
+        town_edge_reached: false,
+        loss_crossroad_reached: false,
+        desert_road_reached: false,
     }
 }
 
@@ -1616,9 +1742,9 @@ mod tests {
             },
             regions::{
                 GateProximity, RegionBiomeBias, RegionBoundaryKind, RegionGraphState, RegionId,
-                RegionKind, RegionOutpostState, RegionProfile, RegionWeatherBias,
-                TransitionCondition, TransitionGate, TransitionGateKind, TransitionGateState,
-                WorldRegion,
+                RegionJourneyMilestones, RegionKind, RegionMilestoneKind, RegionMilestoneState,
+                RegionOutpostState, RegionProfile, RegionWeatherBias, TransitionCondition,
+                TransitionGate, TransitionGateKind, TransitionGateState, WorldRegion,
             },
             signs::OmenKind,
             world::{BiomeKind, WorldGridCoord, WorldMap},
@@ -1898,6 +2024,38 @@ mod tests {
                 discovered: true,
                 recorded: false,
             }),
+            milestones: RegionJourneyMilestones {
+                town_edge: test_milestone(
+                    RegionMilestoneKind::TownEdge,
+                    boundary,
+                    Vec3::new(48.0, 0.0, -116.0),
+                ),
+                loss_crossroad: test_milestone(
+                    RegionMilestoneKind::LossCrossroad,
+                    boundary,
+                    Vec3::new(92.0, 0.0, -156.0),
+                ),
+                desert_road: test_milestone(
+                    RegionMilestoneKind::DesertRoad,
+                    boundary,
+                    Vec3::new(138.0, 0.0, -208.0),
+                ),
+            },
+        }
+    }
+
+    fn test_milestone(
+        kind: RegionMilestoneKind,
+        region: RegionId,
+        center: Vec3,
+    ) -> RegionMilestoneState {
+        RegionMilestoneState {
+            kind,
+            region,
+            center,
+            arrival_radius: 20.0,
+            discovered: false,
+            recorded: false,
         }
     }
 
