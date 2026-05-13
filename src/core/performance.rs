@@ -34,19 +34,24 @@ pub enum PerformancePhase {
     Director,
     Ecology,
     Environment,
+    Intent,
+    Journey,
     Landmarks,
     MaterialGallery,
     MaterialGeneration,
     MaterialUpload,
+    Places,
     PhysicsBroadPhase,
     PhysicsColliderStreaming,
     PhysicsNarrowPhase,
     PhysicsQuery,
     PhysicsSolver,
     Presentation,
+    Regions,
     Player,
     Signs,
     Ui,
+    Village,
     WorldCollision,
     WorldImpostor,
     WorldStreaming,
@@ -54,24 +59,29 @@ pub enum PerformancePhase {
 }
 
 impl PerformancePhase {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 26] = [
         Self::Assets,
         Self::Director,
         Self::Ecology,
         Self::Environment,
+        Self::Intent,
+        Self::Journey,
         Self::Landmarks,
         Self::MaterialGallery,
         Self::MaterialGeneration,
         Self::MaterialUpload,
+        Self::Places,
         Self::PhysicsBroadPhase,
         Self::PhysicsColliderStreaming,
         Self::PhysicsNarrowPhase,
         Self::PhysicsQuery,
         Self::PhysicsSolver,
         Self::Presentation,
+        Self::Regions,
         Self::Player,
         Self::Signs,
         Self::Ui,
+        Self::Village,
         Self::WorldCollision,
         Self::WorldImpostor,
         Self::WorldStreaming,
@@ -84,19 +94,24 @@ impl PerformancePhase {
             Self::Director => "director",
             Self::Ecology => "ecology",
             Self::Environment => "environment",
+            Self::Intent => "intent",
+            Self::Journey => "journey",
             Self::Landmarks => "landmarks",
             Self::MaterialGallery => "material_gallery",
             Self::MaterialGeneration => "material_generation",
             Self::MaterialUpload => "material_upload",
+            Self::Places => "places",
             Self::PhysicsBroadPhase => "physics_broad_phase",
             Self::PhysicsColliderStreaming => "physics_collider_streaming",
             Self::PhysicsNarrowPhase => "physics_narrow_phase",
             Self::PhysicsQuery => "physics_query",
             Self::PhysicsSolver => "physics_solver",
             Self::Presentation => "presentation",
+            Self::Regions => "regions",
             Self::Player => "player",
             Self::Signs => "signs",
             Self::Ui => "ui",
+            Self::Village => "village",
             Self::WorldCollision => "world_collision",
             Self::WorldImpostor => "world_impostor",
             Self::WorldStreaming => "world_streaming",
@@ -289,12 +304,15 @@ pub fn track_frame_timing(
         let director_ms = performance.previous_frame_phase_ms(PerformancePhase::Director);
         let ecology_ms = performance.previous_frame_phase_ms(PerformancePhase::Ecology);
         let landmarks_ms = performance.previous_frame_phase_ms(PerformancePhase::Landmarks);
+        let intent_ms = performance.previous_frame_phase_ms(PerformancePhase::Intent);
+        let journey_ms = performance.previous_frame_phase_ms(PerformancePhase::Journey);
         let material_gallery_ms =
             performance.previous_frame_phase_ms(PerformancePhase::MaterialGallery);
         let material_generation_ms =
             performance.previous_frame_phase_ms(PerformancePhase::MaterialGeneration);
         let material_upload_ms =
             performance.previous_frame_phase_ms(PerformancePhase::MaterialUpload);
+        let places_ms = performance.previous_frame_phase_ms(PerformancePhase::Places);
         let physics_broad_phase_ms =
             performance.previous_frame_phase_ms(PerformancePhase::PhysicsBroadPhase);
         let physics_collider_streaming_ms =
@@ -305,9 +323,11 @@ pub fn track_frame_timing(
         let physics_solver_ms =
             performance.previous_frame_phase_ms(PerformancePhase::PhysicsSolver);
         let presentation_ms = performance.previous_frame_phase_ms(PerformancePhase::Presentation);
+        let regions_ms = performance.previous_frame_phase_ms(PerformancePhase::Regions);
         let player_ms = performance.previous_frame_phase_ms(PerformancePhase::Player);
         let signs_ms = performance.previous_frame_phase_ms(PerformancePhase::Signs);
         let ui_ms = performance.previous_frame_phase_ms(PerformancePhase::Ui);
+        let village_ms = performance.previous_frame_phase_ms(PerformancePhase::Village);
         let world_collision_ms =
             performance.previous_frame_phase_ms(PerformancePhase::WorldCollision);
         let world_impostor_ms =
@@ -333,19 +353,24 @@ pub fn track_frame_timing(
             director_ms = director_ms,
             ecology_ms = ecology_ms,
             environment_ms = environment_ms,
+            intent_ms = intent_ms,
+            journey_ms = journey_ms,
             landmarks_ms = landmarks_ms,
             material_gallery_ms = material_gallery_ms,
             material_generation_ms = material_generation_ms,
             material_upload_ms = material_upload_ms,
+            places_ms = places_ms,
             physics_broad_phase_ms = physics_broad_phase_ms,
             physics_collider_streaming_ms = physics_collider_streaming_ms,
             physics_narrow_phase_ms = physics_narrow_phase_ms,
             physics_query_ms = physics_query_ms,
             physics_solver_ms = physics_solver_ms,
             presentation_ms = presentation_ms,
+            regions_ms = regions_ms,
             player_ms = player_ms,
             signs_ms = signs_ms,
             ui_ms = ui_ms,
+            village_ms = village_ms,
             world_collision_ms = world_collision_ms,
             world_impostor_ms = world_impostor_ms,
             world_streaming_ms = world_streaming_ms,

@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use bevy::{
     color::LinearRgba,
     light::NotShadowCaster,
@@ -6,10 +8,13 @@ use bevy::{
     prelude::*,
 };
 
-use crate::game::{
-    flow::{AppScreen, InGameState},
-    world::{
-        BiomeKind, TerrainTile, WandererPrototype, WorldGridCoord, WorldMap, WorldShowcaseSpots,
+use crate::{
+    core::performance::{FramePerformance, PerformancePhase},
+    game::{
+        flow::{AppScreen, InGameState},
+        world::{
+            BiomeKind, TerrainTile, WandererPrototype, WorldGridCoord, WorldMap, WorldShowcaseSpots,
+        },
     },
 };
 
@@ -130,6 +135,7 @@ impl Default for PlaceSearchConfig {
 #[derive(Debug, Component)]
 struct MeaningfulPlaceEntity;
 
+#[allow(clippy::too_many_arguments)]
 fn initialize_meaningful_places(
     mut commands: Commands,
     world_map: Option<Res<WorldMap>>,
@@ -138,6 +144,7 @@ fn initialize_meaningful_places(
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     if existing_places.is_some() {
         return;
@@ -145,6 +152,7 @@ fn initialize_meaningful_places(
     let Some(world_map) = world_map else {
         return;
     };
+    let started_at = Instant::now();
     let origin = wanderer_query
         .iter()
         .next()
@@ -187,11 +195,15 @@ fn initialize_meaningful_places(
     for place in &places {
         spawn_place_visual(&mut commands, &mut meshes, &materials, place);
     }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Places, started_at.elapsed());
+    }
 }
 
 fn update_place_proximity(
     places: Option<ResMut<MeaningfulPlaces>>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let Some(mut places) = places else {
         return;
@@ -199,10 +211,14 @@ fn update_place_proximity(
     let Some(transform) = wanderer_query.iter().next() else {
         return;
     };
+    let started_at = Instant::now();
     let nearest = nearest_place(&places.places, transform.translation)
         .map(|(place, distance)| (place.id, distance));
     places.nearest_place_id = nearest.map(|(id, _)| id);
     places.nearest_distance = nearest.map(|(_, distance)| distance);
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Places, started_at.elapsed());
+    }
 }
 
 fn cleanup_places_session(mut commands: Commands) {

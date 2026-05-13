@@ -1,26 +1,31 @@
+use std::time::Instant;
+
 use bevy::{
     color::LinearRgba,
     pbr::{MeshMaterial3d, StandardMaterial},
     prelude::*,
 };
 
-use crate::game::{
-    assets::{
-        AssetPresentationAnchor, ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod,
-        ProceduralAssetMaterials, ProceduralSpawnRequest, spawn_procedural_asset,
-        spawn_procedural_asset_entity,
+use crate::{
+    core::performance::{FramePerformance, PerformancePhase},
+    game::{
+        assets::{
+            AssetPresentationAnchor, ProceduralAnimationRole, ProceduralAssetKind,
+            ProceduralAssetLod, ProceduralAssetMaterials, ProceduralSpawnRequest,
+            spawn_procedural_asset, spawn_procedural_asset_entity,
+        },
+        ecology::{AnimalBehavior, AnimalFlockState, AnimalKind, EcologyState},
+        environment::{EnvironmentSnapshot, WeatherKind, WindField},
+        flow::{AppScreen, InGameState},
+        intent::{IntentState, apply_village_dialogue_intent},
+        journey::{DreamPhase, JourneyState},
+        notebook::{
+            NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
+            record_notebook_entry,
+        },
+        places::planar_distance,
+        world::{WandererPrototype, WorldCamera, WorldMap, WorldShowcaseSpots},
     },
-    ecology::{AnimalBehavior, AnimalFlockState, AnimalKind, EcologyState},
-    environment::{EnvironmentSnapshot, WeatherKind, WindField},
-    flow::{AppScreen, InGameState},
-    intent::{IntentState, apply_village_dialogue_intent},
-    journey::{DreamPhase, JourneyState},
-    notebook::{
-        NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
-        record_notebook_entry,
-    },
-    places::planar_distance,
-    world::{WandererPrototype, WorldCamera, WorldMap, WorldShowcaseSpots},
 };
 
 pub struct VillagePlugin;
@@ -36,11 +41,13 @@ type VillageVisualMaterialQuery<'w, 's> = Query<
     's,
     (
         Entity,
-        &'static VillageVisualPartKind,
         &'static MeshMaterial3d<StandardMaterial>,
-        Option<&'static VillageMaterialOverride>,
+        &'static VillageMaterialOverride,
     ),
-    Without<WandererPrototype>,
+    (
+        Without<WandererPrototype>,
+        With<VillageMaterialOverridePending>,
+    ),
 >;
 type VillageVisualRuntimeMaterialQuery<'w, 's> = Query<
     'w,
@@ -270,6 +277,7 @@ struct VillageActor {
 #[derive(Debug, Component, Clone, Copy, PartialEq)]
 struct VillageAnimatedPart {
     actor_id: Option<u64>,
+    actor_kind: Option<VillageActorKind>,
     role: ProceduralAnimationRole,
     base_translation: Vec3,
     base_rotation: Quat,
@@ -294,6 +302,9 @@ enum VillageVisualPartKind {
 struct VillageMaterialOverride {
     original: Handle<StandardMaterial>,
 }
+
+#[derive(Debug, Component)]
+struct VillageMaterialOverridePending;
 
 #[derive(Debug, Component, Clone, Copy, PartialEq)]
 pub struct VillageCollider {
@@ -471,7 +482,9 @@ fn update_village_atmosphere(
     wind_field: Res<WindField>,
     journey: Option<Res<JourneyState>>,
     mut atmosphere: ResMut<VillageAtmosphere>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
+    let started_at = Instant::now();
     let dream_afterglow = journey
         .as_deref()
         .filter(|journey| journey.dream.phase == DreamPhase::Afterglow)
@@ -569,6 +582,9 @@ fn update_village_atmosphere(
         );
     }
     *atmosphere = next;
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
+    }
 }
 
 fn bootstrap_player_to_village(
@@ -1314,7 +1330,7 @@ fn spawn_village_actors(
                     Vec2::new(position.x, position.z),
                     0.52,
                 ));
-                tag_village_actor_parts(commands, entity, actor.id);
+                tag_village_actor_parts(commands, entity, actor.id, actor.kind);
             }
             VillageActorKind::Shepherd | VillageActorKind::Merchant => {
                 let asset_kind = match actor.kind {
@@ -1347,19 +1363,31 @@ fn spawn_village_actors(
                     Vec2::new(position.x, position.z),
                     0.48,
                 ));
-                tag_village_actor_parts(commands, entity, actor.id);
+                tag_village_actor_parts(commands, entity, actor.id, actor.kind);
             }
         }
     }
 }
 
-fn sync_village_collider_centers(mut query: Query<(&Transform, &mut VillageCollider)>) {
+fn sync_village_collider_centers(
+    mut query: Query<(&Transform, &mut VillageCollider)>,
+    performance: Option<ResMut<FramePerformance>>,
+) {
+    let started_at = Instant::now();
     for (transform, mut collider) in &mut query {
         collider.center = Vec2::new(transform.translation.x, transform.translation.z);
     }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
+    }
 }
 
-fn tag_village_actor_parts(commands: &mut Commands, root: Entity, actor_id: u64) {
+fn tag_village_actor_parts(
+    commands: &mut Commands,
+    root: Entity,
+    actor_id: u64,
+    actor_kind: VillageActorKind,
+) {
     commands.queue(move |world: &mut World| {
         let placeholder_enabled = world
             .get::<AssetPresentationAnchor>(root)
@@ -1382,6 +1410,7 @@ fn tag_village_actor_parts(commands: &mut Commands, root: Entity, actor_id: u64)
             };
             world.entity_mut(child).insert(VillageAnimatedPart {
                 actor_id: Some(actor_id),
+                actor_kind: Some(actor_kind),
                 role,
                 base_translation: transform.translation,
                 base_rotation: transform.rotation,
@@ -1429,6 +1458,7 @@ fn tag_village_ambient_parts(commands: &mut Commands, root: Entity) {
                 let mut entity = world.entity_mut(child);
                 entity.insert(VillageAnimatedPart {
                     actor_id: None,
+                    actor_kind: None,
                     role,
                     base_translation: transform.translation,
                     base_rotation: transform.rotation,
@@ -1437,7 +1467,10 @@ fn tag_village_ambient_parts(commands: &mut Commands, root: Entity) {
                 if let Some(kind) = village_part_kind(part_name.as_str()) {
                     entity.insert(kind);
                     if let Some(handle) = original_material.clone() {
-                        entity.insert(VillageMaterialOverride { original: handle });
+                        entity.insert((
+                            VillageMaterialOverride { original: handle },
+                            VillageMaterialOverridePending,
+                        ));
                     }
                 }
             }
@@ -1452,10 +1485,12 @@ fn update_village_actor_behavior(
     ecology: Option<Res<EcologyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut actor_query: Query<(&VillageActor, &mut Transform), Without<WandererPrototype>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let Some(world_map) = world_map else {
         return;
     };
+    let started_at = Instant::now();
     let player_position = player_query
         .iter()
         .next()
@@ -1489,24 +1524,25 @@ fn update_village_actor_behavior(
             }
         }
     }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
+    }
 }
 
 fn animate_village_asset_parts(
     time: Res<Time>,
     config: Res<crate::core::config::AppConfig>,
     atmosphere: Res<VillageAtmosphere>,
-    actor_query: Query<&VillageActor>,
     mut part_query: Query<(&VillageAnimatedPart, &mut Transform)>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     if !config.assets.animate_placeholder_characters && !config.assets.animate_placeholder_ambience
     {
         return;
     }
+    let started_at = Instant::now();
     let elapsed = time.elapsed_secs();
     for (part, mut transform) in &mut part_query {
-        let actor = part
-            .actor_id
-            .and_then(|id| actor_query.iter().find(|actor| actor.id == id));
         let phase_seed = part.actor_id.unwrap_or(17) as f32 * 0.013;
         let phase = elapsed + phase_seed;
         transform.translation = part.base_translation;
@@ -1515,7 +1551,7 @@ fn animate_village_asset_parts(
 
         match part.role {
             ProceduralAnimationRole::SheepHead => {
-                let grazing = actor.is_some_and(|actor| actor.kind == VillageActorKind::Sheep);
+                let grazing = part.actor_kind == Some(VillageActorKind::Sheep);
                 let nod = if grazing {
                     (phase * (1.5 + atmosphere.unease * 1.6)).sin().max(0.0)
                         * (0.24 + atmosphere.unease * 0.16)
@@ -1580,6 +1616,9 @@ fn animate_village_asset_parts(
             | ProceduralAnimationRole::FishTail => {}
         }
     }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
+    }
 }
 
 fn village_part_kind(part_name: &str) -> Option<VillageVisualPartKind> {
@@ -1610,18 +1649,21 @@ fn village_part_kind(part_name: &str) -> Option<VillageVisualPartKind> {
 fn ensure_village_material_overrides(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut query: VillageVisualMaterialQuery<'_, '_>,
+    query: VillageVisualMaterialQuery<'_, '_>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
-    for (entity, _kind, material, override_tag) in &mut query {
-        let Some(override_tag) = override_tag else {
+    let started_at = Instant::now();
+    for (entity, material, override_tag) in &query {
+        if material.0 != override_tag.original {
+            commands
+                .entity(entity)
+                .remove::<VillageMaterialOverridePending>();
             continue;
-        };
-        let original = if material.0 == override_tag.original {
-            override_tag.original.clone()
-        } else {
-            continue;
-        };
+        }
         let Some(existing) = materials.get(&material.0).cloned() else {
+            commands
+                .entity(entity)
+                .remove::<VillageMaterialOverridePending>();
             continue;
         };
         let cloned_handle = materials.add(existing);
@@ -1630,7 +1672,10 @@ fn ensure_village_material_overrides(
             .insert(MeshMaterial3d(cloned_handle));
         commands
             .entity(entity)
-            .insert(VillageMaterialOverride { original });
+            .remove::<VillageMaterialOverridePending>();
+    }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
 
@@ -1638,10 +1683,12 @@ fn update_village_visual_materials(
     atmosphere: Res<VillageAtmosphere>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query: VillageVisualRuntimeMaterialQuery<'_, '_>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     if !atmosphere.is_changed() {
         return;
     }
+    let started_at = Instant::now();
 
     for (kind, material_handle, _override_tag) in &mut query {
         let Some(material) = materials.get_mut(&material_handle.0) else {
@@ -1718,6 +1765,9 @@ fn update_village_visual_materials(
                     LinearRgba::rgb(0.01 + pull * 0.08, 0.01 + pull * 0.05, 0.01 + pull * 0.03);
             }
         }
+    }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
     }
 }
 
@@ -1864,6 +1914,7 @@ fn update_village_interaction(
     resources: VillageInteractionResources<'_>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
     actor_query: Query<(&VillageActor, &Transform), Without<WandererPrototype>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let (time, keys, village, ecology, mut intent, mut notebook) = resources;
     let Some(mut village) = village else {
@@ -1872,78 +1923,84 @@ fn update_village_interaction(
     let Some(mut player_transform) = player_query.iter_mut().next() else {
         return;
     };
+    let started_at = Instant::now();
 
-    let nearest_house = nearest_house_interaction(&village, player_transform.translation);
-    let nearest = actor_query
-        .iter()
-        .filter_map(|(actor, transform)| {
-            let distance = planar_distance(player_transform.translation, transform.translation);
-            (distance <= INTERACTION_RADIUS).then_some(VillageActorSnapshot {
-                id: actor.id,
-                kind: actor.kind,
-                distance,
+    'interaction: {
+        let nearest_house = nearest_house_interaction(&village, player_transform.translation);
+        let nearest = actor_query
+            .iter()
+            .filter_map(|(actor, transform)| {
+                let distance = planar_distance(player_transform.translation, transform.translation);
+                (distance <= INTERACTION_RADIUS).then_some(VillageActorSnapshot {
+                    id: actor.id,
+                    kind: actor.kind,
+                    distance,
+                })
             })
-        })
-        .min_by(|a, b| a.distance.total_cmp(&b.distance));
+            .min_by(|a, b| a.distance.total_cmp(&b.distance));
 
-    village.nearest_actor = nearest;
-    village.nearest_house = nearest_house;
-    village.interaction_prompt = build_village_interaction_prompt(
-        nearest,
-        nearest_house,
-        &village.herding,
-        player_transform.translation,
-    );
+        village.nearest_actor = nearest;
+        village.nearest_house = nearest_house;
+        village.interaction_prompt = build_village_interaction_prompt(
+            nearest,
+            nearest_house,
+            &village.herding,
+            player_transform.translation,
+        );
 
-    if !keys.just_pressed(KeyCode::KeyF) {
-        return;
-    }
-
-    if try_handle_house_interaction(
-        &mut village,
-        &mut player_transform,
-        nearest_house,
-        time.elapsed_secs(),
-        notebook.as_deref_mut(),
-    ) {
-        return;
-    }
-
-    if try_handle_herding_interaction(
-        &mut village,
-        ecology,
-        &mut intent,
-        notebook.as_deref_mut(),
-        player_transform.translation,
-        time.elapsed_secs(),
-    ) {
-        return;
-    }
-
-    let Some(actor) = nearest else {
-        return;
-    };
-    let record = village_interaction_record(actor.kind, time.elapsed_secs());
-    let _ = record_notebook_entry(notebook.as_deref_mut(), record);
-    if let Some(intent) = intent.as_deref_mut() {
-        let changed = apply_village_dialogue_intent(intent, actor.kind, time.elapsed_secs());
-        if let Some(kind) = changed {
-            tracing::info!(
-                target: "dao_game::village::interaction",
-                actor = actor.kind.label(),
-                intent = kind.label(),
-                strength = intent.strength(kind),
-                "village dialogue shaped player intent"
-            );
+        if !keys.just_pressed(KeyCode::KeyF) {
+            break 'interaction;
         }
+
+        if try_handle_house_interaction(
+            &mut village,
+            &mut player_transform,
+            nearest_house,
+            time.elapsed_secs(),
+            notebook.as_deref_mut(),
+        ) {
+            break 'interaction;
+        }
+
+        if try_handle_herding_interaction(
+            &mut village,
+            ecology,
+            &mut intent,
+            notebook.as_deref_mut(),
+            player_transform.translation,
+            time.elapsed_secs(),
+        ) {
+            break 'interaction;
+        }
+
+        let Some(actor) = nearest else {
+            break 'interaction;
+        };
+        let record = village_interaction_record(actor.kind, time.elapsed_secs());
+        let _ = record_notebook_entry(notebook.as_deref_mut(), record);
+        if let Some(intent) = intent.as_deref_mut() {
+            let changed = apply_village_dialogue_intent(intent, actor.kind, time.elapsed_secs());
+            if let Some(kind) = changed {
+                tracing::info!(
+                    target: "dao_game::village::interaction",
+                    actor = actor.kind.label(),
+                    intent = kind.label(),
+                    strength = intent.strength(kind),
+                    "village dialogue shaped player intent"
+                );
+            }
+        }
+        tracing::info!(
+            target: "dao_game::village::interaction",
+            actor_id = actor.id,
+            actor = actor.kind.label(),
+            distance = actor.distance,
+            "village light interaction completed"
+        );
     }
-    tracing::info!(
-        target: "dao_game::village::interaction",
-        actor_id = actor.id,
-        actor = actor.kind.label(),
-        distance = actor.distance,
-        "village light interaction completed"
-    );
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
+    }
 }
 
 fn build_village_interaction_prompt(
@@ -2243,6 +2300,7 @@ fn update_herding_state(
     ecology: Option<ResMut<EcologyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     mut notebook: Option<ResMut<NotebookState>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let (Some(mut village), Some(mut ecology)) = (village, ecology) else {
         return;
@@ -2253,6 +2311,7 @@ fn update_herding_state(
     let Some(flock) = sheep_flock_state_mut(&mut ecology) else {
         return;
     };
+    let started_at = Instant::now();
     let sheep_pen = village
         .area(VillageAreaKind::SheepPen)
         .map(|area| area.position)
@@ -2334,6 +2393,9 @@ fn update_herding_state(
         }
         HerdingPhase::GrazingAtPatch | HerdingPhase::NotStarted | HerdingPhase::Prompted => {}
     }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Village, started_at.elapsed());
+    }
 }
 
 fn village_interaction_record(kind: VillageActorKind, at_seconds: f32) -> NotebookRecord {
@@ -2403,6 +2465,7 @@ mod tests {
             AppConfig, AssetConfig, CameraConfig, DesertConfig, EcologyConfig, EnvironmentConfig,
             PlayerConfig, PresentationConfig, QualityConfig, SignConfig, WorldConfig,
         },
+        core::performance::FramePerformance,
         game::{
             environment::{EnvironmentSnapshot, WeatherKind, WindField},
             journey::{DreamPhase, DreamState, JourneyResponseState, JourneyState, StoryArcStage},
@@ -2596,12 +2659,20 @@ mod tests {
             ..Default::default()
         });
         app.insert_resource(VillageAtmosphere::default());
+        app.insert_resource(FramePerformance::default());
         let _ = app.world_mut().run_system_once(
             |environment: Res<EnvironmentSnapshot>,
              wind_field: Res<WindField>,
              journey: Option<Res<JourneyState>>,
-             atmosphere: ResMut<VillageAtmosphere>| {
-                update_village_atmosphere(environment, wind_field, journey, atmosphere);
+             atmosphere: ResMut<VillageAtmosphere>,
+             performance: Option<ResMut<FramePerformance>>| {
+                update_village_atmosphere(
+                    environment,
+                    wind_field,
+                    journey,
+                    atmosphere,
+                    performance,
+                );
             },
         );
 

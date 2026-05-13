@@ -1,17 +1,22 @@
+use std::time::Instant;
+
 use bevy::prelude::*;
 
-use crate::game::{
-    flow::{AppScreen, InGameState},
-    journey::{DreamPhase, JourneyState, StoryArcStage},
-    notebook::{
-        NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
-        record_notebook_entry,
+use crate::{
+    core::performance::{FramePerformance, PerformancePhase},
+    game::{
+        flow::{AppScreen, InGameState},
+        journey::{DreamPhase, JourneyState, StoryArcStage},
+        notebook::{
+            NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
+            record_notebook_entry,
+        },
+        places::{PlaceKind, planar_distance},
+        regions::{RegionGraphState, TransitionGateKind},
+        signs::SignState,
+        village::{VillageActorKind, VillageAreaKind, VillageState},
+        world::{WandererPrototype, WorldCamera},
     },
-    places::{PlaceKind, planar_distance},
-    regions::{RegionGraphState, TransitionGateKind},
-    signs::SignState,
-    village::{VillageActorKind, VillageAreaKind, VillageState},
-    world::{WandererPrototype, WorldCamera},
 };
 
 pub struct IntentPlugin;
@@ -427,6 +432,7 @@ fn cleanup_intent_session(mut commands: Commands) {
     commands.remove_resource::<PerceptionState>();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sample_intent_from_world(
     time: Res<Time>,
     intent: Option<ResMut<IntentState>>,
@@ -435,6 +441,7 @@ fn sample_intent_from_world(
     journey: Option<Res<JourneyState>>,
     player_query: Query<&Transform, With<WandererPrototype>>,
     camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let Some(mut intent) = intent else {
         return;
@@ -442,6 +449,7 @@ fn sample_intent_from_world(
     let Some(player_transform) = player_query.iter().next() else {
         return;
     };
+    let started_at = Instant::now();
     let samples = collect_intent_samples(
         player_transform,
         camera_query.iter().next(),
@@ -458,6 +466,9 @@ fn sample_intent_from_world(
             strength = intent.strength(kind),
             "dominant intent changed"
         );
+    }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Intent, started_at.elapsed());
     }
 }
 
@@ -560,6 +571,7 @@ fn collect_intent_samples(
     samples
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_perception_input(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -568,10 +580,12 @@ fn handle_perception_input(
     signs: Option<Res<SignState>>,
     journey: Option<Res<JourneyState>>,
     mut notebook: Option<ResMut<NotebookState>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let Some(mut perception) = perception else {
         return;
     };
+    let started_at = Instant::now();
     let dominant = intent.as_deref().and_then(IntentState::dominant);
     let strength = dominant
         .and_then(|kind| intent.as_deref().map(|intent| intent.strength(kind)))
@@ -594,6 +608,9 @@ fn handle_perception_input(
     );
 
     let Some(result) = result else {
+        if let Some(mut performance) = performance {
+            performance.record_phase_duration(PerformancePhase::Intent, started_at.elapsed());
+        }
         return;
     };
     tracing::info!(
@@ -633,6 +650,9 @@ fn handle_perception_input(
                 tags: vec![NotebookTag::Omen, NotebookTag::Perception],
             },
         );
+    }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Intent, started_at.elapsed());
     }
 }
 

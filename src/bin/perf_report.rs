@@ -11,24 +11,29 @@ use serde_json::{Map, Value};
 
 const DEFAULT_LOG_DIR: &str = "logs";
 const DEFAULT_PERF_LOG_NAME: &str = "performance.log";
-const DETAIL_PHASES: [&str; 21] = [
+const DETAIL_PHASES: [&str; 26] = [
     "assets",
     "director",
     "ecology",
     "environment",
+    "intent",
+    "journey",
     "landmarks",
     "material_gallery",
     "material_generation",
     "material_upload",
+    "places",
     "physics_broad_phase",
     "physics_collider_streaming",
     "physics_narrow_phase",
     "physics_query",
     "physics_solver",
     "presentation",
+    "regions",
     "player",
     "signs",
     "ui",
+    "village",
     "world_collision",
     "world_impostor",
     "world_streaming",

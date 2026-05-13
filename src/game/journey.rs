@@ -2,19 +2,24 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 
-use crate::game::{
-    director::{DirectorState, DirectorSuggestionKind, place_from_director_tags},
-    ecology::{EcologySignal, EcologyState},
-    flow::{AppScreen, InGameState},
-    notebook::{
-        NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
-        dream_record, record_notebook_entry,
+use crate::{
+    core::performance::{FramePerformance, PerformancePhase},
+    game::{
+        director::{DirectorState, DirectorSuggestionKind, place_from_director_tags},
+        ecology::{EcologySignal, EcologyState},
+        flow::{AppScreen, InGameState},
+        notebook::{
+            NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
+            dream_record, record_notebook_entry,
+        },
+        places::{
+            MeaningfulPlace, MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance,
+        },
+        regions::{RegionGraphState, TransitionGateKind, TransitionGateState},
+        signs::{OmenKind, SignState},
+        village::{HerdingPhase, VillageAreaKind, VillageState},
+        world::{BiomeKind, WandererPrototype, WorldCamera, WorldGridCoord},
     },
-    places::{MeaningfulPlace, MeaningfulPlaces, PlaceKind, choose_primary_place, planar_distance},
-    regions::{RegionGraphState, TransitionGateKind, TransitionGateState},
-    signs::{OmenKind, SignState},
-    village::{HerdingPhase, VillageAreaKind, VillageState},
-    world::{BiomeKind, WandererPrototype, WorldCamera, WorldGridCoord},
 };
 
 pub type JourneyPlaceKind = PlaceKind;
@@ -445,6 +450,7 @@ fn select_journey_target(
     places: Option<Res<MeaningfulPlaces>>,
     director: Option<Res<DirectorState>>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let Some(mut journey) = journey else {
         return;
@@ -491,12 +497,16 @@ fn select_journey_target(
             );
         }
     }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Journey, started_at.elapsed());
+    }
 }
 
 fn advance_journey_session(
     resources: JourneySessionResources<'_>,
     wanderer_query: Query<&Transform, With<WandererPrototype>>,
     camera_query: Query<&Transform, (With<WorldCamera>, Without<WandererPrototype>)>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let (time, signs, village, regions, ecology, journey, mut notebook) = resources;
     let Some(mut journey) = journey else {
@@ -505,6 +515,7 @@ fn advance_journey_session(
     let Some(transform) = wanderer_query.iter().next() else {
         return;
     };
+    let started_at = Instant::now();
 
     let distance_to_target = journey
         .target
@@ -553,6 +564,9 @@ fn advance_journey_session(
         if let Some(record) = notebook_record_for_event(event) {
             let _ = record_notebook_entry(notebook.as_deref_mut(), record);
         }
+    }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Journey, started_at.elapsed());
     }
 }
 

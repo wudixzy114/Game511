@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use bevy::{
     color::LinearRgba,
     math::primitives::{Cuboid, Cylinder, Plane3d},
@@ -5,22 +7,25 @@ use bevy::{
     prelude::*,
 };
 
-use crate::game::{
-    assets::{
-        ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials, ProceduralSpawnRequest,
-        spawn_procedural_asset_entity,
+use crate::{
+    core::performance::{FramePerformance, PerformancePhase},
+    game::{
+        assets::{
+            ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials,
+            ProceduralSpawnRequest, spawn_procedural_asset_entity,
+        },
+        environment::{EnvironmentSnapshot, WindField},
+        flow::{AppScreen, InGameState},
+        intent::{IntentKind, IntentState, PerceptionState},
+        journey::{DreamPhase, JourneyState},
+        notebook::{
+            NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
+            record_notebook_entry,
+        },
+        places::planar_distance,
+        village::{VillageAreaKind, VillageState},
+        world::{WandererPrototype, WorldMap, WorldShowcaseSpots},
     },
-    environment::{EnvironmentSnapshot, WindField},
-    flow::{AppScreen, InGameState},
-    intent::{IntentKind, IntentState, PerceptionState},
-    journey::{DreamPhase, JourneyState},
-    notebook::{
-        NotebookEntryKind, NotebookRecord, NotebookSource, NotebookState, NotebookTag,
-        record_notebook_entry,
-    },
-    places::planar_distance,
-    village::{VillageAreaKind, VillageState},
-    world::{WandererPrototype, WorldMap, WorldShowcaseSpots},
 };
 
 pub struct RegionPlugin;
@@ -674,6 +679,7 @@ fn build_region_milestones(
 fn update_transition_gate_state(
     resources: GateUpdateResources<'_>,
     mut player_query: Query<&mut Transform, With<WandererPrototype>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let (keys, graph, journey, intent, perception, mut notebook, time) = resources;
     let Some(mut graph) = graph else {
@@ -682,6 +688,7 @@ fn update_transition_gate_state(
     let Some(player_transform) = player_query.iter().next() else {
         return;
     };
+    let started_at = Instant::now();
     if let Some(crossing) = graph.crossing.as_mut() {
         crossing.elapsed_seconds += time.delta_secs();
         let t = (crossing.elapsed_seconds / crossing.duration_seconds.max(0.01)).clamp(0.0, 1.0);
@@ -729,6 +736,9 @@ fn update_transition_gate_state(
                 "natural boundary crossed"
             );
             graph.crossing = None;
+        }
+        if let Some(mut performance) = performance {
+            performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
         }
         return;
     }
@@ -891,6 +901,9 @@ fn update_transition_gate_state(
                 "natural boundary crossing started"
             );
         }
+    }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
     }
 }
 
@@ -1239,10 +1252,12 @@ fn update_transition_gate_visuals(
         (&TransitionGateVisual, &mut Visibility, &mut Transform),
         Without<WandererPrototype>,
     >,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let Some(graph) = graph else {
         return;
     };
+    let started_at = Instant::now();
     let fog_density = environment
         .as_deref()
         .map(|snapshot| snapshot.fog_density)
@@ -1313,15 +1328,20 @@ fn update_transition_gate_visuals(
             transform.translation = visual.base_translation;
         }
     }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
+    }
 }
 
 fn update_region_outpost_visuals(
     graph: Option<Res<RegionGraphState>>,
     mut query: Query<(&RegionOutpostVisual, &mut Visibility), Without<WandererPrototype>>,
+    performance: Option<ResMut<FramePerformance>>,
 ) {
     let Some(graph) = graph else {
         return;
     };
+    let started_at = Instant::now();
     let outpost_discovered = graph
         .outpost
         .as_ref()
@@ -1345,6 +1365,9 @@ fn update_region_outpost_visuals(
         } else {
             Visibility::Hidden
         };
+    }
+    if let Some(mut performance) = performance {
+        performance.record_phase_duration(PerformancePhase::Regions, started_at.elapsed());
     }
 }
 
