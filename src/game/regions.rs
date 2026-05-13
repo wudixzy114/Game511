@@ -6,6 +6,10 @@ use bevy::{
 };
 
 use crate::game::{
+    assets::{
+        ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials, ProceduralSpawnRequest,
+        spawn_procedural_asset_entity,
+    },
     flow::{AppScreen, InGameState},
     intent::{IntentKind, IntentState, PerceptionState},
     journey::{DreamPhase, JourneyState},
@@ -44,6 +48,7 @@ pub struct RegionGraphState {
     pub nearest_gate: Option<GateProximity>,
     pub discovered_gates: Vec<u64>,
     pub crossing: Option<GateCrossingState>,
+    pub outpost: Option<RegionOutpostState>,
 }
 
 impl RegionGraphState {
@@ -208,10 +213,22 @@ pub struct GateCrossingState {
     pub destination: Vec3,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionOutpostState {
+    pub region: RegionId,
+    pub center: Vec3,
+    pub arrival_radius: f32,
+    pub discovered: bool,
+    pub recorded: bool,
+}
+
 #[derive(Debug, Component)]
 struct TransitionGateVisual {
     gate_id: u64,
 }
+
+#[derive(Debug, Component)]
+struct RegionOutpostVisual;
 
 #[derive(Debug, Resource, Clone)]
 struct RegionMaterials {
@@ -232,15 +249,22 @@ type GateUpdateResources<'w> = (
     Res<'w, Time>,
 );
 
+type RegionInitResources<'w> = (
+    Option<Res<'w, WorldMap>>,
+    Option<Res<'w, WorldShowcaseSpots>>,
+    Option<Res<'w, VillageState>>,
+    Option<Res<'w, RegionGraphState>>,
+    Res<'w, ProceduralAssetMaterials>,
+    Res<'w, crate::core::config::AppConfig>,
+);
+
 fn initialize_region_graph(
     mut commands: Commands,
-    world_map: Option<Res<WorldMap>>,
-    spots: Option<Res<WorldShowcaseSpots>>,
-    village: Option<Res<VillageState>>,
-    existing: Option<Res<RegionGraphState>>,
+    resources: RegionInitResources<'_>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let (world_map, spots, village, existing, procedural_materials, config) = resources;
     if existing.is_some() {
         return;
     }
@@ -251,6 +275,14 @@ fn initialize_region_graph(
     let graph = build_region_graph(&world_map, &spots, &village);
     let region_materials = RegionMaterials::new(&mut materials);
     spawn_gate_visuals(&mut commands, &mut meshes, &region_materials, &graph.gates);
+    spawn_region_outpost(
+        &mut commands,
+        &mut meshes,
+        &procedural_materials,
+        &config.assets,
+        &graph,
+        &world_map,
+    );
 
     tracing::info!(
         target: "dao_game::regions::graph",
@@ -461,7 +493,23 @@ pub fn build_region_graph(
         nearest_gate: None,
         discovered_gates: Vec::new(),
         crossing: None,
+        outpost: build_region_outpost(world_map, boundary_region, mountain_center),
     }
+}
+
+fn build_region_outpost(
+    world_map: &WorldMap,
+    boundary_region: RegionId,
+    mountain_center: Vec3,
+) -> Option<RegionOutpostState> {
+    let center = ground_position(world_map, mountain_center + Vec3::new(18.0, 0.0, -8.0), 0.0);
+    Some(RegionOutpostState {
+        region: boundary_region,
+        center,
+        arrival_radius: 20.0,
+        discovered: false,
+        recorded: false,
+    })
 }
 
 fn update_transition_gate_state(
@@ -487,7 +535,13 @@ fn update_transition_gate_state(
         if t >= 1.0 {
             let gate_id = crossing.gate_id;
             let gate_kind = crossing.gate_kind;
-            graph.current_region = crossing.to_region;
+            let to_region = crossing.to_region;
+            graph.current_region = to_region;
+            if let Some(outpost) = graph.outpost.as_mut()
+                && outpost.region == to_region
+            {
+                outpost.discovered = true;
+            }
             if let Some(gate) = graph.gates.iter_mut().find(|gate| gate.id == gate_id) {
                 gate.state = TransitionGateState::Crossed;
             }
@@ -521,6 +575,30 @@ fn update_transition_gate_state(
     }
 
     let player_position = player_transform.translation;
+    let current_region = graph.current_region;
+    let should_record_outpost = graph.outpost.as_ref().is_some_and(|outpost| {
+        outpost.discovered
+            && !outpost.recorded
+            && current_region == outpost.region
+            && planar_distance(player_position, outpost.center) <= outpost.arrival_radius
+    });
+    if should_record_outpost {
+        if let Some(outpost) = graph.outpost.as_mut() {
+            outpost.recorded = true;
+        }
+        let _ = record_notebook_entry(
+            notebook.as_deref_mut(),
+            NotebookRecord {
+                kind: NotebookEntryKind::Place,
+                at_seconds: time.elapsed_secs(),
+                location: Some("对岸前哨".to_string()),
+                source: NotebookSource::PlaceArrival,
+                title: "到达对岸前哨".to_string(),
+                body: "雾后有几间临时屋舍、一处摊棚和压平的歇脚地。这里还不是城镇，但已经不再是出发时的村庄。".to_string(),
+                tags: vec![NotebookTag::Memory, NotebookTag::Omen],
+            },
+        );
+    }
     let mut nearest = None;
     let mut changed_gate_ids = Vec::new();
     let current_region = graph.current_region;
@@ -649,6 +727,101 @@ fn update_transition_gate_state(
             );
         }
     }
+}
+
+fn spawn_region_outpost(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &ProceduralAssetMaterials,
+    asset_config: &crate::core::config::AssetConfig,
+    graph: &RegionGraphState,
+    _world_map: &WorldMap,
+) {
+    let Some(outpost) = graph.outpost.as_ref() else {
+        return;
+    };
+    let _root = commands
+        .spawn((
+            Name::new("BoundaryOutpost"),
+            DespawnOnExit(AppScreen::InGame),
+            Transform::from_translation(outpost.center),
+            RegionOutpostVisual,
+        ))
+        .id();
+
+    let house_offsets = [Vec3::new(-6.5, 0.0, 2.0), Vec3::new(3.4, 0.0, -1.8)];
+    for (index, offset) in house_offsets.into_iter().enumerate() {
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            asset_config,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::VillageHouse,
+                8_000 + index as u64,
+                "BoundaryOutpostHouse",
+                Transform::from_translation(outpost.center + offset)
+                    .with_scale(Vec3::new(0.78, 0.82, 0.74))
+                    .with_rotation(Quat::from_rotation_y(index as f32 * 0.3)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert(RegionOutpostVisual);
+    }
+
+    let stall = spawn_procedural_asset_entity(
+        commands,
+        meshes,
+        materials,
+        asset_config,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::MarketStall,
+            8_111,
+            "BoundaryOutpostStall",
+            Transform::from_translation(outpost.center + Vec3::new(-1.8, 0.0, 5.4))
+                .with_scale(Vec3::splat(0.86))
+                .with_rotation(Quat::from_rotation_y(-0.28)),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
+    commands.entity(stall).insert(RegionOutpostVisual);
+
+    for index in 0..6 {
+        let entity = spawn_procedural_asset_entity(
+            commands,
+            meshes,
+            materials,
+            asset_config,
+            ProceduralSpawnRequest::new(
+                ProceduralAssetKind::PathStone,
+                8_200 + index as u64,
+                "BoundaryOutpostPath",
+                Transform::from_translation(
+                    outpost.center
+                        + Vec3::new((index as f32 - 2.5) * 1.6, 0.0, 10.0 + index as f32 * -1.4),
+                )
+                .with_scale(Vec3::splat(0.82)),
+            )
+            .with_lod(ProceduralAssetLod::Near),
+        );
+        commands.entity(entity).insert(RegionOutpostVisual);
+    }
+
+    let marker = spawn_procedural_asset_entity(
+        commands,
+        meshes,
+        materials,
+        asset_config,
+        ProceduralSpawnRequest::new(
+            ProceduralAssetKind::HeadlandMarker,
+            8_301,
+            "BoundaryOutpostMarker",
+            Transform::from_translation(outpost.center + Vec3::new(8.0, 0.0, -6.5))
+                .with_scale(Vec3::new(0.72, 0.88, 0.72)),
+        )
+        .with_lod(ProceduralAssetLod::Near),
+    );
+    commands.entity(marker).insert(RegionOutpostVisual);
 }
 
 fn update_transition_gate_visuals(

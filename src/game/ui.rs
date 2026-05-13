@@ -17,7 +17,7 @@ use crate::game::{
     player::{CameraMode, FirstPersonState},
     regions::RegionGraphState,
     signs::{OmenGuidancePhase, OmenKind, SignState},
-    village::VillageState,
+    village::{HerdingPhase, VillageState},
     world::{BiomeKind, WandererPrototype, WorldCycle, WorldMap},
 };
 
@@ -1259,28 +1259,18 @@ fn update_hud_context_text(resources: HudContextResources<'_>, queries: HudConte
     let (village, notebook, perception, ui_mode, regions) = resources;
     let (mut interaction_query, mut notebook_query, mut return_path_query) = queries;
     if let Some(mut interaction_text) = interaction_query.iter_mut().next() {
+        let herding = village.as_deref().and_then(herding_status_hint);
         let interaction = village
             .as_deref()
             .and_then(|village| village.interaction_prompt.as_deref())
-            .map(|prompt| format!("{prompt}  F"))
-            .unwrap_or_default();
+            .map(|prompt| format!("{prompt}  F"));
         let perception = perception
             .as_deref()
-            .map(|perception| format!("{}  E", perception_label(perception)))
-            .unwrap_or_default();
-        let gate = regions
-            .as_deref()
-            .and_then(|regions| regions.nearest_gate)
-            .map(|gate| {
-                if gate.open {
-                    "边界可通过  G".to_string()
-                } else {
-                    "雾中有边界".to_string()
-                }
-            })
-            .unwrap_or_default();
-        interaction_text.0 = [interaction, perception, gate]
+            .map(|perception| format!("{}  E", perception_label(perception)));
+        let gate = regions.as_deref().map(gate_status_hint);
+        interaction_text.0 = [herding, interaction, perception, gate]
             .into_iter()
+            .flatten()
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join("    ");
@@ -1725,6 +1715,35 @@ fn return_path_hint(notebook: Option<&NotebookState>, ui_mode: &UiModeState) -> 
     } else {
         format!("熟悉的归路：{}", places.join(" / "))
     }
+}
+
+fn herding_status_hint(village: &VillageState) -> Option<String> {
+    match village.herding.phase {
+        HerdingPhase::Prompted if village.herding.task_available => Some("?????  F".to_string()),
+        HerdingPhase::FollowingToGrass => Some("???????????".to_string()),
+        HerdingPhase::GrazingAtPatch => Some("?????????????????".to_string()),
+        HerdingPhase::ReturningToPen => Some("?????????".to_string()),
+        HerdingPhase::Completed if village.herding.first_task_completed => {
+            Some("????????????????".to_string())
+        }
+        _ => None,
+    }
+}
+
+fn gate_status_hint(regions: &RegionGraphState) -> String {
+    if let Some(crossing) = regions.crossing.as_ref() {
+        return format!("????{}", crossing.gate_kind.label());
+    }
+    regions
+        .nearest_gate
+        .map(|gate| {
+            if gate.open {
+                "?????  G".to_string()
+            } else {
+                "?????".to_string()
+            }
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
