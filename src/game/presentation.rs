@@ -132,11 +132,11 @@ enum PresentationVisualSample {
 impl PresentationVisualSample {
     const BASELINE: [Self; 6] = [
         Self::VillageDawn,
+        Self::PostDreamDeparture,
         Self::DreamAfterSeaWind,
+        Self::BoundaryCrossing,
+        Self::FarBankArrival,
         Self::MistBoundary,
-        Self::SandstormPyramid,
-        Self::OasisRuins,
-        Self::NightSea,
     ];
 
     fn label(self) -> &'static str {
@@ -1819,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn visual_baseline_matrix_defines_six_fixed_samples() {
+    fn visual_baseline_matrix_defines_six_exploration_samples() {
         let labels: Vec<&'static str> = PresentationVisualSample::BASELINE
             .iter()
             .map(|sample| sample.label())
@@ -1829,11 +1829,11 @@ mod tests {
             labels,
             vec![
                 "village-dawn",
+                "post-dream-departure",
                 "dream-after-sea-wind",
+                "boundary-crossing",
+                "far-bank-arrival",
                 "mist-boundary",
-                "sandstorm-pyramid",
-                "oasis-ruins",
-                "night-sea",
             ]
         );
         assert!(
@@ -1852,8 +1852,8 @@ mod tests {
                 CameraMode::FirstPerson,
             ),
             test_scene(
-                "oasis",
-                PresentationVisualSample::OasisRuins,
+                "departure",
+                PresentationVisualSample::PostDreamDeparture,
                 CameraMode::ThirdPerson,
             ),
             test_scene(
@@ -1862,8 +1862,8 @@ mod tests {
                 CameraMode::ThirdPerson,
             ),
             test_scene(
-                "night",
-                PresentationVisualSample::NightSea,
+                "far bank",
+                PresentationVisualSample::FarBankArrival,
                 CameraMode::FirstPerson,
             ),
         ];
@@ -1877,8 +1877,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 PresentationVisualSample::VillageDawn,
-                PresentationVisualSample::OasisRuins,
-                PresentationVisualSample::NightSea,
+                PresentationVisualSample::PostDreamDeparture,
+                PresentationVisualSample::FarBankArrival,
                 PresentationVisualSample::Functional,
             ]
         );

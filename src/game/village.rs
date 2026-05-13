@@ -1,4 +1,8 @@
-use bevy::prelude::*;
+use bevy::{
+    color::LinearRgba,
+    pbr::{MeshMaterial3d, StandardMaterial},
+    prelude::*,
+};
 
 use crate::game::{
     assets::{
@@ -27,6 +31,27 @@ type VillageInitQueries<'w, 's> = (
 );
 
 type VillageInitAssets<'w> = (ResMut<'w, Assets<Mesh>>, Res<'w, ProceduralAssetMaterials>);
+type VillageVisualMaterialQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static VillageVisualPartKind,
+        &'static MeshMaterial3d<StandardMaterial>,
+        Option<&'static VillageMaterialOverride>,
+    ),
+    Without<WandererPrototype>,
+>;
+type VillageVisualRuntimeMaterialQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static VillageVisualPartKind,
+        &'static MeshMaterial3d<StandardMaterial>,
+        &'static VillageMaterialOverride,
+    ),
+    Without<WandererPrototype>,
+>;
 
 type VillageInteractionResources<'w> = (
     Res<'w, Time>,
@@ -49,6 +74,8 @@ impl Plugin for VillagePlugin {
                 update_village_actor_behavior,
                 sync_village_collider_centers,
                 animate_village_asset_parts,
+                ensure_village_material_overrides,
+                update_village_visual_materials,
                 update_village_interaction,
             )
                 .chain()
@@ -252,6 +279,22 @@ struct VillageAnimatedPart {
 #[derive(Debug, Component)]
 struct VillageVisual;
 
+#[derive(Debug, Component, Clone, Copy, Eq, PartialEq, Hash)]
+enum VillageVisualPartKind {
+    WarmWindow,
+    WarmLantern,
+    SmokeWisp,
+    WetGround,
+    ShoreWater,
+    ShoreFoam,
+    PathStone,
+}
+
+#[derive(Debug, Component, Clone)]
+struct VillageMaterialOverride {
+    original: Handle<StandardMaterial>,
+}
+
 #[derive(Debug, Component, Clone, Copy, PartialEq)]
 pub struct VillageCollider {
     pub kind: VillageColliderKind,
@@ -289,6 +332,10 @@ pub struct VillageAtmosphere {
     pub shoreline_wash: f32,
     pub unease: f32,
     pub life_density: f32,
+    pub warm_window_glow: f32,
+    pub ground_dampness: f32,
+    pub shoreline_foam: f32,
+    pub departure_pull: f32,
 }
 
 impl Default for VillageAtmosphere {
@@ -303,6 +350,10 @@ impl Default for VillageAtmosphere {
             shoreline_wash: 0.0,
             unease: 0.0,
             life_density: 0.45,
+            warm_window_glow: 0.52,
+            ground_dampness: 0.22,
+            shoreline_foam: 0.2,
+            departure_pull: 0.0,
         }
     }
 }
@@ -430,6 +481,21 @@ fn update_village_atmosphere(
         .as_deref()
         .map(|journey| journey.response.intensity)
         .unwrap_or(0.0);
+    let stage_departure_bias = journey
+        .as_deref()
+        .map(|journey| match journey.story_stage {
+            crate::game::journey::StoryArcStage::VillageAwakening => 0.0,
+            crate::game::journey::StoryArcStage::VillageLife => 0.08,
+            crate::game::journey::StoryArcStage::DreamApproaching => 0.16,
+            crate::game::journey::StoryArcStage::Dreaming => 0.24,
+            crate::game::journey::StoryArcStage::DreamAfterglow => 0.38,
+            crate::game::journey::StoryArcStage::BoundaryCrossing => 0.7,
+            crate::game::journey::StoryArcStage::FarBankOutpost => 0.84,
+            crate::game::journey::StoryArcStage::TownPreparation => 0.58,
+            crate::game::journey::StoryArcStage::FirstLoss => 0.64,
+            crate::game::journey::StoryArcStage::DesertDeparture => 0.9,
+        })
+        .unwrap_or(0.0);
     let day_phase = village_day_phase(environment.daylight);
     let weather_life_bias = match environment.weather {
         WeatherKind::Storm => -0.26,
@@ -458,6 +524,27 @@ fn update_village_atmosphere(
             - dream_afterglow * 0.18
             - environment.storm_weight * 0.12)
             .clamp(0.18, 0.9),
+        warm_window_glow: (0.18
+            + (1.0 - environment.daylight).clamp(0.0, 1.0) * 0.56
+            + environment.dawn_warmth * 0.32
+            + dream_afterglow * 0.24
+            + environment.boundary_glow * 0.18)
+            .clamp(0.12, 1.0),
+        ground_dampness: (environment.ground_wetness * 0.7
+            + environment.sea_mist * 0.16
+            + environment.storm_weight * 0.16)
+            .clamp(0.0, 1.0),
+        shoreline_foam: (environment.ground_wetness * 0.2
+            + environment.humidity * 0.22
+            + environment.sea_mist * 0.2
+            + environment.storm_weight * 0.2
+            + wind_field.gust * 0.2)
+            .clamp(0.0, 1.0),
+        departure_pull: (stage_departure_bias * 0.58
+            + dream_afterglow * 0.22
+            + response * 0.12
+            + environment.horizon_tension * 0.12)
+            .clamp(0.0, 1.0),
     };
     let changed = atmosphere.day_phase != next.day_phase
         || (atmosphere.unease - next.unease).abs() > 0.12
@@ -474,6 +561,10 @@ fn update_village_atmosphere(
             shoreline_wash = next.shoreline_wash,
             unease = next.unease,
             life_density = next.life_density,
+            warm_window_glow = next.warm_window_glow,
+            ground_dampness = next.ground_dampness,
+            shoreline_foam = next.shoreline_foam,
+            departure_pull = next.departure_pull,
             "village atmosphere updated"
         );
     }
@@ -1322,19 +1413,33 @@ fn tag_village_ambient_parts(commands: &mut Commands, root: Entity) {
                 continue;
             };
             for child in part_children {
+                let part_name = world
+                    .get::<Name>(child)
+                    .map(|name| name.as_str().to_string())
+                    .unwrap_or_default();
                 let Some(role) = world.get::<ProceduralAnimationRole>(child).copied() else {
                     continue;
                 };
                 let Some(transform) = world.get::<Transform>(child).copied() else {
                     continue;
                 };
-                world.entity_mut(child).insert(VillageAnimatedPart {
+                let original_material = world
+                    .get::<MeshMaterial3d<StandardMaterial>>(child)
+                    .map(|material| material.0.clone());
+                let mut entity = world.entity_mut(child);
+                entity.insert(VillageAnimatedPart {
                     actor_id: None,
                     role,
                     base_translation: transform.translation,
                     base_rotation: transform.rotation,
                     base_scale: transform.scale,
                 });
+                if let Some(kind) = village_part_kind(part_name.as_str()) {
+                    entity.insert(kind);
+                    if let Some(handle) = original_material.clone() {
+                        entity.insert(VillageMaterialOverride { original: handle });
+                    }
+                }
             }
         }
     });
@@ -1473,6 +1578,145 @@ fn animate_village_asset_parts(
             ProceduralAnimationRole::BirdLeftWing
             | ProceduralAnimationRole::BirdRightWing
             | ProceduralAnimationRole::FishTail => {}
+        }
+    }
+}
+
+fn village_part_kind(part_name: &str) -> Option<VillageVisualPartKind> {
+    if matches!(part_name, "HouseWindowWarmLeft" | "HouseWindowWarmRight") {
+        return Some(VillageVisualPartKind::WarmWindow);
+    }
+    if part_name == "HouseInteriorLantern" || part_name == "MarketHangingScale" {
+        return Some(VillageVisualPartKind::WarmLantern);
+    }
+    if part_name == "HouseSmokeWisp" {
+        return Some(VillageVisualPartKind::SmokeWisp);
+    }
+    if matches!(part_name, "WellWetGround" | "ShoreWetSand") {
+        return Some(VillageVisualPartKind::WetGround);
+    }
+    if matches!(part_name, "ShoreWater" | "WellWater") {
+        return Some(VillageVisualPartKind::ShoreWater);
+    }
+    if matches!(part_name, "ShoreFoamLineA" | "ShoreFoamLineB") {
+        return Some(VillageVisualPartKind::ShoreFoam);
+    }
+    if part_name == "PathStone" || part_name == "PathDustPatch" {
+        return Some(VillageVisualPartKind::PathStone);
+    }
+    None
+}
+
+fn ensure_village_material_overrides(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut query: VillageVisualMaterialQuery<'_, '_>,
+) {
+    for (entity, _kind, material, override_tag) in &mut query {
+        let Some(override_tag) = override_tag else {
+            continue;
+        };
+        let original = if material.0 == override_tag.original {
+            override_tag.original.clone()
+        } else {
+            continue;
+        };
+        let Some(existing) = materials.get(&material.0).cloned() else {
+            continue;
+        };
+        let cloned_handle = materials.add(existing);
+        commands
+            .entity(entity)
+            .insert(MeshMaterial3d(cloned_handle));
+        commands
+            .entity(entity)
+            .insert(VillageMaterialOverride { original });
+    }
+}
+
+fn update_village_visual_materials(
+    atmosphere: Res<VillageAtmosphere>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut query: VillageVisualRuntimeMaterialQuery<'_, '_>,
+) {
+    if !atmosphere.is_changed() {
+        return;
+    }
+
+    for (kind, material_handle, _override_tag) in &mut query {
+        let Some(material) = materials.get_mut(&material_handle.0) else {
+            continue;
+        };
+        match kind {
+            VillageVisualPartKind::WarmWindow => {
+                let glow = atmosphere.warm_window_glow;
+                material.base_color = Color::srgba(
+                    0.92 + glow * 0.07,
+                    0.62 + glow * 0.26,
+                    0.34 + glow * 0.18,
+                    0.62 + glow * 0.33,
+                );
+                material.emissive =
+                    LinearRgba::rgb(1.8 + glow * 3.2, 0.95 + glow * 1.9, 0.35 + glow * 0.95);
+                material.alpha_mode = AlphaMode::Blend;
+            }
+            VillageVisualPartKind::WarmLantern => {
+                let glow =
+                    (atmosphere.warm_window_glow * 0.88 + atmosphere.unease * 0.12).clamp(0.0, 1.0);
+                material.base_color = Color::srgb(0.96, 0.74 + glow * 0.14, 0.4 + glow * 0.12);
+                material.emissive =
+                    LinearRgba::rgb(2.1 + glow * 3.8, 1.2 + glow * 2.3, 0.48 + glow * 1.18);
+            }
+            VillageVisualPartKind::SmokeWisp => {
+                let alpha =
+                    (0.3 + atmosphere.sea_mist * 0.34 + atmosphere.unease * 0.18).clamp(0.2, 0.9);
+                material.base_color = Color::srgba(0.15, 0.16, 0.17, alpha);
+                material.emissive = LinearRgba::rgb(
+                    0.02 + atmosphere.warm_window_glow * 0.04,
+                    0.02 + atmosphere.warm_window_glow * 0.03,
+                    0.02 + atmosphere.warm_window_glow * 0.025,
+                );
+                material.alpha_mode = AlphaMode::Blend;
+            }
+            VillageVisualPartKind::WetGround => {
+                let wet = atmosphere.ground_dampness;
+                material.base_color =
+                    Color::srgb(0.22 - wet * 0.05, 0.19 - wet * 0.02, 0.16 - wet * 0.005);
+                material.perceptual_roughness = (0.92 - wet * 0.54).clamp(0.22, 1.0);
+                material.metallic = (0.01 + wet * 0.08).clamp(0.0, 0.25);
+            }
+            VillageVisualPartKind::ShoreWater => {
+                let wash = atmosphere.shoreline_wash;
+                material.base_color = Color::srgba(
+                    0.16 + wash * 0.07,
+                    0.38 + wash * 0.1,
+                    0.45 + wash * 0.13,
+                    0.5 + wash * 0.32,
+                );
+                material.emissive =
+                    LinearRgba::rgb(0.02 + wash * 0.06, 0.05 + wash * 0.09, 0.06 + wash * 0.11);
+                material.perceptual_roughness = (0.36 - wash * 0.22).clamp(0.1, 0.5);
+                material.alpha_mode = AlphaMode::Blend;
+            }
+            VillageVisualPartKind::ShoreFoam => {
+                let foam = atmosphere.shoreline_foam;
+                material.base_color = Color::srgba(
+                    0.88 + foam * 0.1,
+                    0.9 + foam * 0.08,
+                    0.84 + foam * 0.04,
+                    0.34 + foam * 0.5,
+                );
+                material.emissive =
+                    LinearRgba::rgb(0.16 + foam * 0.34, 0.17 + foam * 0.32, 0.12 + foam * 0.2);
+                material.alpha_mode = AlphaMode::Blend;
+            }
+            VillageVisualPartKind::PathStone => {
+                let pull = atmosphere.departure_pull;
+                material.base_color =
+                    Color::srgb(0.42 + pull * 0.08, 0.39 + pull * 0.06, 0.35 + pull * 0.05);
+                material.emissive =
+                    LinearRgba::rgb(0.01 + pull * 0.08, 0.01 + pull * 0.05, 0.01 + pull * 0.03);
+            }
         }
     }
 }
@@ -2320,6 +2564,10 @@ mod tests {
             storm_weight: 0.0,
             sandstorm_weight: 0.0,
             snow_weight: 0.0,
+            dawn_warmth: 0.62,
+            ground_wetness: 0.68,
+            horizon_tension: 0.52,
+            boundary_glow: 0.58,
         });
         app.insert_resource(WindField {
             direction: Vec2::new(0.9, -0.2).normalize(),
@@ -2362,6 +2610,8 @@ mod tests {
         assert!(atmosphere.canopy_sway > 0.4);
         assert!(atmosphere.sea_mist > 0.6);
         assert!(atmosphere.unease > 0.5);
+        assert!(atmosphere.warm_window_glow > 0.5);
+        assert!(atmosphere.departure_pull > 0.4);
     }
 
     fn test_config() -> AppConfig {

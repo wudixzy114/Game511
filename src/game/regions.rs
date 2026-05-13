@@ -10,6 +10,7 @@ use crate::game::{
         ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetMaterials, ProceduralSpawnRequest,
         spawn_procedural_asset_entity,
     },
+    environment::{EnvironmentSnapshot, WindField},
     flow::{AppScreen, InGameState},
     intent::{IntentKind, IntentState, PerceptionState},
     journey::{DreamPhase, JourneyState},
@@ -32,6 +33,7 @@ impl Plugin for RegionPlugin {
                 initialize_region_graph,
                 update_transition_gate_state,
                 update_transition_gate_visuals,
+                update_region_outpost_visuals,
             )
                 .chain()
                 .run_if(in_state(InGameState::Running)),
@@ -307,10 +309,22 @@ impl RegionJourneyMilestones {
 struct TransitionGateVisual {
     gate_id: u64,
     role: GateVisualRole,
+    base_translation: Vec3,
+    base_scale: Vec3,
 }
 
 #[derive(Debug, Component)]
-struct RegionOutpostVisual;
+struct RegionOutpostVisual {
+    scope: RegionOutpostVisualScope,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+enum RegionOutpostVisualScope {
+    Outpost,
+    TownEdge,
+    LossCrossroad,
+    DesertRoad,
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 enum GateVisualRole {
@@ -986,7 +1000,10 @@ fn spawn_region_outpost(
             Name::new("BoundaryOutpost"),
             DespawnOnExit(AppScreen::InGame),
             Transform::from_translation(outpost.center),
-            RegionOutpostVisual,
+            Visibility::Hidden,
+            RegionOutpostVisual {
+                scope: RegionOutpostVisualScope::Outpost,
+            },
         ))
         .id();
 
@@ -1007,7 +1024,12 @@ fn spawn_region_outpost(
             )
             .with_lod(ProceduralAssetLod::Near),
         );
-        commands.entity(entity).insert(RegionOutpostVisual);
+        commands.entity(entity).insert((
+            Visibility::Hidden,
+            RegionOutpostVisual {
+                scope: RegionOutpostVisualScope::Outpost,
+            },
+        ));
     }
 
     let stall = spawn_procedural_asset_entity(
@@ -1025,7 +1047,12 @@ fn spawn_region_outpost(
         )
         .with_lod(ProceduralAssetLod::Near),
     );
-    commands.entity(stall).insert(RegionOutpostVisual);
+    commands.entity(stall).insert((
+        Visibility::Hidden,
+        RegionOutpostVisual {
+            scope: RegionOutpostVisualScope::Outpost,
+        },
+    ));
 
     for index in 0..6 {
         let entity = spawn_procedural_asset_entity(
@@ -1045,7 +1072,12 @@ fn spawn_region_outpost(
             )
             .with_lod(ProceduralAssetLod::Near),
         );
-        commands.entity(entity).insert(RegionOutpostVisual);
+        commands.entity(entity).insert((
+            Visibility::Hidden,
+            RegionOutpostVisual {
+                scope: RegionOutpostVisualScope::Outpost,
+            },
+        ));
     }
 
     let marker = spawn_procedural_asset_entity(
@@ -1062,7 +1094,12 @@ fn spawn_region_outpost(
         )
         .with_lod(ProceduralAssetLod::Near),
     );
-    commands.entity(marker).insert(RegionOutpostVisual);
+    commands.entity(marker).insert((
+        Visibility::Hidden,
+        RegionOutpostVisual {
+            scope: RegionOutpostVisualScope::Outpost,
+        },
+    ));
 
     spawn_region_milestone_visuals(commands, meshes, materials, asset_config, graph);
 }
@@ -1090,7 +1127,12 @@ fn spawn_region_milestone_visuals(
         )
         .with_lod(ProceduralAssetLod::Near),
     );
-    commands.entity(stall).insert(RegionOutpostVisual);
+    commands.entity(stall).insert((
+        Visibility::Hidden,
+        RegionOutpostVisual {
+            scope: RegionOutpostVisualScope::TownEdge,
+        },
+    ));
     for index in 0..5 {
         let entity = spawn_procedural_asset_entity(
             commands,
@@ -1108,7 +1150,12 @@ fn spawn_region_milestone_visuals(
             )
             .with_lod(ProceduralAssetLod::Near),
         );
-        commands.entity(entity).insert(RegionOutpostVisual);
+        commands.entity(entity).insert((
+            Visibility::Hidden,
+            RegionOutpostVisual {
+                scope: RegionOutpostVisualScope::TownEdge,
+            },
+        ));
     }
 
     let loss = &graph.milestones.loss_crossroad;
@@ -1127,7 +1174,12 @@ fn spawn_region_milestone_visuals(
         )
         .with_lod(ProceduralAssetLod::Near),
     );
-    commands.entity(marker).insert(RegionOutpostVisual);
+    commands.entity(marker).insert((
+        Visibility::Hidden,
+        RegionOutpostVisual {
+            scope: RegionOutpostVisualScope::LossCrossroad,
+        },
+    ));
     for index in 0..3 {
         let entity = spawn_procedural_asset_entity(
             commands,
@@ -1146,7 +1198,12 @@ fn spawn_region_milestone_visuals(
             )
             .with_lod(ProceduralAssetLod::Near),
         );
-        commands.entity(entity).insert(RegionOutpostVisual);
+        commands.entity(entity).insert((
+            Visibility::Hidden,
+            RegionOutpostVisual {
+                scope: RegionOutpostVisualScope::LossCrossroad,
+            },
+        ));
     }
 
     let desert = &graph.milestones.desert_road;
@@ -1165,11 +1222,19 @@ fn spawn_region_milestone_visuals(
         )
         .with_lod(ProceduralAssetLod::Near),
     );
-    commands.entity(relic).insert(RegionOutpostVisual);
+    commands.entity(relic).insert((
+        Visibility::Hidden,
+        RegionOutpostVisual {
+            scope: RegionOutpostVisualScope::DesertRoad,
+        },
+    ));
 }
 
 fn update_transition_gate_visuals(
     graph: Option<Res<RegionGraphState>>,
+    environment: Option<Res<EnvironmentSnapshot>>,
+    wind: Option<Res<WindField>>,
+    journey: Option<Res<JourneyState>>,
     mut query: Query<
         (&TransitionGateVisual, &mut Visibility, &mut Transform),
         Without<WandererPrototype>,
@@ -1178,6 +1243,34 @@ fn update_transition_gate_visuals(
     let Some(graph) = graph else {
         return;
     };
+    let fog_density = environment
+        .as_deref()
+        .map(|snapshot| snapshot.fog_density)
+        .unwrap_or(0.0);
+    let boundary_glow = environment
+        .as_deref()
+        .map(|snapshot| snapshot.boundary_glow)
+        .unwrap_or(0.0);
+    let horizon_tension = environment
+        .as_deref()
+        .map(|snapshot| snapshot.horizon_tension)
+        .unwrap_or(0.0);
+    let wind_gust = wind.as_deref().map(|field| field.gust).unwrap_or(0.0);
+    let dream_bias = journey
+        .as_deref()
+        .map(|state| match state.story_stage {
+            crate::game::journey::StoryArcStage::VillageAwakening => 0.0,
+            crate::game::journey::StoryArcStage::VillageLife => 0.08,
+            crate::game::journey::StoryArcStage::DreamApproaching => 0.16,
+            crate::game::journey::StoryArcStage::Dreaming => 0.24,
+            crate::game::journey::StoryArcStage::DreamAfterglow => 0.34,
+            crate::game::journey::StoryArcStage::BoundaryCrossing => 0.78,
+            crate::game::journey::StoryArcStage::FarBankOutpost => 0.92,
+            crate::game::journey::StoryArcStage::TownPreparation => 0.72,
+            crate::game::journey::StoryArcStage::FirstLoss => 0.72,
+            crate::game::journey::StoryArcStage::DesertDeparture => 0.88,
+        })
+        .unwrap_or(0.0);
     for (visual, mut visibility, mut transform) in &mut query {
         let Some(gate) = graph.gates.iter().find(|gate| gate.id == visual.gate_id) else {
             continue;
@@ -1209,14 +1302,49 @@ fn update_transition_gate_visuals(
         } else {
             0.0
         };
-        let base_scale = match visual.role {
-            GateVisualRole::MistBed => Vec3::new(1.0, 1.0, 1.0),
-            GateVisualRole::WaterRibbon => Vec3::new(1.0, 1.0, 1.0),
-            GateVisualRole::FordStone => Vec3::splat(1.0),
-            GateVisualRole::Marker => Vec3::splat(1.0),
-            GateVisualRole::SoftLight => Vec3::splat(1.0),
+        let atmosphere_gain =
+            (fog_density * 0.2 + boundary_glow * 0.16 + wind_gust * 0.14).clamp(0.0, 0.28);
+        let gate_scale = 0.85 + pulse * 0.35 + crossing_boost + atmosphere_gain + dream_bias * 0.08;
+        transform.scale = visual.base_scale * gate_scale;
+        if visual.role == GateVisualRole::WaterRibbon {
+            transform.translation.y =
+                visual.base_translation.y + 0.04 + horizon_tension * 0.06 + crossing_boost * 0.18;
+        } else {
+            transform.translation = visual.base_translation;
+        }
+    }
+}
+
+fn update_region_outpost_visuals(
+    graph: Option<Res<RegionGraphState>>,
+    mut query: Query<(&RegionOutpostVisual, &mut Visibility), Without<WandererPrototype>>,
+) {
+    let Some(graph) = graph else {
+        return;
+    };
+    let outpost_discovered = graph
+        .outpost
+        .as_ref()
+        .is_some_and(|outpost| outpost.discovered);
+    let town_visible = graph.milestones.town_edge.discovered
+        || graph.current_region == graph.milestones.town_edge.region;
+    let loss_visible = graph.milestones.loss_crossroad.discovered
+        || graph.current_region == graph.milestones.loss_crossroad.region;
+    let desert_visible = graph.milestones.desert_road.discovered
+        || graph.current_region == graph.milestones.desert_road.region;
+
+    for (visual, mut visibility) in &mut query {
+        let visible = match visual.scope {
+            RegionOutpostVisualScope::Outpost => outpost_discovered,
+            RegionOutpostVisualScope::TownEdge => outpost_discovered && town_visible,
+            RegionOutpostVisualScope::LossCrossroad => outpost_discovered && loss_visible,
+            RegionOutpostVisualScope::DesertRoad => outpost_discovered && desert_visible,
         };
-        transform.scale = base_scale * (0.85 + pulse * 0.35 + crossing_boost);
+        *visibility = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
 }
 
@@ -1243,6 +1371,8 @@ fn spawn_gate_visuals(
             TransitionGateVisual {
                 gate_id: gate.id,
                 role: GateVisualRole::MistBed,
+                base_translation: gate.position + Vec3::Y * 0.08,
+                base_scale: Vec3::ONE,
             },
         ));
         if gate.kind == TransitionGateKind::MistRiverFord {
@@ -1260,6 +1390,8 @@ fn spawn_gate_visuals(
                     TransitionGateVisual {
                         gate_id: gate.id,
                         role: GateVisualRole::Marker,
+                        base_translation: gate.position + Vec3::new(offset, 2.8, 0.0),
+                        base_scale: Vec3::ONE,
                     },
                 ));
             }
@@ -1280,6 +1412,8 @@ fn spawn_gate_visuals(
                 TransitionGateVisual {
                     gate_id: gate.id,
                     role: GateVisualRole::SoftLight,
+                    base_translation: gate.position + Vec3::Y * 1.6,
+                    base_scale: Vec3::ONE,
                 },
             ));
         }
@@ -1304,6 +1438,8 @@ fn spawn_mist_river_ford_visuals(
         TransitionGateVisual {
             gate_id: gate.id,
             role: GateVisualRole::WaterRibbon,
+            base_translation: gate.position + Vec3::new(0.0, 0.045, 0.0),
+            base_scale: Vec3::new(gate.radius * 1.35, 1.0, gate.radius * 0.28),
         },
     ));
 
@@ -1327,6 +1463,8 @@ fn spawn_mist_river_ford_visuals(
             TransitionGateVisual {
                 gate_id: gate.id,
                 role: GateVisualRole::FordStone,
+                base_translation: gate.position + offset,
+                base_scale: Vec3::ONE,
             },
         ));
     }
@@ -1346,6 +1484,8 @@ fn spawn_mist_river_ford_visuals(
             TransitionGateVisual {
                 gate_id: gate.id,
                 role: GateVisualRole::Marker,
+                base_translation: gate.position + offset,
+                base_scale: Vec3::ONE,
             },
         ));
     }

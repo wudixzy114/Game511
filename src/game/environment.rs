@@ -188,6 +188,10 @@ pub struct EnvironmentSnapshot {
     pub storm_weight: f32,
     pub sandstorm_weight: f32,
     pub snow_weight: f32,
+    pub dawn_warmth: f32,
+    pub ground_wetness: f32,
+    pub horizon_tension: f32,
+    pub boundary_glow: f32,
 }
 
 impl Default for EnvironmentSnapshot {
@@ -204,6 +208,10 @@ impl Default for EnvironmentSnapshot {
             storm_weight: 0.0,
             sandstorm_weight: 0.0,
             snow_weight: 0.0,
+            dawn_warmth: 0.35,
+            ground_wetness: 0.16,
+            horizon_tension: 0.08,
+            boundary_glow: 0.18,
         }
     }
 }
@@ -891,6 +899,7 @@ fn environment_snapshot_from_profile(
     daylight: f32,
 ) -> EnvironmentSnapshot {
     let fog_density = (1.0 - profile.visibility / 180.0).clamp(0.0, 1.0);
+    let cloud_cover = profile.cloud_cover.clamp(0.0, 1.0);
     let precipitation = profile.precipitation_strength.clamp(0.0, 1.0);
     let humidity = match dominant_kind {
         WeatherKind::Clear => (0.18 + profile.cloud_cover * 0.18).clamp(0.0, 1.0),
@@ -923,6 +932,28 @@ fn environment_snapshot_from_profile(
     } else {
         0.0
     };
+    let dawn_warmth = ((1.0 - (daylight - 0.24).abs() / 0.24).clamp(0.0, 1.0)
+        * (1.0 - cloud_cover.clamp(0.0, 1.0) * 0.42)
+        * (1.0 - sandstorm_weight * 0.6))
+        .clamp(0.0, 1.0);
+    let ground_wetness =
+        (humidity * 0.54 + precipitation * 0.58 + sea_mist * 0.38 + storm_weight * 0.22
+            - sandstorm_weight * 0.45)
+            .clamp(0.0, 1.0);
+    let horizon_tension = (fog_density * 0.46
+        + cloud_cover.clamp(0.0, 1.0) * 0.21
+        + storm_weight * 0.35
+        + sandstorm_weight * 0.48
+        + snow_weight * 0.28
+        + (1.0 - daylight.clamp(0.0, 1.0)) * 0.14)
+        .clamp(0.0, 1.0);
+    let boundary_glow = (0.22
+        + dawn_warmth * 0.32
+        + sea_mist * 0.2
+        + (1.0 - fog_density).clamp(0.0, 1.0) * 0.2
+        + storm_weight * 0.1
+        - sandstorm_weight * 0.18)
+        .clamp(0.0, 1.0);
 
     EnvironmentSnapshot {
         weather: dominant_kind,
@@ -930,12 +961,16 @@ fn environment_snapshot_from_profile(
         visibility: profile.visibility,
         humidity,
         fog_density,
-        cloud_cover: profile.cloud_cover.clamp(0.0, 1.0),
+        cloud_cover,
         ambient_energy: (profile.ambient_brightness / 360.0).clamp(0.18, 1.2),
         sea_mist,
         storm_weight,
         sandstorm_weight,
         snow_weight: snow_weight.max(precipitation * 0.55),
+        dawn_warmth,
+        ground_wetness,
+        horizon_tension,
+        boundary_glow,
     }
 }
 
