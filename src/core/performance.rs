@@ -629,6 +629,15 @@ pub fn report_performance_session_summary(
     );
 }
 
+pub fn emit_tracy_frame_mark() {
+    #[cfg(feature = "tracy-profile")]
+    tracing::event!(
+        tracing::Level::INFO,
+        message = "finished frame",
+        tracy.frame_mark = true
+    );
+}
+
 fn top_phase_breakdown(samples: &HashMap<PerformancePhase, f32>) -> Vec<PhaseBreakdown> {
     let mut phases: Vec<PhaseBreakdown> = samples
         .iter()

@@ -87,17 +87,20 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
         .json()
         .with_writer(app_writer)
         .with_ansi(false)
+        .with_filter(tracing_subscriber::filter::filter_fn(not_tracy_frame_mark))
         .with_filter(env_filter);
     let error_layer = fmt::layer()
         .json()
         .with_writer(error_writer)
         .with_ansi(false)
+        .with_filter(tracing_subscriber::filter::filter_fn(not_tracy_frame_mark))
         .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
             metadata.level() <= &tracing::Level::ERROR
         }));
     let perf_layer = fmt::layer()
         .json()
         .with_writer(BoxMakeWriter::new(perf_writer))
+        .with_filter(tracing_subscriber::filter::filter_fn(not_tracy_frame_mark))
         .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
             metadata.target().starts_with("dao_game::performance")
         }));
@@ -142,6 +145,10 @@ fn tracy_enabled() -> bool {
         env::var("DAO_PROFILE_TRACY").ok().as_deref(),
         Some("1" | "true" | "TRUE" | "on" | "ON")
     )
+}
+
+fn not_tracy_frame_mark(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.fields().field("tracy.frame_mark").is_none()
 }
 
 fn active_log_path(directory: &Path, file_name: &str) -> PathBuf {

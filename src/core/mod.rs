@@ -52,6 +52,7 @@ impl Plugin for CorePlugin {
                 performance::end_main_schedule_timing,
                 performance::track_frame_timing,
                 performance::report_performance_session_summary,
+                performance::emit_tracy_frame_mark,
             )
                 .chain(),
         );
