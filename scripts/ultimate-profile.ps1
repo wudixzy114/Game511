@@ -8,7 +8,7 @@ param(
     [string]$TracyCsvDir = ".\\logs\\tracy",
     [int]$Top = 12,
     [int]$TraceKeep = 2,
-    [int]$ResultKeep = 1,
+    [int]$ResultKeep = 2,
     [double]$CaptureTimeoutSeconds = 180.0,
     [switch]$KeepIntermediates
 )
@@ -412,9 +412,7 @@ Remove-IntermediateFiles -Paths @(
     $perfTxt,
     $perfJsonPath,
     $perfHtml,
-    $perfLogSnapshot,
-    $applicationLog,
-    $errorLog
+    $perfLogSnapshot
 )
 Remove-OldUltimateResults -Directory $OutputDir -Keep $ResultKeep
 
