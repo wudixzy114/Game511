@@ -4,7 +4,7 @@ use bevy::{
     asset::RenderAssetUsages,
     color::LinearRgba,
     math::primitives::{Capsule3d, Cuboid, Cylinder, Sphere},
-    mesh::{Indices, PrimitiveTopology},
+    mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::MeshMaterial3d,
     prelude::*,
 };
@@ -605,16 +605,29 @@ fn spawn_blueprint_parts(
     materials: &ProceduralAssetMaterials,
     blueprint: &ProceduralAssetBlueprint,
 ) {
-    for part in &blueprint.parts {
-        let mut entity = parent.spawn((
-            Name::new(part.name),
-            Mesh3d(meshes.add(mesh_from_shape(part.shape))),
-            MeshMaterial3d(materials.family(part.material_family)),
-            part.local_transform,
+    let grouped_static_parts = grouped_batchable_static_parts(&blueprint.parts);
+    for (material_family, parts) in grouped_static_parts {
+        let Some(mesh) = build_batched_part_mesh(&parts) else {
+            continue;
+        };
+        parent.spawn((
+            Name::new(format!(
+                "{}_{}_static",
+                blueprint.kind.label(),
+                material_family.label()
+            )),
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(materials.family(material_family)),
+            Transform::default(),
         ));
-        if let Some(role) = part.animation_role {
-            entity.insert(role);
-        }
+    }
+
+    for part in blueprint
+        .parts
+        .iter()
+        .filter(|part| !can_batch_static_part(part))
+    {
+        spawn_distinct_blueprint_part(parent, meshes, materials, part);
     }
 }
 
@@ -631,6 +644,172 @@ fn mesh_from_shape(shape: ProceduralShape) -> Mesh {
             height,
             overhang,
         } => gabled_roof_mesh(width, depth, height, overhang),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MeshGeometry {
+    positions: Vec<[f32; 3]>,
+    normals: Option<Vec<[f32; 3]>>,
+    uvs: Option<Vec<[f32; 2]>>,
+    indices: Vec<u32>,
+}
+
+fn spawn_distinct_blueprint_part(
+    parent: &mut ChildSpawnerCommands<'_>,
+    meshes: &mut Assets<Mesh>,
+    materials: &ProceduralAssetMaterials,
+    part: &ProceduralPartBlueprint,
+) {
+    let mut entity = parent.spawn((
+        Name::new(part.name),
+        Mesh3d(meshes.add(mesh_from_shape(part.shape))),
+        MeshMaterial3d(materials.family(part.material_family)),
+        part.local_transform,
+    ));
+    if let Some(role) = part.animation_role {
+        entity.insert(role);
+    }
+}
+
+fn grouped_batchable_static_parts(
+    parts: &[ProceduralPartBlueprint],
+) -> Vec<(ProceduralMaterialFamily, Vec<&ProceduralPartBlueprint>)> {
+    let mut groups: Vec<(ProceduralMaterialFamily, Vec<&ProceduralPartBlueprint>)> = Vec::new();
+    for part in parts.iter().filter(|part| can_batch_static_part(part)) {
+        if let Some((_, grouped_parts)) = groups
+            .iter_mut()
+            .find(|(material_family, _)| *material_family == part.material_family)
+        {
+            grouped_parts.push(part);
+        } else {
+            groups.push((part.material_family, vec![part]));
+        }
+    }
+    groups
+}
+
+fn can_batch_static_part(part: &ProceduralPartBlueprint) -> bool {
+    part.animation_role.is_none() && !part_requires_distinct_entity(part.name)
+}
+
+fn part_requires_distinct_entity(part_name: &str) -> bool {
+    matches!(
+        part_name,
+        "HouseWindowWarmLeft"
+            | "HouseWindowWarmRight"
+            | "HouseInteriorLantern"
+            | "MarketHangingScale"
+            | "WellWater"
+            | "ShoreWetSand"
+            | "PathStone"
+            | "PathDustPatch"
+    )
+}
+
+fn build_batched_part_mesh(parts: &[&ProceduralPartBlueprint]) -> Option<Mesh> {
+    if parts.is_empty() {
+        return None;
+    }
+
+    let geometries: Vec<MeshGeometry> = parts
+        .iter()
+        .map(|part| mesh_geometry_from_mesh(mesh_from_shape(part.shape)))
+        .collect();
+    let include_normals = geometries.iter().all(|geometry| geometry.normals.is_some());
+    let include_uvs = geometries.iter().all(|geometry| geometry.uvs.is_some());
+    let vertex_capacity = geometries
+        .iter()
+        .map(|geometry| geometry.positions.len())
+        .sum();
+    let index_capacity = geometries
+        .iter()
+        .map(|geometry| geometry.indices.len())
+        .sum();
+
+    let mut positions = Vec::with_capacity(vertex_capacity);
+    let mut normals = include_normals.then(|| Vec::with_capacity(vertex_capacity));
+    let mut uvs = include_uvs.then(|| Vec::with_capacity(vertex_capacity));
+    let mut indices = Vec::with_capacity(index_capacity);
+
+    for (part, geometry) in parts.iter().zip(geometries.iter()) {
+        let vertex_base = positions.len() as u32;
+        let matrix = part.local_transform.to_matrix();
+        let normal_matrix = Mat3::from_mat4(matrix).inverse().transpose();
+
+        for position in &geometry.positions {
+            positions.push(
+                matrix
+                    .transform_point3(Vec3::from_array(*position))
+                    .to_array(),
+            );
+        }
+        if let Some(target_normals) = normals.as_mut()
+            && let Some(source_normals) = &geometry.normals
+        {
+            for normal in source_normals {
+                target_normals.push(
+                    normal_matrix
+                        .mul_vec3(Vec3::from_array(*normal))
+                        .normalize_or_zero()
+                        .to_array(),
+                );
+            }
+        }
+        if let Some(target_uvs) = uvs.as_mut()
+            && let Some(source_uvs) = &geometry.uvs
+        {
+            target_uvs.extend(source_uvs.iter().copied());
+        }
+        indices.extend(geometry.indices.iter().map(|index| index + vertex_base));
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    if let Some(normals) = normals {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    }
+    if let Some(uvs) = uvs {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    }
+    mesh.insert_indices(Indices::U32(indices));
+    Some(mesh)
+}
+
+fn mesh_geometry_from_mesh(mesh: Mesh) -> MeshGeometry {
+    let positions = match mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .expect("procedural part mesh positions should exist")
+    {
+        VertexAttributeValues::Float32x3(values) => values.clone(),
+        _ => panic!("procedural part mesh positions should be float32x3"),
+    };
+    let normals = mesh
+        .attribute(Mesh::ATTRIBUTE_NORMAL)
+        .map(|attribute| match attribute {
+            VertexAttributeValues::Float32x3(values) => values.clone(),
+            _ => panic!("procedural part mesh normals should be float32x3"),
+        });
+    let uvs = mesh
+        .attribute(Mesh::ATTRIBUTE_UV_0)
+        .map(|attribute| match attribute {
+            VertexAttributeValues::Float32x2(values) => values.clone(),
+            _ => panic!("procedural part mesh uvs should be float32x2"),
+        });
+    let indices = match mesh.indices() {
+        Some(Indices::U16(values)) => values.iter().map(|index| *index as u32).collect(),
+        Some(Indices::U32(values)) => values.clone(),
+        None => (0..positions.len() as u32).collect(),
+    };
+
+    MeshGeometry {
+        positions,
+        normals,
+        uvs,
+        indices,
     }
 }
 
@@ -1980,6 +2159,30 @@ pub enum ProceduralMaterialFamily {
     Shadow,
 }
 
+impl ProceduralMaterialFamily {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MudWall => "mud_wall",
+            Self::DarkRoof => "dark_roof",
+            Self::Wood => "wood",
+            Self::GroveLeaf => "grove_leaf",
+            Self::Stone => "stone",
+            Self::Cloth => "cloth",
+            Self::Water => "water",
+            Self::Sand => "sand",
+            Self::Wool => "wool",
+            Self::NpcCloth => "npc_cloth",
+            Self::BirdFeather => "bird_feather",
+            Self::FishScale => "fish_scale",
+            Self::OldStone => "old_stone",
+            Self::Relic => "relic",
+            Self::DesertStone => "desert_stone",
+            Self::WarmLight => "warm_light",
+            Self::Shadow => "shadow",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProceduralLodStrategy {
     Fixed,
@@ -2367,8 +2570,10 @@ fn fallback_spec(kind: ProceduralAssetKind) -> ProceduralAssetSpec {
 mod tests {
     use super::{
         ProceduralAnimationRole, ProceduralAssetKind, ProceduralAssetLod, ProceduralAssetRegistry,
-        ProceduralLodStrategy, ProceduralSemantic, asset_blueprint, choose_lod,
-        default_placeholder_enabled, registered_spec, stable_asset_id,
+        ProceduralLodStrategy, ProceduralSemantic, asset_blueprint, build_batched_part_mesh,
+        can_batch_static_part, choose_lod, default_placeholder_enabled,
+        grouped_batchable_static_parts, part_requires_distinct_entity, registered_spec,
+        stable_asset_id,
     };
     use crate::core::config::AssetConfig;
 
@@ -2512,6 +2717,35 @@ mod tests {
                 .parts
                 .iter()
                 .any(|part| part.name == "MerchantPack")
+        );
+    }
+
+    #[test]
+    fn static_asset_parts_batch_by_material_while_sensitive_parts_stay_distinct() {
+        let house = registered_spec(ProceduralAssetKind::VillageHouse);
+        let blueprint = asset_blueprint(&house, ProceduralAssetLod::Near);
+        let groups = grouped_batchable_static_parts(&blueprint.parts);
+        let batched_part_count: usize = groups.iter().map(|(_, parts)| parts.len()).sum();
+
+        assert!(part_requires_distinct_entity("HouseWindowWarmLeft"));
+        assert!(groups.iter().any(|(_, parts)| parts.len() > 1));
+        assert!(batched_part_count > 0);
+        assert!(
+            blueprint
+                .parts
+                .iter()
+                .any(|part| part.name == "HouseSmokeWisp" && !can_batch_static_part(part))
+        );
+        assert!(
+            blueprint
+                .parts
+                .iter()
+                .any(|part| part.name == "HouseWindowWarmLeft" && !can_batch_static_part(part))
+        );
+        assert!(
+            groups
+                .iter()
+                .any(|(_, parts)| build_batched_part_mesh(parts).is_some())
         );
     }
 

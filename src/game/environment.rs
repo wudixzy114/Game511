@@ -1,9 +1,11 @@
 use std::f32::consts::{PI, TAU};
 
 use bevy::{
+    asset::RenderAssetUsages,
     color::LinearRgba,
     light::NotShadowCaster,
     math::primitives::{Cuboid, Sphere},
+    mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::{DistanceFog, FogFalloff, MeshMaterial3d},
     prelude::*,
 };
@@ -137,10 +139,8 @@ struct MoonLight;
 #[derive(Debug, Component)]
 struct LightningFlash;
 
-#[derive(Debug, Component, Clone, Copy, PartialEq)]
-struct Star {
-    scale: f32,
-}
+#[derive(Debug, Component)]
+struct StarField;
 
 #[derive(Debug, Component, Clone, Copy, PartialEq)]
 struct WeatherParticle {
@@ -261,11 +261,14 @@ const SUN_DISC_SCALE: f32 = 11.0;
 const MOON_DISC_SCALE: f32 = 8.2;
 const STAR_COUNT: u32 = 220;
 const PARTICLE_COUNT: u32 = 240;
+const HIDDEN_WEATHER_TRANSLATION: Vec3 = Vec3::new(0.0, -200.0, 0.0);
 const WEATHER_RADIUS: f32 = 20.0;
 const WEATHER_TOP: f32 = 16.0;
 const WEATHER_BOTTOM: f32 = -3.0;
 const WEATHER_SEGMENT_SECONDS: f32 = 30.0;
 const WEATHER_TRANSITION_SECONDS: f32 = 3.5;
+const SKY_ANCHOR_REPOSITION_DISTANCE_SQ: f32 = 16.0;
+const WEATHER_ANCHOR_REPOSITION_DISTANCE_SQ: f32 = 4.0;
 const WEATHER_SEQUENCE: [WeatherKind; 7] = [
     WeatherKind::Clear,
     WeatherKind::Mist,
@@ -284,6 +287,14 @@ type EnvironmentSnapshotResources<'w> = (
     Res<'w, WeatherTransition>,
     Option<Res<'w, JourneyState>>,
 );
+
+#[derive(Debug, Clone)]
+struct MeshGeometry {
+    positions: Vec<[f32; 3]>,
+    normals: Option<Vec<[f32; 3]>>,
+    uvs: Option<Vec<[f32; 2]>>,
+    indices: Vec<u32>,
+}
 
 fn begin_environment_phase(performance: Res<FramePerformance>) {
     performance.begin_phase(PerformancePhase::Environment);
@@ -347,7 +358,7 @@ fn initialize_environment_scene(
     });
 
     let disc_mesh = meshes.add(Sphere::new(1.0).mesh().uv(24, 14));
-    let star_mesh = meshes.add(Sphere::new(0.55).mesh().uv(12, 8));
+    let star_mesh = meshes.add(build_starfield_mesh());
     let particle_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
 
     let sky_anchor = commands
@@ -387,19 +398,14 @@ fn initialize_environment_scene(
             MoonDisc,
         ));
 
-        for index in 0..STAR_COUNT {
-            let direction = star_direction(index);
-            let distance = SKY_RADIUS - 32.0 - hash_range(index, 91, 0.0, 42.0);
-            let scale = 0.48 + hash_range(index, 17, 0.0, 1.25);
-            parent.spawn((
-                Name::new("Star"),
-                Mesh3d(star_mesh.clone()),
-                MeshMaterial3d(star_material.clone()),
-                Transform::from_translation(direction * distance).with_scale(Vec3::splat(scale)),
-                NotShadowCaster,
-                Star { scale },
-            ));
-        }
+        parent.spawn((
+            Name::new("StarField"),
+            Mesh3d(star_mesh.clone()),
+            MeshMaterial3d(star_material.clone()),
+            Transform::default(),
+            NotShadowCaster,
+            StarField,
+        ));
     });
 
     commands.entity(weather_anchor).with_children(|parent| {
@@ -408,7 +414,7 @@ fn initialize_environment_scene(
                 Name::new("WeatherParticle"),
                 Mesh3d(particle_mesh.clone()),
                 MeshMaterial3d(particle_material.clone()),
-                Transform::from_xyz(0.0, -200.0, 0.0),
+                Transform::from_translation(HIDDEN_WEATHER_TRANSLATION),
                 Visibility::Hidden,
                 NotShadowCaster,
                 WeatherParticle {
@@ -463,6 +469,107 @@ fn initialize_environment_scene(
         star_material,
         particle_material,
     });
+}
+
+fn build_starfield_mesh() -> Mesh {
+    let geometry = mesh_geometry_from_mesh(Sphere::new(0.55).mesh().uv(12, 8));
+    let vertex_capacity = geometry.positions.len() * STAR_COUNT as usize;
+    let index_capacity = geometry.indices.len() * STAR_COUNT as usize;
+    let mut positions = Vec::with_capacity(vertex_capacity);
+    let mut normals = geometry
+        .normals
+        .as_ref()
+        .map(|_| Vec::with_capacity(vertex_capacity));
+    let mut uvs = geometry
+        .uvs
+        .as_ref()
+        .map(|_| Vec::with_capacity(vertex_capacity));
+    let mut indices = Vec::with_capacity(index_capacity);
+
+    for index in 0..STAR_COUNT {
+        let direction = star_direction(index);
+        let distance = SKY_RADIUS - 32.0 - hash_range(index, 91, 0.0, 42.0);
+        let scale = 0.48 + hash_range(index, 17, 0.0, 1.25);
+        let transform =
+            Transform::from_translation(direction * distance).with_scale(Vec3::splat(scale));
+        let matrix = transform.to_matrix();
+        let normal_matrix = Mat3::from_mat4(matrix).inverse().transpose();
+        let vertex_base = positions.len() as u32;
+
+        for position in &geometry.positions {
+            positions.push(
+                matrix
+                    .transform_point3(Vec3::from_array(*position))
+                    .to_array(),
+            );
+        }
+        if let Some(target_normals) = normals.as_mut()
+            && let Some(source_normals) = &geometry.normals
+        {
+            for normal in source_normals {
+                target_normals.push(
+                    normal_matrix
+                        .mul_vec3(Vec3::from_array(*normal))
+                        .normalize_or_zero()
+                        .to_array(),
+                );
+            }
+        }
+        if let Some(target_uvs) = uvs.as_mut()
+            && let Some(source_uvs) = &geometry.uvs
+        {
+            target_uvs.extend(source_uvs.iter().copied());
+        }
+        indices.extend(geometry.indices.iter().map(|vertex| vertex + vertex_base));
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    if let Some(normals) = normals {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    }
+    if let Some(uvs) = uvs {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    }
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn mesh_geometry_from_mesh(mesh: Mesh) -> MeshGeometry {
+    let positions = match mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .expect("environment mesh positions should exist")
+    {
+        VertexAttributeValues::Float32x3(values) => values.clone(),
+        _ => panic!("environment mesh positions should be float32x3"),
+    };
+    let normals = mesh
+        .attribute(Mesh::ATTRIBUTE_NORMAL)
+        .map(|attribute| match attribute {
+            VertexAttributeValues::Float32x3(values) => values.clone(),
+            _ => panic!("environment mesh normals should be float32x3"),
+        });
+    let uvs = mesh
+        .attribute(Mesh::ATTRIBUTE_UV_0)
+        .map(|attribute| match attribute {
+            VertexAttributeValues::Float32x2(values) => values.clone(),
+            _ => panic!("environment mesh uvs should be float32x2"),
+        });
+    let indices = match mesh.indices() {
+        Some(Indices::U16(values)) => values.iter().map(|index| *index as u32).collect(),
+        Some(Indices::U32(values)) => values.clone(),
+        None => (0..positions.len() as u32).collect(),
+    };
+
+    MeshGeometry {
+        positions,
+        normals,
+        uvs,
+        indices,
+    }
 }
 
 fn advance_weather_state(
@@ -564,10 +671,15 @@ fn sync_environment_anchors(
     };
     let translation = camera_transform.translation;
 
-    if let Some(mut transform) = sky_anchor_query.iter_mut().next() {
+    if let Some(mut transform) = sky_anchor_query.iter_mut().next()
+        && transform.translation.distance_squared(translation) > SKY_ANCHOR_REPOSITION_DISTANCE_SQ
+    {
         transform.translation = translation;
     }
-    if let Some(mut transform) = weather_anchor_query.iter_mut().next() {
+    if let Some(mut transform) = weather_anchor_query.iter_mut().next()
+        && transform.translation.distance_squared(translation)
+            > WEATHER_ANCHOR_REPOSITION_DISTANCE_SQ
+    {
         transform.translation = translation;
     }
 }
@@ -669,7 +781,7 @@ fn update_celestial_visuals(
             Without<LightningFlash>,
             Without<SunDisc>,
             Without<MoonDisc>,
-            Without<Star>,
+            Without<StarField>,
         ),
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -682,7 +794,7 @@ fn update_celestial_visuals(
                 Without<LightningFlash>,
                 Without<SunDisc>,
                 Without<MoonDisc>,
-                Without<Star>,
+                Without<StarField>,
             ),
         >,
         Query<
@@ -693,7 +805,7 @@ fn update_celestial_visuals(
                 Without<LightningFlash>,
                 Without<SunDisc>,
                 Without<MoonDisc>,
-                Without<Star>,
+                Without<StarField>,
             ),
         >,
         Query<
@@ -704,7 +816,7 @@ fn update_celestial_visuals(
                 Without<MoonLight>,
                 Without<SunDisc>,
                 Without<MoonDisc>,
-                Without<Star>,
+                Without<StarField>,
             ),
         >,
         Query<
@@ -712,7 +824,7 @@ fn update_celestial_visuals(
             (
                 With<SunDisc>,
                 Without<MoonDisc>,
-                Without<Star>,
+                Without<StarField>,
                 Without<SunLight>,
                 Without<MoonLight>,
                 Without<LightningFlash>,
@@ -723,18 +835,7 @@ fn update_celestial_visuals(
             (
                 With<MoonDisc>,
                 Without<SunDisc>,
-                Without<Star>,
-                Without<SunLight>,
-                Without<MoonLight>,
-                Without<LightningFlash>,
-            ),
-        >,
-        Query<
-            (&mut Transform, &Star),
-            (
-                With<Star>,
-                Without<SunDisc>,
-                Without<MoonDisc>,
+                Without<StarField>,
                 Without<SunLight>,
                 Without<MoonLight>,
                 Without<LightningFlash>,
@@ -809,15 +910,6 @@ fn update_celestial_visuals(
         * frame.night_factor.powf(1.55)
         * (1.0 - profile.cloud_cover * 0.9)
         * (1.0 - frame.moon_visibility * 0.42);
-    for (mut transform, star) in &mut transform_queries.p5() {
-        let twinkle = 0.92
-            + (transform.translation.x * 0.013 + time.elapsed_secs() * 0.6)
-                .sin()
-                .abs()
-                * 0.18;
-        transform.scale = Vec3::splat(star.scale * (0.92 + star_strength * 0.08 * twinkle));
-    }
-
     if let Some(material) = materials.get_mut(&environment_assets.sun_material) {
         let sun_emission = 9.0 + frame.sun_visibility * 22.0;
         material.base_color = Color::srgb(1.0, 0.84, 0.6);
@@ -1033,12 +1125,18 @@ fn animate_weather_particles(
 
     for (particle, mut transform, mut visibility) in &mut query {
         if particle.index >= active_count || particle_mode == ParticleMode::None {
-            *visibility = Visibility::Hidden;
-            transform.translation = Vec3::new(0.0, -200.0, 0.0);
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            if transform.translation != HIDDEN_WEATHER_TRANSLATION {
+                transform.translation = HIDDEN_WEATHER_TRANSLATION;
+            }
             continue;
         }
 
-        *visibility = Visibility::Visible;
+        if *visibility != Visibility::Visible {
+            *visibility = Visibility::Visible;
+        }
 
         let speed_variation = 0.84 + hash_range(particle.seed, 41, 0.0, 0.48);
         let fall_progress = fract(
@@ -1053,22 +1151,31 @@ fn animate_weather_particles(
         let wind_offset = profile.wind * (1.0 - fall_progress) * 4.5;
         let height = WEATHER_BOTTOM + (1.0 - fall_progress) * (WEATHER_TOP - WEATHER_BOTTOM);
 
-        transform.translation = Vec3::new(
+        let next_translation = Vec3::new(
             base_x + swirl.x + wind_offset.x,
             height,
             base_z + swirl.y + wind_offset.y,
         );
+        if transform.translation != next_translation {
+            transform.translation = next_translation;
+        }
 
         match particle_mode {
             ParticleMode::Mist => {
-                transform.scale = Vec3::new(
+                let next_scale = Vec3::new(
                     0.18 + hash_range(particle.seed, 47, 0.0, 0.18),
                     0.08 + hash_range(particle.seed, 59, 0.0, 0.06),
                     0.18 + hash_range(particle.seed, 71, 0.0, 0.18),
                 );
-                transform.rotation = Quat::from_rotation_y(
+                if transform.scale != next_scale {
+                    transform.scale = next_scale;
+                }
+                let next_rotation = Quat::from_rotation_y(
                     hash01(particle.seed, 67) * TAU + time.elapsed_secs() * 0.08,
                 );
+                if transform.rotation != next_rotation {
+                    transform.rotation = next_rotation;
+                }
             }
             ParticleMode::Rain => {
                 let rain_length = if dominant_kind == WeatherKind::Storm {
@@ -1076,33 +1183,51 @@ fn animate_weather_particles(
                 } else {
                     1.0
                 };
-                transform.scale = Vec3::new(0.035, rain_length, 0.035);
+                let next_scale = Vec3::new(0.035, rain_length, 0.035);
+                if transform.scale != next_scale {
+                    transform.scale = next_scale;
+                }
                 let lean = profile.wind.normalize_or_zero();
-                transform.rotation =
+                let next_rotation =
                     Quat::from_euler(EulerRot::XYZ, 0.22 + lean.y * 0.1, 0.0, -lean.x * 0.18);
+                if transform.rotation != next_rotation {
+                    transform.rotation = next_rotation;
+                }
             }
             ParticleMode::Sand => {
-                transform.scale = Vec3::new(
+                let next_scale = Vec3::new(
                     0.22 + hash_range(particle.seed, 47, 0.0, 0.34),
                     0.08 + hash_range(particle.seed, 59, 0.0, 0.08),
                     0.22 + hash_range(particle.seed, 71, 0.0, 0.34),
                 );
+                if transform.scale != next_scale {
+                    transform.scale = next_scale;
+                }
                 let lean = profile.wind.normalize_or_zero();
-                transform.rotation = Quat::from_euler(
+                let next_rotation = Quat::from_euler(
                     EulerRot::XYZ,
                     0.05 + lean.y * 0.05,
                     swirl_phase + time.elapsed_secs() * 0.22,
                     -lean.x * 0.08,
                 );
+                if transform.rotation != next_rotation {
+                    transform.rotation = next_rotation;
+                }
             }
             ParticleMode::Snow => {
-                transform.scale = Vec3::splat(0.13 + hash_range(particle.seed, 83, 0.0, 0.11));
-                transform.rotation = Quat::from_euler(
+                let next_scale = Vec3::splat(0.13 + hash_range(particle.seed, 83, 0.0, 0.11));
+                if transform.scale != next_scale {
+                    transform.scale = next_scale;
+                }
+                let next_rotation = Quat::from_euler(
                     EulerRot::XYZ,
                     swirl_phase * 0.35,
                     swirl_phase * 0.48,
                     swirl_phase * 0.27,
                 );
+                if transform.rotation != next_rotation {
+                    transform.rotation = next_rotation;
+                }
             }
             ParticleMode::None => {}
         }
