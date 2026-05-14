@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    env,
+    env, fs,
     fs::File,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -23,6 +23,9 @@ fn run() -> Result<(), String> {
         Command::Analyze(config) => {
             let mut analysis = load_analysis(&config)?;
             print_report(&mut analysis, &config);
+            if let Some(path) = &config.html {
+                write_html_report(&analysis, &config, path)?;
+            }
             Ok(())
         }
         Command::Help => {
@@ -43,6 +46,7 @@ struct Config {
     summary: Option<PathBuf>,
     self_summary: Option<PathBuf>,
     events: Option<PathBuf>,
+    html: Option<PathBuf>,
     top: usize,
     min_total_ms: f64,
 }
@@ -57,6 +61,7 @@ impl Command {
             summary: None,
             self_summary: None,
             events: None,
+            html: None,
             top: DEFAULT_TOP,
             min_total_ms: DEFAULT_MIN_TOTAL_MS,
         };
@@ -76,6 +81,10 @@ impl Command {
                 "--events" => {
                     index += 1;
                     config.events = Some(next_path(args, index, "--events")?);
+                }
+                "--html" => {
+                    index += 1;
+                    config.html = Some(next_path(args, index, "--html")?);
                 }
                 "--top" => {
                     index += 1;
@@ -843,6 +852,549 @@ fn print_thread_load(analysis: &Analysis) {
     }
 }
 
+fn write_html_report(analysis: &Analysis, config: &Config, output: &Path) -> Result<(), String> {
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    let html = render_html_report(analysis, config);
+    fs::write(output, html)
+        .map_err(|error| format!("failed to write {}: {error}", output.display()))?;
+    println!("HTML report written: {}", output.display());
+    Ok(())
+}
+
+fn render_html_report(analysis: &Analysis, config: &Config) -> String {
+    let zones = ranked_zones(analysis, config);
+    let max_zone_ms = zones
+        .iter()
+        .map(|zone| zone_total_ms(zone))
+        .fold(0.0, f64::max)
+        .max(1.0);
+    let max_thread_ms = analysis
+        .event_overview
+        .thread_totals
+        .values()
+        .map(|thread| ns_to_ms(thread.total_ns as f64))
+        .fold(0.0, f64::max)
+        .max(1.0);
+    let trace_window = analysis
+        .event_overview
+        .duration_s()
+        .map(|duration| format!("{duration:.2} s"))
+        .unwrap_or_else(|| "n/a".to_string());
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tracy Heuristic Analysis</title>
+  <style>
+    :root {{
+      --ink: #18211f;
+      --muted: #65746f;
+      --paper: #f8f3e8;
+      --panel: #fffdf7;
+      --line: #ddd2bd;
+      --accent: #0b6f6a;
+      --accent-2: #d56a3a;
+      --accent-3: #263d62;
+      --soft: #e8dcc6;
+      --shadow: 0 18px 55px rgba(44, 36, 24, 0.14);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 15% 0%, rgba(213, 106, 58, 0.18), transparent 28rem),
+        radial-gradient(circle at 90% 4%, rgba(11, 111, 106, 0.15), transparent 34rem),
+        linear-gradient(135deg, #f8f3e8 0%, #efe3cd 100%);
+      font-family: Georgia, "Times New Roman", serif;
+    }}
+    main {{
+      width: min(1180px, calc(100vw - 32px));
+      margin: 34px auto 56px;
+    }}
+    .hero {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.6fr);
+      gap: 20px;
+      align-items: stretch;
+      margin-bottom: 20px;
+    }}
+    .title-card, .panel {{
+      background: rgba(255, 253, 247, 0.92);
+      border: 1px solid rgba(221, 210, 189, 0.85);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+    }}
+    .title-card {{
+      padding: 30px;
+      position: relative;
+      overflow: hidden;
+    }}
+    .title-card::after {{
+      content: "";
+      position: absolute;
+      width: 190px;
+      height: 190px;
+      border: 34px solid rgba(11, 111, 106, 0.10);
+      border-radius: 50%;
+      right: -72px;
+      top: -68px;
+    }}
+    h1 {{
+      font-size: clamp(2.2rem, 5vw, 5.1rem);
+      line-height: 0.9;
+      margin: 0 0 18px;
+      letter-spacing: -0.06em;
+    }}
+    h2 {{
+      margin: 0 0 16px;
+      font-size: 1.08rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }}
+    p, .meta {{
+      color: var(--muted);
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+    }}
+    .meta {{
+      display: grid;
+      gap: 8px;
+      font-size: 0.9rem;
+      word-break: break-all;
+    }}
+    .panel {{
+      padding: 22px;
+      margin-bottom: 20px;
+    }}
+    .cards {{
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }}
+    .metric {{
+      background: linear-gradient(180deg, rgba(255,255,255,0.62), rgba(232,220,198,0.34));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+    }}
+    .metric .label {{
+      color: var(--muted);
+      font: 700 0.72rem "Trebuchet MS", Verdana, sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+    .metric .value {{
+      font-size: 1.7rem;
+      font-weight: 700;
+      margin-top: 6px;
+    }}
+    .source-stack {{
+      display: flex;
+      height: 30px;
+      overflow: hidden;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--soft);
+    }}
+    .source-segment {{
+      min-width: 2px;
+    }}
+    .legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 12px;
+      color: var(--muted);
+      font: 0.88rem "Trebuchet MS", Verdana, sans-serif;
+    }}
+    .dot {{
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      margin-right: 6px;
+      border-radius: 50%;
+    }}
+    .zone-bars, .thread-bars {{
+      display: grid;
+      gap: 14px;
+    }}
+    .bar-row {{
+      display: grid;
+      grid-template-columns: minmax(210px, 0.42fr) minmax(260px, 1fr);
+      gap: 14px;
+      align-items: center;
+    }}
+    .bar-label {{
+      min-width: 0;
+      font: 700 0.94rem "Trebuchet MS", Verdana, sans-serif;
+    }}
+    .bar-label small {{
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-weight: 400;
+    }}
+    .bar-track {{
+      position: relative;
+      min-height: 42px;
+      border-radius: 14px;
+      overflow: hidden;
+      background: #efe6d5;
+      border: 1px solid var(--line);
+    }}
+    .bar-fill {{
+      height: 100%;
+      min-width: 3px;
+      border-radius: 14px;
+      background: linear-gradient(90deg, var(--accent), #46a39a);
+    }}
+    .bar-fill.hot {{
+      background: linear-gradient(90deg, var(--accent-2), #f0a064);
+    }}
+    .bar-meta {{
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      color: #1c2623;
+      font: 700 0.82rem "Trebuchet MS", Verdana, sans-serif;
+      text-shadow: 0 1px 0 rgba(255,255,255,0.45);
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+      font-size: 0.88rem;
+    }}
+    th, td {{
+      padding: 10px 9px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }}
+    th {{
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }}
+    .num {{ text-align: right; white-space: nowrap; }}
+    .zone-name {{ font-weight: 700; }}
+    .reason {{ color: var(--muted); max-width: 280px; }}
+    .kind {{
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: rgba(255,255,255,0.55);
+      color: var(--muted);
+      font-size: 0.78rem;
+    }}
+    @media (max-width: 900px) {{
+      .hero, .cards, .bar-row {{ grid-template-columns: 1fr; }}
+      main {{ width: min(100vw - 18px, 1180px); margin-top: 12px; }}
+      table {{ display: block; overflow-x: auto; white-space: nowrap; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="title-card">
+        <h1>Tracy<br>Heuristics</h1>
+        <p>Ranked hotspots from Tracy CSV exports. The score combines self time, inclusive time, p99, max event cost, call frequency, and source locality.</p>
+      </div>
+      <div class="panel">
+        <h2>Inputs</h2>
+        <div class="meta">
+          <div><strong>summary</strong> {summary_path}</div>
+          <div><strong>self</strong> {self_path}</div>
+          <div><strong>events</strong> {event_path}</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cards">
+      {metric_cards}
+    </section>
+
+    <section class="panel">
+      <h2>Source Share</h2>
+      <div class="source-stack">{source_stack}</div>
+      <div class="legend">{source_legend}</div>
+    </section>
+
+    <section class="panel">
+      <h2>Most Useful Zones</h2>
+      <div class="zone-bars">{zone_bars}</div>
+    </section>
+
+    <section class="panel">
+      <h2>Thread Event-Time Load</h2>
+      <div class="thread-bars">{thread_bars}</div>
+    </section>
+
+    <section class="panel">
+      <h2>Zone Details</h2>
+      {zone_table}
+    </section>
+  </main>
+</body>
+</html>"#,
+        summary_path = html_escape(&display_optional_path(analysis.summary_path.as_deref())),
+        self_path = html_escape(&display_optional_path(analysis.self_path.as_deref())),
+        event_path = html_escape(&display_optional_path(analysis.event_path.as_deref())),
+        metric_cards = metric_cards_html(analysis, &trace_window),
+        source_stack = source_stack_html(analysis),
+        source_legend = source_legend_html(analysis),
+        zone_bars = zone_bars_html(&zones, max_zone_ms),
+        thread_bars = thread_bars_html(analysis, max_thread_ms),
+        zone_table = zone_table_html(analysis, &zones),
+    )
+}
+
+fn ranked_zones<'a>(analysis: &'a Analysis, config: &Config) -> Vec<&'a ZoneAnalysis> {
+    analysis
+        .zones
+        .iter()
+        .filter(|zone| {
+            zone_total_ms(zone) >= config.min_total_ms
+                || zone_event_max_ms(zone) >= config.min_total_ms
+        })
+        .take(config.top)
+        .collect()
+}
+
+fn metric_cards_html(analysis: &Analysis, trace_window: &str) -> String {
+    [
+        ("Trace Window", trace_window.to_string()),
+        ("Zones", analysis.zones.len().to_string()),
+        ("Events", analysis.event_overview.total_events.to_string()),
+        (
+            "Inclusive",
+            format!("{:.1} ms", ns_to_ms(analysis.total_inclusive_ns)),
+        ),
+        (
+            "Self",
+            format!("{:.1} ms", ns_to_ms(analysis.total_self_ns)),
+        ),
+    ]
+    .into_iter()
+    .map(|(label, value)| {
+        format!(
+            r#"<div class="metric"><div class="label">{}</div><div class="value">{}</div></div>"#,
+            html_escape(label),
+            html_escape(&value)
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("")
+}
+
+fn source_stack_html(analysis: &Analysis) -> String {
+    let total: f64 = analysis.source_totals.values().sum();
+    if total <= f64::EPSILON {
+        return String::new();
+    }
+    source_kind_order()
+        .iter()
+        .filter_map(|kind| {
+            let value = analysis.source_totals.get(kind).copied().unwrap_or(0.0);
+            if value <= f64::EPSILON {
+                None
+            } else {
+                let width = (value * 100.0 / total).clamp(0.0, 100.0);
+                Some(format!(
+                    r#"<div class="source-segment" title="{} {:.1}%" style="width:{:.3}%;background:{}"></div>"#,
+                    kind.label(),
+                    width,
+                    width,
+                    source_color(*kind)
+                ))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn source_legend_html(analysis: &Analysis) -> String {
+    let total: f64 = analysis.source_totals.values().sum();
+    if total <= f64::EPSILON {
+        return "n/a".to_string();
+    }
+    source_kind_order()
+        .iter()
+        .filter_map(|kind| {
+            let value = analysis.source_totals.get(kind).copied().unwrap_or(0.0);
+            if value <= f64::EPSILON {
+                None
+            } else {
+                Some(format!(
+                    r#"<span><span class="dot" style="background:{}"></span>{} {:.1}%</span>"#,
+                    source_color(*kind),
+                    kind.label(),
+                    value * 100.0 / total
+                ))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn zone_bars_html(zones: &[&ZoneAnalysis], max_zone_ms: f64) -> String {
+    if zones.is_empty() {
+        return "<p>No zones passed the filter.</p>".to_string();
+    }
+    zones
+        .iter()
+        .enumerate()
+        .map(|(index, zone)| {
+            let total_ms = zone_total_ms(zone);
+            let width = (total_ms * 100.0 / max_zone_ms).clamp(0.0, 100.0);
+            let class = if index < 2 { "bar-fill hot" } else { "bar-fill" };
+            let p99 = zone
+                .event_stats
+                .as_ref()
+                .map(|stats| format!("{:.2} ms", ns_to_ms(stats.p99_ns)))
+                .unwrap_or_else(|| "n/a".to_string());
+            format!(
+                r#"<div class="bar-row">
+  <div class="bar-label">{}. {}<small>{}</small></div>
+  <div class="bar-track"><div class="{}" style="width:{:.3}%"></div><div class="bar-meta">{:.2} ms total | {} p99 | {} calls</div></div>
+</div>"#,
+                index + 1,
+                html_escape(&truncate_middle(&zone.key.name, 62)),
+                html_escape(&compact_source(&zone.key.src_file, zone.key.src_line)),
+                class,
+                width,
+                total_ms,
+                html_escape(&p99),
+                zone_call_count(zone)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn thread_bars_html(analysis: &Analysis, max_thread_ms: f64) -> String {
+    if analysis.event_overview.thread_totals.is_empty() {
+        return "<p>No event CSV was provided.</p>".to_string();
+    }
+    let mut threads: Vec<_> = analysis.event_overview.thread_totals.iter().collect();
+    threads.sort_by(|(_, left), (_, right)| right.total_ns.cmp(&left.total_ns));
+    threads
+        .into_iter()
+        .take(8)
+        .map(|(thread, agg)| {
+            let total_ms = ns_to_ms(agg.total_ns as f64);
+            let width = (total_ms * 100.0 / max_thread_ms).clamp(0.0, 100.0);
+            format!(
+                r#"<div class="bar-row">
+  <div class="bar-label">Thread {}<small>{} events</small></div>
+  <div class="bar-track"><div class="bar-fill" style="width:{:.3}%"></div><div class="bar-meta">{:.2} ms | max {}</div></div>
+</div>"#,
+                html_escape(thread),
+                agg.count,
+                width,
+                total_ms,
+                html_escape(&optional_ms(Some(agg.max_ns as f64)))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn zone_table_html(analysis: &Analysis, zones: &[&ZoneAnalysis]) -> String {
+    if zones.is_empty() {
+        return "<p>No zones passed the filter.</p>".to_string();
+    }
+    let rows = zones
+        .iter()
+        .enumerate()
+        .map(|(index, zone)| {
+            let reasons = finding_reasons(zone, analysis).join("; ");
+            format!(
+                r#"<tr>
+  <td class="num">{}</td>
+  <td><div class="zone-name">{}</div><div class="kind">{}</div></td>
+  <td class="num">{:.2}</td>
+  <td class="num">{}</td>
+  <td class="num">{}</td>
+  <td class="num">{}</td>
+  <td class="num">{}</td>
+  <td class="num">{}</td>
+  <td>{}</td>
+  <td class="reason">{}</td>
+</tr>"#,
+                index + 1,
+                html_escape(&zone.key.name),
+                zone.kind.label(),
+                zone_total_ms(zone),
+                html_escape(&optional_ms(zone_self_ns(zone))),
+                zone_call_count(zone),
+                html_escape(&optional_ms(zone_mean_ns(zone))),
+                html_escape(&optional_ms(
+                    zone.event_stats.as_ref().map(|stats| stats.p99_ns)
+                )),
+                html_escape(&optional_ms(zone_max_ns(zone))),
+                html_escape(&compact_source(&zone.key.src_file, zone.key.src_line)),
+                html_escape(&reasons)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        r#"<table>
+  <thead>
+    <tr>
+      <th class="num">Rank</th>
+      <th>Zone</th>
+      <th class="num">Total ms</th>
+      <th class="num">Self</th>
+      <th class="num">Calls</th>
+      <th class="num">Mean</th>
+      <th class="num">P99</th>
+      <th class="num">Max</th>
+      <th>Source</th>
+      <th>Why</th>
+    </tr>
+  </thead>
+  <tbody>{rows}</tbody>
+</table>"#
+    )
+}
+
+fn source_kind_order() -> [SourceKind; 4] {
+    [
+        SourceKind::Project,
+        SourceKind::Dependency,
+        SourceKind::External,
+        SourceKind::Unknown,
+    ]
+}
+
+fn source_color(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Project => "#0b6f6a",
+        SourceKind::Dependency => "#d56a3a",
+        SourceKind::External => "#263d62",
+        SourceKind::Unknown => "#8a8170",
+    }
+}
+
 fn finding_reasons(zone: &ZoneAnalysis, analysis: &Analysis) -> Vec<String> {
     let mut reasons = Vec::new();
     let self_ns = zone_self_ns(zone).unwrap_or_else(|| zone_total_ms(zone) * 1_000_000.0);
@@ -1024,17 +1576,26 @@ fn truncate_middle(value: &str, max_chars: usize) -> String {
     format!("{start}...{end}")
 }
 
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn print_usage() {
     println!("{}", usage_error());
 }
 
 fn usage_error() -> String {
     "usage:
-  cargo run --bin tracy_analyze -- --summary <summary.csv> [--self <self.csv>] [--events <events.csv>]
+  cargo run --bin tracy_analyze -- --summary <summary.csv> [--self <self.csv>] [--events <events.csv>] [--html <report.html>]
   cargo run --bin tracy_analyze -- <summary.csv> [events.csv] [self.csv]
 options:
   --top <n>             number of ranked zones to print (default: 12)
   --min-total-ms <ms>   hide zones below this total/max threshold (default: 0.05)
+  --html <file>         also write a standalone HTML visualization
 
 Expected CSV files should come from tracy-csvexport, preferably with -s ';':
   tracy-csvexport.exe -s ';' trace.tracy
@@ -1051,7 +1612,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{Config, load_analysis, load_summary_csv, normalize_zone_name, percentile};
+    use super::{
+        Config, load_analysis, load_summary_csv, normalize_zone_name, percentile,
+        render_html_report,
+    };
 
     #[test]
     fn normalizes_tracing_field_suffixes() {
@@ -1111,6 +1675,7 @@ mod tests {
             summary: Some(summary.clone()),
             self_summary: None,
             events: Some(events.clone()),
+            html: None,
             top: 10,
             min_total_ms: 0.0,
         };
@@ -1121,6 +1686,49 @@ mod tests {
         assert_eq!(stats.count, 3);
         assert_eq!(stats.thread_count, 2);
         assert!(stats.p95_ns > 6_000_000.0);
+
+        let _ = fs::remove_file(summary);
+        let _ = fs::remove_file(events);
+    }
+
+    #[test]
+    fn html_report_contains_visual_sections() {
+        let summary = unique_temp_path("tracy-summary-html", "csv");
+        let events = unique_temp_path("tracy-events-html", "csv");
+        fs::write(
+            &summary,
+            concat!(
+                "name;src_file;src_line;total_ns;total_perc;counts;mean_ns;min_ns;max_ns;std_ns\n",
+                "foo;D:\\Game511\\src\\foo.rs;10;10000000;100.0;3;3333333;1000000;7000000;1\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &events,
+            concat!(
+                "name;src_file;src_line;ns_since_start;exec_time_ns;thread;value\n",
+                "foo;D:\\Game511\\src\\foo.rs;10;0;1000000;1;\n",
+                "foo;D:\\Game511\\src\\foo.rs;10;2000000;2000000;1;\n",
+                "foo;D:\\Game511\\src\\foo.rs;10;5000000;7000000;2;\n"
+            ),
+        )
+        .unwrap();
+        let config = Config {
+            summary: Some(summary.clone()),
+            self_summary: None,
+            events: Some(events.clone()),
+            html: None,
+            top: 10,
+            min_total_ms: 0.0,
+        };
+        let analysis = load_analysis(&config).unwrap();
+
+        let html = render_html_report(&analysis, &config);
+
+        assert!(html.contains("Tracy<br>Heuristics"));
+        assert!(html.contains("Most Useful Zones"));
+        assert!(html.contains("foo"));
+        assert!(html.contains("source-stack"));
 
         let _ = fs::remove_file(summary);
         let _ = fs::remove_file(events);

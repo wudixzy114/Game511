@@ -9,6 +9,7 @@ param(
     [string]$Trace = "",
     [string]$CsvDir = ".\\logs\\tracy",
     [string]$AnalysisOutput = "",
+    [string]$HtmlOutput = "",
     [string]$Address = "127.0.0.1",
     [int]$Port = 8086,
     [int]$Top = 12,
@@ -100,7 +101,9 @@ function Invoke-TracyCapture {
             }
         }
 
-        if ($capture.ExitCode -ne 0) {
+        $capture.WaitForExit()
+        $capture.Refresh()
+        if ($null -ne $capture.ExitCode -and $capture.ExitCode -ne 0) {
             throw "tracy-capture exited with code $($capture.ExitCode)"
         }
     }
@@ -116,8 +119,12 @@ function Invoke-TracyCapture {
         }
     }
 
-    if (-not (Test-Path $TracePath)) {
+    $traceFile = Get-Item -LiteralPath $TracePath -ErrorAction SilentlyContinue
+    if (-not $traceFile) {
         throw "Tracy trace was not created: $TracePath"
+    }
+    if ($traceFile.Length -le 0) {
+        throw "Tracy trace was empty: $TracePath"
     }
 }
 
@@ -160,14 +167,16 @@ function Export-TracyCsv {
 function Invoke-TracyHeuristicAnalysis {
     param(
         [hashtable]$Csv,
-        [string]$ReportPath
+        [string]$ReportPath,
+        [string]$HtmlPath
     )
 
     $analyzerArgs = @(
         "--summary", $Csv.Summary,
         "--self", $Csv.Self,
         "--events", $Csv.Events,
-        "--top", "$Top"
+        "--top", "$Top",
+        "--html", $HtmlPath
     )
 
     Write-Host "Running Tracy heuristic analyzer"
@@ -176,8 +185,14 @@ function Invoke-TracyHeuristicAnalysis {
         throw "tracy_analyze failed with code $LASTEXITCODE"
     }
 
+    $reportParent = Split-Path -Parent $ReportPath
+    if ($reportParent -and -not (Test-Path $reportParent)) {
+        New-Item -ItemType Directory -Path $reportParent | Out-Null
+    }
+
     $analysis | Tee-Object -FilePath $ReportPath
     Write-Host "Analysis report: $ReportPath"
+    Write-Host "HTML report: $HtmlPath"
 }
 
 Ensure-LogDir
@@ -217,7 +232,12 @@ switch ($Mode) {
         } else {
             "$prefix-analysis.txt"
         }
-        Invoke-TracyHeuristicAnalysis -Csv $csv -ReportPath $reportPath
+        $htmlPath = if ($HtmlOutput) {
+            $HtmlOutput
+        } else {
+            "$prefix-analysis.html"
+        }
+        Invoke-TracyHeuristicAnalysis -Csv $csv -ReportPath $reportPath -HtmlPath $htmlPath
     }
     "flamegraph" {
         if (-not (Get-Command cargo-flamegraph -ErrorAction SilentlyContinue) -and
