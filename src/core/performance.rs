@@ -394,12 +394,10 @@ pub fn track_frame_timing(
         let landmarks_ms = update.previous_frame_phase_ms(PerformancePhase::Landmarks);
         let intent_ms = update.previous_frame_phase_ms(PerformancePhase::Intent);
         let journey_ms = update.previous_frame_phase_ms(PerformancePhase::Journey);
-        let material_gallery_ms =
-            update.previous_frame_phase_ms(PerformancePhase::MaterialGallery);
+        let material_gallery_ms = update.previous_frame_phase_ms(PerformancePhase::MaterialGallery);
         let material_generation_ms =
             update.previous_frame_phase_ms(PerformancePhase::MaterialGeneration);
-        let material_upload_ms =
-            update.previous_frame_phase_ms(PerformancePhase::MaterialUpload);
+        let material_upload_ms = update.previous_frame_phase_ms(PerformancePhase::MaterialUpload);
         let places_ms = update.previous_frame_phase_ms(PerformancePhase::Places);
         let physics_broad_phase_ms =
             update.previous_frame_phase_ms(PerformancePhase::PhysicsBroadPhase);
@@ -415,13 +413,10 @@ pub fn track_frame_timing(
         let signs_ms = update.previous_frame_phase_ms(PerformancePhase::Signs);
         let ui_ms = update.previous_frame_phase_ms(PerformancePhase::Ui);
         let village_ms = update.previous_frame_phase_ms(PerformancePhase::Village);
-        let world_collision_ms =
-            update.previous_frame_phase_ms(PerformancePhase::WorldCollision);
+        let world_collision_ms = update.previous_frame_phase_ms(PerformancePhase::WorldCollision);
         let world_impostor_ms = update.previous_frame_phase_ms(PerformancePhase::WorldImpostor);
-        let world_streaming_ms =
-            update.previous_frame_phase_ms(PerformancePhase::WorldStreaming);
-        let world_visibility_ms =
-            update.previous_frame_phase_ms(PerformancePhase::WorldVisibility);
+        let world_streaming_ms = update.previous_frame_phase_ms(PerformancePhase::WorldStreaming);
+        let world_visibility_ms = update.previous_frame_phase_ms(PerformancePhase::WorldVisibility);
         let profiled_phase_ms = PerformancePhase::ALL
             .iter()
             .map(|phase| update.previous_frame_phase_ms(*phase))
@@ -567,7 +562,9 @@ fn should_log_frame(frame_count: u64, interval: u32) -> bool {
 }
 
 fn lock_ignoring_poison<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub fn report_performance_session_summary(

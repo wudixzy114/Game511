@@ -113,11 +113,11 @@ pub fn init_logging(config: &AppConfig) -> Result<(), DaoError> {
     if tracy_enabled() {
         #[cfg(feature = "tracy-profile")]
         {
-        tracing::subscriber::set_global_default(subscriber.with(TracyLayer::default()))?;
-        tracing::info!(
-            target: "dao_game::bootstrap",
-            "tracy profiling enabled"
-        );
+            tracing::subscriber::set_global_default(subscriber.with(TracyLayer::default()))?;
+            tracing::info!(
+                target: "dao_game::bootstrap",
+                "tracy profiling enabled"
+            );
         }
 
         #[cfg(not(feature = "tracy-profile"))]
