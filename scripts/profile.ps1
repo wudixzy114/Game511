@@ -1,10 +1,9 @@
 param(
-    [ValidateSet("tracy", "tracy-analyze", "flamegraph")]
+    [ValidateSet("tracy", "tracy-analyze")]
     [string]$Mode = "tracy",
     [double]$Seconds = 12.0,
     [ValidateSet("presentation", "exploration", "material-gallery")]
     [string]$GameMode = "presentation",
-    [string]$Output = ".\\logs\\flamegraph.svg",
     [string]$TracyDir = "D:\\windows-0.13.1",
     [string]$Trace = "",
     [string]$CsvDir = ".\\logs\\tracy",
@@ -13,6 +12,7 @@ param(
     [string]$Address = "127.0.0.1",
     [int]$Port = 8086,
     [int]$Top = 12,
+    [int]$TraceKeep = 2,
     [double]$CaptureTimeoutSeconds = 180.0
 )
 
@@ -38,6 +38,49 @@ function Resolve-TracyTool {
         throw "Tracy tool was not found: $tool"
     }
     return (Resolve-Path $tool).Path
+}
+
+function Remove-OldTracyTraces {
+    param(
+        [string]$Directory,
+        [int]$Keep = 2
+    )
+
+    if ($Keep -lt 1) {
+        throw "TraceKeep must be at least 1."
+    }
+    if (-not (Test-Path -LiteralPath $Directory)) {
+        return
+    }
+
+    $resolvedDir = (Resolve-Path -LiteralPath $Directory).Path.TrimEnd('\', '/')
+    $oldTraces = Get-ChildItem -LiteralPath $Directory -Filter "*.tracy" -File |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -Skip $Keep
+
+    foreach ($trace in $oldTraces) {
+        $resolvedTrace = (Resolve-Path -LiteralPath $trace.FullName).Path
+        if (-not $resolvedTrace.StartsWith($resolvedDir, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove trace outside CsvDir: $resolvedTrace"
+        }
+        Write-Host "Removing old Tracy trace: $resolvedTrace"
+        Remove-Item -LiteralPath $resolvedTrace
+    }
+}
+
+function Test-PathInsideDirectory {
+    param(
+        [string]$Path,
+        [string]$Directory
+    )
+
+    if (-not (Test-Path -LiteralPath $Path) -or -not (Test-Path -LiteralPath $Directory)) {
+        return $false
+    }
+
+    $resolvedDir = (Resolve-Path -LiteralPath $Directory).Path.TrimEnd('\', '/')
+    $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
+    return $resolvedPath.StartsWith($resolvedDir, [StringComparison]::OrdinalIgnoreCase)
 }
 
 function Start-ProfiledGame {
@@ -217,10 +260,13 @@ switch ($Mode) {
             $tracePath = Join-Path $CsvDir "tracy-$stamp.tracy"
         }
 
-        if (Test-Path $tracePath) {
+        if (Test-Path -LiteralPath $tracePath) {
             Write-Host "Using existing Tracy trace: $tracePath"
         } else {
             Invoke-TracyCapture -TracePath $tracePath
+            if (Test-PathInsideDirectory -Path $tracePath -Directory $CsvDir) {
+                Remove-OldTracyTraces -Directory $CsvDir -Keep $TraceKeep
+            }
         }
 
         $baseName = [IO.Path]::GetFileNameWithoutExtension($tracePath)
@@ -238,18 +284,5 @@ switch ($Mode) {
             "$prefix-analysis.html"
         }
         Invoke-TracyHeuristicAnalysis -Csv $csv -ReportPath $reportPath -HtmlPath $htmlPath
-    }
-    "flamegraph" {
-        if (-not (Get-Command cargo-flamegraph -ErrorAction SilentlyContinue) -and
-            -not (cargo --list | Select-String "flamegraph")) {
-            throw "cargo-flamegraph is not installed. Run: cargo install flamegraph"
-        }
-
-        $env:DAO_AUTO_EXIT_SECONDS = "$Seconds"
-        $env:DAO_AUTO_START_MODE = $GameMode
-
-        Write-Host "Capturing flamegraph: mode=$GameMode seconds=$Seconds output=$Output"
-        cargo flamegraph --bin dao_game --output $Output
-        Write-Host "Flamegraph written to: $Output"
     }
 }
