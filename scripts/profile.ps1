@@ -13,7 +13,8 @@ param(
     [int]$Port = 8086,
     [int]$Top = 12,
     [int]$TraceKeep = 2,
-    [double]$CaptureTimeoutSeconds = 180.0
+    [double]$CaptureTimeoutSeconds = 180.0,
+    [switch]$KeepCsv
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,6 +82,23 @@ function Test-PathInsideDirectory {
     $resolvedDir = (Resolve-Path -LiteralPath $Directory).Path.TrimEnd('\', '/')
     $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
     return $resolvedPath.StartsWith($resolvedDir, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Remove-GeneratedCsv {
+    param(
+        [hashtable]$Csv
+    )
+
+    if ($KeepCsv) {
+        return
+    }
+
+    foreach ($path in @($Csv.Summary, $Csv.Self, $Csv.Events)) {
+        if ($path -and (Test-Path -LiteralPath $path)) {
+            Write-Host "Removing intermediate Tracy CSV: $path"
+            Remove-Item -LiteralPath $path
+        }
+    }
 }
 
 function Start-ProfiledGame {
@@ -284,5 +302,6 @@ switch ($Mode) {
             "$prefix-analysis.html"
         }
         Invoke-TracyHeuristicAnalysis -Csv $csv -ReportPath $reportPath -HtmlPath $htmlPath
+        Remove-GeneratedCsv -Csv $csv
     }
 }

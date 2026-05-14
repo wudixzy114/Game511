@@ -8,7 +8,9 @@ param(
     [string]$TracyCsvDir = ".\\logs\\tracy",
     [int]$Top = 12,
     [int]$TraceKeep = 2,
-    [double]$CaptureTimeoutSeconds = 180.0
+    [int]$ResultKeep = 1,
+    [double]$CaptureTimeoutSeconds = 180.0,
+    [switch]$KeepIntermediates
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,6 +61,51 @@ function Read-TextFile {
         return Get-Content -Raw -Encoding UTF8 -LiteralPath $Path
     }
     return ""
+}
+
+function Remove-GeneratedFile {
+    param([AllowNull()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+    if (Test-Path -LiteralPath $Path) {
+        Write-Host "Removing intermediate file: $Path"
+        Remove-Item -LiteralPath $Path
+    }
+}
+
+function Remove-IntermediateFiles {
+    param([string[]]$Paths)
+    if ($KeepIntermediates) {
+        return
+    }
+    foreach ($path in $Paths) {
+        Remove-GeneratedFile -Path $path
+    }
+}
+
+function Remove-OldUltimateResults {
+    param(
+        [string]$Directory,
+        [int]$Keep = 1
+    )
+
+    if ($Keep -lt 1) {
+        throw "ResultKeep must be at least 1."
+    }
+    if (-not (Test-Path -LiteralPath $Directory)) {
+        return
+    }
+
+    foreach ($pattern in @("ultimate-*-ai.md", "ultimate-*-report.html")) {
+        $oldFiles = Get-ChildItem -LiteralPath $Directory -Filter $pattern -File |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -Skip $Keep
+        foreach ($file in $oldFiles) {
+            Write-Host "Removing old ultimate result: $($file.FullName)"
+            Remove-Item -LiteralPath $file.FullName
+        }
+    }
 }
 
 function Convert-PhasesToMarkdown {
@@ -140,22 +187,32 @@ $perfHtml = "$prefix-perf.html"
 $aiReport = "$prefix-ai.md"
 $webReport = "$prefix-report.html"
 $perfLog = Join-Path $LogDir "performance.log"
+$applicationLog = Join-Path $LogDir "application.log"
+$errorLog = Join-Path $LogDir "error.log"
 $perfLogSnapshot = "$prefix-performance.log"
 
 Write-Host "Ultimate performance run: mode=$GameMode seconds=$Seconds"
 Write-Host "Step 1/4: capture Tracy + perf data"
-& powershell -NoProfile -ExecutionPolicy Bypass -File ".\\scripts\\profile.ps1" `
-    -Mode tracy-analyze `
-    -Seconds $Seconds `
-    -GameMode $GameMode `
-    -TracyDir $TracyDir `
-    -Trace $tracePath `
-    -CsvDir $TracyCsvDir `
-    -AnalysisOutput $tracyTxt `
-    -HtmlOutput $tracyHtml `
-    -Top $Top `
-    -TraceKeep $TraceKeep `
-    -CaptureTimeoutSeconds $CaptureTimeoutSeconds
+$profileArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", ".\\scripts\\profile.ps1",
+    "-Mode", "tracy-analyze",
+    "-Seconds", "$Seconds",
+    "-GameMode", $GameMode,
+    "-TracyDir", $TracyDir,
+    "-Trace", $tracePath,
+    "-CsvDir", $TracyCsvDir,
+    "-AnalysisOutput", $tracyTxt,
+    "-HtmlOutput", $tracyHtml,
+    "-Top", "$Top",
+    "-TraceKeep", "$TraceKeep",
+    "-CaptureTimeoutSeconds", "$CaptureTimeoutSeconds"
+)
+if ($KeepIntermediates) {
+    $profileArgs += "-KeepCsv"
+}
+& powershell @profileArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Tracy capture/analyze failed with code $LASTEXITCODE"
 }
@@ -208,13 +265,10 @@ Duration: $Seconds s
 
 ## Verdict Inputs
 
-- Perf log: $(Get-RelativePathText $perfLogSnapshot)
-- Perf text: $(Get-RelativePathText $perfTxt)
-- Perf HTML: $(Get-RelativePathText $perfHtml)
+- Current perf log: $(Get-RelativePathText $perfLog)
 - Tracy trace: $(Get-RelativePathText $tracePath)
-- Tracy text: $(Get-RelativePathText $tracyTxt)
-- Tracy HTML: $(Get-RelativePathText $tracyHtml)
 - Human HTML summary: $(Get-RelativePathText $webReport)
+- Perf text and Tracy text are embedded below; intermediate subreports are deleted by default.
 
 ## Perf Summary
 
@@ -259,8 +313,8 @@ $phaseRows = Convert-PhasesToHtmlRows $perf.phases
 $tracyTextHtml = Html-Escape $tracyText
 $perfTextHtml = Html-Escape $perfText
 $aiPathRel = Html-Escape (Get-RelativePathText $aiReport)
-$perfHtmlRel = Html-Escape (Get-RelativePathText $perfHtml)
-$tracyHtmlRel = Html-Escape (Get-RelativePathText $tracyHtml)
+$tracePathRel = Html-Escape (Get-RelativePathText $tracePath)
+$perfLogRel = Html-Escape (Get-RelativePathText $perfLog)
 $web = @"
 <!doctype html>
 <html lang="zh-CN">
@@ -309,8 +363,8 @@ $web = @"
         <h2>Artifacts</h2>
         <div class="meta">
           <div>AI report: <a href="$aiPathRel">$aiPathRel</a></div>
-          <div>Perf detail: <a href="$perfHtmlRel">$perfHtmlRel</a></div>
-          <div>Tracy detail: <a href="$tracyHtmlRel">$tracyHtmlRel</a></div>
+          <div>Tracy trace: <a href="$tracePathRel">$tracePathRel</a></div>
+          <div>Perf log: <a href="$perfLogRel">$perfLogRel</a></div>
         </div>
       </div>
     </section>
@@ -351,6 +405,18 @@ $web = @"
 </html>
 "@
 $web | Set-Content -Encoding UTF8 -Path $webReport
+
+Remove-IntermediateFiles -Paths @(
+    $tracyTxt,
+    $tracyHtml,
+    $perfTxt,
+    $perfJsonPath,
+    $perfHtml,
+    $perfLogSnapshot,
+    $applicationLog,
+    $errorLog
+)
+Remove-OldUltimateResults -Directory $OutputDir -Keep $ResultKeep
 
 Write-Host "Ultimate AI report: $aiReport"
 Write-Host "Ultimate HTML report: $webReport"
